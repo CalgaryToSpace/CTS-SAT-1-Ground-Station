@@ -26,3 +26,13 @@ cts1_gs_dashboard = { workspace = true }
 
 [tool.uv.workspace]
 members = [ "packages/*" ]
+
+[tool.pyright]
+typeCheckingMode = "strict"
+
+[tool.ruff.lint]
+select = ["ALL", "ANN"]
+ignore = [
+    "S101", # Allow asserts.
+    "D", # Docstring rules are too strict.
+]
