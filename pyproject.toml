@@ -6,6 +6,9 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "cts1_gs_forwarder",
+    "cts1_gs_tool_lib",
+    "cts1_gs_database",
+    "cts1_gs_dashboard",
 ]
 
 [dependency-groups]
@@ -16,6 +19,9 @@ dev = [
 
 [tool.uv.sources]
 cts1_gs_forwarder = { workspace = true }
+cts1_gs_tool_lib = { workspace = true }
+cts1_gs_database = { workspace = true }
+cts1_gs_dashboard = { workspace = true }
 
 [tool.uv.workspace]
 members = [ "packages/*" ]
