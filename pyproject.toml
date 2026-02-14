@@ -1,11 +1,11 @@
 [project]
-name = "my-app"
+name = "cts1_gs_parent"
 version = "0.1.0"
-description = "An example of uv workspace"
+description = "Ground Station documentation and software for CTS-SAT-1 (FrontierSat)"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "my-lib",
+    "cts1_gs_forwarder",
 ]
 
 [dependency-groups]
@@ -15,7 +15,7 @@ dev = [
 ]
 
 [tool.uv.sources]
-my-lib = { workspace = true }
+cts1_gs_forwarder = { workspace = true }
 
 [tool.uv.workspace]
 members = [ "packages/*" ]
