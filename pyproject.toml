@@ -1,0 +1,28 @@
+[project]
+name = "cts1_gs_parent"
+version = "0.1.0"
+description = "Ground Station documentation and software for CTS-SAT-1 (FrontierSat)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "cts1_gs_forwarder",
+    "cts1_gs_tool_lib",
+    "cts1_gs_database",
+    "cts1_gs_dashboard",
+]
+
+[dependency-groups]
+dev = [
+    "ruff >= 0.8.1",
+    "pytest >= 8.3.4",
+    "pyright",
+]
+
+[tool.uv.sources]
+cts1_gs_forwarder = { workspace = true }
+cts1_gs_tool_lib = { workspace = true }
+cts1_gs_database = { workspace = true }
+cts1_gs_dashboard = { workspace = true }
+
+[tool.uv.workspace]
+members = [ "packages/*" ]
