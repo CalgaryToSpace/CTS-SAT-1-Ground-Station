@@ -1,0 +1,55 @@
+[project]
+name = "cts1_ground_support"
+version = "v0-dev"
+requires-python = ">=3.12"
+authors = [{name = "CalgaryToSpace"},]
+maintainers = [{name = "CalgaryToSpace"}]
+description = "CalgaryToSpace CTS-SAT-1 Ground Support Software"
+readme = "README.md"
+keywords = ["CalgaryToSpace", "satellite", "ground support", "space", "cubesat"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Programming Language :: Python"
+]
+
+dependencies = [
+  "GitPython<4,>3",
+  "pyserial>3,<4",
+  "loguru~=0.7.2",
+  "dash>2,<3",
+  "dash-bootstrap-components>1,<2",
+  "dash-split-pane>=1,<2",
+  "pytz",
+  "orjson>3,<4",
+
+  # sortedcontainers provides SortedDict for efficiency.
+  "sortedcontainers>=2.4.0,<3",
+]
+
+[dependency-groups]
+dev = [
+  "pytest",
+  "twine",
+  "wheel",
+  "hatchling",
+  "ruff==0.12.7",
+  "coverage", # For CI.
+  "pyright", # For type checking.
+  "sortedcontainers-stubs==2.4.2" # Type checking for sortedcontainers.
+]
+
+[project.urls]
+Homepage = "https://calgarytospace.ca/"
+# Documentation = "https://readthedocs.org"
+Repository = "https://github.com/CalgaryToSpace/CTS-SAT-1-OBC-Firmware"
+
+[project.scripts]
+cts1_ground_support = "cts1_ground_support:main"
+cts1_gs_terminal = "cts1_ground_support:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cts1_ground_support"]
