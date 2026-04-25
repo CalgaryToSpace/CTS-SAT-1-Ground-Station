@@ -18,7 +18,7 @@ class RxTxLogEntry:
     """A class to store an entry in the RX/TX log."""
 
     raw_bytes: bytes
-    entry_type: Literal["transmit", "receive", "notice", "error"]
+    entry_type: Literal["transmit", "receive", "notice", "error", "input"]
     timestamp_sec: float = field(default_factory=lambda: time.time())
 
     @property
@@ -34,6 +34,9 @@ class RxTxLogEntry:
 
         if self.entry_type == "error":
             return {"color": "#FF6666"}
+        
+        if self.entry_type == "input":
+            return {"color": "#78C4FF"}
 
         msg = f"Invalid entry type: {self.entry_type}"
         raise ValueError(msg)
@@ -57,6 +60,8 @@ class RxTxLogEntry:
         # TODO: make these equals-signs a fixed width
         if self.entry_type == "error":
             return f"{prefix}==================== {self.raw_bytes.decode()} ===================="
+        if self.entry_type == "input":
+            return f"{prefix} {self.raw_bytes.decode()}"
 
         nice_str = bytes_to_nice_str(
             self.raw_bytes,
