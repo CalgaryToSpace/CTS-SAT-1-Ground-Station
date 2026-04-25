@@ -27,6 +27,7 @@ from cts1_telecommand_input.serial_util import list_serial_ports
 from cts1_telecommand_input.telecommand_array_parser import parse_telecommand_list_from_repo
 from cts1_telecommand_input.telecommand_preview import generate_telecommand_preview
 from cts1_telecommand_input.telecommand_types import TelecommandDefinition
+from cts1_telecommand_input.file_util import save_command, get_default_filename
 from cts1_telecommand_input.terminal_app.app_config import MAX_ARGS_PER_TELECOMMAND
 from cts1_telecommand_input.terminal_app.app_store import app_store
 from cts1_telecommand_input.terminal_app.app_types import UART_PORT_NAME_DISCONNECTED, RxTxLogEntry
@@ -255,7 +256,7 @@ def send_button_callback(
         logger.error(msg)
         app_store.append_to_rxtx_log(RxTxLogEntry(msg.encode(), "error"))
         return
-
+    
     logger.info(f"Adding command to queue: {command_preview}")
 
     send_command_to_device(command_preview)
@@ -512,6 +513,33 @@ def send_immediate_execution_command_callback(n_clicks: int) -> None:
     time.sleep(1)
     # Equivalent for AX100: TCMD_handle_ax100_tcmds_interval_ms
 
+@callback(
+    Input("save-button", "n_clicks"),
+    State("stored-command-preview", "data"),
+    State("filename-input", "value"),
+    prevent_initial_call=True,
+)
+def save_button_callback(n_clicks, command_preview, filename):
+    logger.info(f"Save button clicked ({n_clicks=})!")
+
+    if not command_preview:
+        msg = "No command to save."
+        logger.error(msg)
+        app_store.append_to_rxtx_log(RxTxLogEntry(msg.encode(), "error"))
+        return
+
+    try:
+        filepath = save_command(command_preview, filename)
+        msg1 = f"Saved → {filepath.name}"
+        msg2 = f"Telecommand → {command_preview}"
+        logger.info(msg1)
+        logger.info(msg2)
+        app_store.append_to_rxtx_log(RxTxLogEntry(msg1.encode(), "input"))
+        app_store.append_to_rxtx_log(RxTxLogEntry(msg2.encode(), "input"))
+
+    except OSError as e:
+        logger.error(f"Failed to save command: {e}")
+        app_store.append_to_rxtx_log(RxTxLogEntry(str(e).encode(), "error"))
 
 def _generate_left_pane_config_tab() -> list:
     """Make the left pane of the GUI, to be put inside a Col."""
@@ -648,6 +676,25 @@ def _generate_left_pane_send_commands(
             ),
         ),
         html.Hr(),
+        html.Div(
+            dbc.Label("Save Telecommands to a File:"),
+        ),
+        dbc.FormFloating(
+            [
+                dbc.Input(
+                    id="filename-input",
+                    type="text",
+                    placeholder="20260422T1322",
+                    style={"fontFamily": "monospace"},
+                ),
+                dbc.Label(
+                    "Filename to save command (e.g. 20260422T1322)",
+                    html_for="filename-input",
+                ),
+            ],
+            className="mb-3",
+        ),
+        html.Hr(),
         html.Div(id="command-preview-container", className="mb-3"),
         dbc.Row(
             [
@@ -672,6 +719,14 @@ def _generate_left_pane_send_commands(
                     n_clicks=0,
                     className="m-1 px-5",
                     style={"width": "auto"},
+                ),
+                dbc.Button(
+                    "Save File 💾",
+                    id="save-button",
+                    n_clicks=0,
+                    className="m-1 px-3",
+                    style={"width": "auto"},
+                    color="secondary",
                 ),
             ],
             justify="center",
@@ -717,7 +772,7 @@ def generate_left_pane(*, selected_command_name: str, enable_advanced: bool) -> 
                     children=_generate_left_pane_config_tab(),
                 ),
                 dbc.Tab(
-                    label="Commands",
+                    label="Telecommand Input",
                     children=_generate_left_pane_send_commands(
                         selected_command_name=selected_command_name,
                         enable_advanced=enable_advanced,
