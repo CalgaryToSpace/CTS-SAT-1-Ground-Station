@@ -27,7 +27,7 @@ from cts1_telecommand_input.serial_util import list_serial_ports
 from cts1_telecommand_input.telecommand_array_parser import parse_telecommand_list_from_repo
 from cts1_telecommand_input.telecommand_preview import generate_telecommand_preview
 from cts1_telecommand_input.telecommand_types import TelecommandDefinition
-from cts1_telecommand_input.file_util import save_command, get_default_filename
+from cts1_telecommand_input.file_util import save_command, parse_datetime_to_timestamp_ms
 from cts1_telecommand_input.terminal_app.app_config import MAX_ARGS_PER_TELECOMMAND
 from cts1_telecommand_input.terminal_app.app_store import app_store
 from cts1_telecommand_input.terminal_app.app_types import UART_PORT_NAME_DISCONNECTED, RxTxLogEntry
@@ -140,6 +140,7 @@ def handle_uart_port_change(uart_port_name: str) -> None:
     Input("telecommand-dropdown", "value"),
     Input("suffix-tags-checklist", "value"),
     Input("input-tsexec-suffix-tag", "value"),
+    Input("input-tssent-datetime", "value"),
     Input("input-resp_fname-suffix-tag", "value"),
     Input("extra-suffix-tags-input", "value"),  # Advanced feature for debugging
     Input("uart-update-interval-component", "n_intervals"),
@@ -151,6 +152,7 @@ def update_stored_command_preview(
     selected_command_name: str,
     suffix_tags_checklist: list[str] | None,
     tsexec_suffix_tag: str | None,
+    tssent_datetime_input: str | None,
     resp_fname_suffix_tag: str | None,
     extra_suffix_tags_input: str,
     _n_intervals: int,
@@ -170,6 +172,14 @@ def update_stored_command_preview(
     if resp_fname_suffix_tag == "":
         resp_fname_suffix_tag = None
 
+    tssent_timestamp_ms = None
+
+    if tssent_datetime_input:
+        tssent_timestamp_ms = parse_datetime_to_timestamp_ms(tssent_datetime_input)
+
+        if tssent_timestamp_ms is None:
+            logger.error(f"Invalid tssent datetime: {tssent_datetime_input}")
+
     # Get the selected command and its arguments.
     selected_command = get_telecommand_by_name(selected_command_name)
     arg_vals = [every_arg_value[arg_num] for arg_num in range(selected_command.number_of_args)]
@@ -179,16 +189,23 @@ def update_stored_command_preview(
 
     enable_tssent_suffix = "enable_tssent_tag" in suffix_tags_checklist
 
+    if tssent_timestamp_ms is not None:
+        enable_tssent_suffix = False  # override checkbox
+
     extra_suffix_tags = {}
+
     if extra_suffix_tags_input:
         try:
-            extra_suffix_tags = json.loads(extra_suffix_tags_input)
+            parsed = json.loads(extra_suffix_tags_input)
+            if isinstance(parsed, dict):
+                extra_suffix_tags.update(parsed)
+            else:
+                logger.error("Extra suffix tags input is not a dictionary")
         except json.JSONDecodeError as e:
-            logger.error(f"Error decoding JSON in extra-suffix-tags-input field: {e}")
+            logger.error(f"Error decoding JSON: {e}")
 
-        if not isinstance(extra_suffix_tags, dict):
-            logger.error(f"Extra suffix tags input is not a dictionary: {extra_suffix_tags}")
-            extra_suffix_tags = {}
+    if tssent_timestamp_ms is not None:
+        extra_suffix_tags["tssent"] = str(tssent_timestamp_ms)
 
     return generate_telecommand_preview(
         tcmd_name=selected_command_name,
@@ -388,6 +405,15 @@ def update_selected_tcmd_info(selected_command_name: str) -> list:
         html.Pre(docstring, id="selected-tcmd-info", className="mb-3"),
     ]
 
+@callback(
+    Output("suffix-tags-checklist", "value"),
+    Input("input-tssent-datetime", "value"),
+    State("suffix-tags-checklist", "value"),
+)
+def disable_checkbox_when_datetime_present(dt_value, checklist_values):
+    if dt_value:
+        return [v for v in (checklist_values or []) if v != "enable_tssent_tag"]
+    return checklist_values
 
 def generate_rx_tx_log(
     *,
@@ -624,21 +650,38 @@ def _generate_left_pane_send_commands(
             ]
         ),
         html.Div(
-            dbc.FormFloating(
-                [
-                    dbc.Input(
-                        type="text",
-                        id="input-tsexec-suffix-tag",
-                        placeholder="Timestamp to Execute Command (@tsexec=xxx)",
-                        style={"fontFamily": "monospace"},
-                    ),
-                    dbc.Label(
-                        "Timestamp to Execute Command (@tsexec=xxx)",
-                        html_for="input-tsexec-suffix-tag",
-                    ),
-                ],
-                className="mb-3",
-            ),
+            [
+                dbc.FormFloating(
+                    [
+                        dbc.Input(
+                            type="text",
+                            id="input-tsexec-suffix-tag",
+                            placeholder="Timestamp to Execute Command (@tsexec=xxx)",
+                            style={"fontFamily": "monospace"},
+                        ),
+                        dbc.Label(
+                            "Timestamp to Execute Command (@tsexec=xxx)",
+                            html_for="input-tsexec-suffix-tag",
+                        ),
+                    ],
+                    className="mb-3",
+                ),
+                dbc.FormFloating(
+                    [
+                        dbc.Input(
+                            type="text",
+                            id="input-tssent-datetime",
+                            placeholder="YYYY-MM-DD HH:MM MST or UTC",
+                            style={"fontFamily": "monospace"},
+                        ),
+                        dbc.Label(
+                            "Timestamp to Execute Command (e.g. 20260425T1613 MST or UTC)",
+                            html_for="input-tssent-datetime",
+                        ),
+                    ],
+                    className="mb-3",
+                ),
+            ]
         ),
         html.Div(
             dbc.FormFloating(
@@ -777,7 +820,7 @@ def generate_left_pane(*, selected_command_name: str, enable_advanced: bool) -> 
                         selected_command_name=selected_command_name,
                         enable_advanced=enable_advanced,
                     ),
-                ),
+                ), #TODO: Add in transmit and dashboard tabs rework the Connect and Config and Tools tabs
                 dbc.Tab(
                     label="Tools",
                     children=_generate_left_pane_tools(),
