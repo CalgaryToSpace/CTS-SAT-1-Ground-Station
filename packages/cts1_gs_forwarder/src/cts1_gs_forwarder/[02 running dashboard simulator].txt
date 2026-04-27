@@ -1,0 +1,11 @@
+To simulate one standard dashboard:
+python dashboard_simulator.py
+
+To simulate one fast daskboard:
+python fast_dashboard_simulator.py
+
+To simulate 100 standard dashboards:
+python many_dashboard_simulator.py
+
+To simulate 100 fast dashboards:
+python stress_dashboard_simulator.py

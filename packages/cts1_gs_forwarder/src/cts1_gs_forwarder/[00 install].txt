@@ -1,0 +1,7 @@
+You will need to contact Karynn for the most up to date files:
+	.env
+	fullchain.pem
+	privkey.pem
+
+To run the python files, please have the following installed using "pip ibstall ...":
+pip install fastapi uvicorn websockets pydantic prometheus-client dotenv
