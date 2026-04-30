@@ -80,12 +80,19 @@ Device Address:
 
 ## Part 4: Python Setup
 
-Python dependencies:
+1. Install `gr-satellites`:
+
+```bash
+sudo add-apt-repository ppa:daniestevez/gr-satellites
+sudo apt-get update
+sudo apt-get install gr-satellites
+```
+
+2. Make a virtual environment (`uv`-based guide coming soon).
+3. Activate venv, then install Python dependencies:
 
 ```
 pip install xtea
 pip install crc
 pip install reed_solomon_ccsds
 ```
-
-Copy files from git repo into this folder and then follow the instructions for getting the transciever up and running
