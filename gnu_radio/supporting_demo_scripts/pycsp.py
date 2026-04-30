@@ -1,5 +1,9 @@
-import xtea, random, hashlib, crc
-from typing import Literal, Union
+import hashlib
+import random
+from typing import Literal
+
+import crc
+import xtea
 
 
 class HeaderV1:
@@ -13,7 +17,7 @@ class HeaderV1:
     Big endian is the standard implementation
     """
 
-    __slots__ = ("src", "dst", "dport", "sport", "prio", "flags", "endian")
+    __slots__ = ("dport", "dst", "endian", "flags", "prio", "sport", "src")
 
     PRIO_CRITICAL = 0
     PRIO_HIGH = 1
@@ -58,13 +62,13 @@ class HeaderV1:
         self.prio = prio
         self.flags = flags
 
-        if not hmac is None:
+        if hmac is not None:
             self.hmac = hmac
-        if not xtea is None:
+        if xtea is not None:
             self.xtea = xtea
-        if not rdp is None:
+        if rdp is not None:
             self.rdp = rdp
-        if not crc is None:
+        if crc is not None:
             self.crc = crc
 
         self.endian = endian
@@ -185,7 +189,7 @@ class HMACEngine:
         self._ipad = bytes(b ^ 0x36 for b in rkey)
         self._opad = bytes(b ^ 0x5C for b in rkey)
 
-    def __call__(self, data: Union[bytes, bytearray, memoryview]):
+    def __call__(self, data: bytes | bytearray | memoryview):
         sha1 = hashlib.sha1()
         sha1.update(self._ipad)
         sha1.update(data)
@@ -214,14 +218,14 @@ class XTEAEngine:
 
         self.ciper = xtea.new(rkey, mode=xtea.MODE_CTR, counter=counter)
 
-    def encrypt(self, data: Union[bytes, bytearray, memoryview], nonce: bytes[4]):
+    def encrypt(self, data: bytes | bytearray | memoryview, nonce: bytes[4]):
         assert len(nonce) == 4, "len(nonce) must be 4"
         self.nonce = nonce
         self.count = 1
         self.firstrun = self.legacy_unsafe
         return self.ciper.encrypt(data)
 
-    def decrypt(self, data: Union[bytes, bytearray, memoryview], nonce: bytes[4]):
+    def decrypt(self, data: bytes | bytearray | memoryview, nonce: bytes[4]):
         return self.encrypt(data, nonce)
 
 
@@ -347,8 +351,7 @@ class Packet:
                 if self.exception:
                     if self.header.xtea and self.xtea_engine:
                         raise ValueError("CRC ERROR after decryption")
-                    else:
-                        raise ValueError("CRC ERROR")
+                    raise ValueError("CRC ERROR")
                 return
 
             self.payload = self.payload[:-4]

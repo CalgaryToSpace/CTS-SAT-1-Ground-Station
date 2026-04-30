@@ -35,4 +35,6 @@ select = ["ALL", "ANN"]
 ignore = [
     "S101", # Allow asserts.
     "D", # Docstring rules are too strict.
+    "COM812", # Autoformatter recommends disabling.
+    "ISC001", # Autoformatter recommends disabling.
 ]

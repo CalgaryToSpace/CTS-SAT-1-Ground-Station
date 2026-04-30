@@ -1,5 +1,4 @@
 import socket
-from typing import Union
 
 import reed_solomon_ccsds as rs
 from pycsp import CRCEngine, HMACEngine, Packet
@@ -162,7 +161,7 @@ class CCSDSRxScrambler:
         """
         self.skip = skip
 
-    def __call__(self, data: Union[bytes, bytearray, memoryview]) -> bytes:
+    def __call__(self, data: bytes | bytearray | memoryview) -> bytes:
         """
         Scramble (descramble) the input data according to the CCSDS RX table.
         First `skip` bytes are passed through; the rest are XOR’d with the table.
@@ -193,7 +192,7 @@ class AX100:
         exception=False,
         verbose=False,
     ):
-        self.hmac_engine = HMACEngine(hmac_key) if not hmac_key is None else None
+        self.hmac_engine = HMACEngine(hmac_key) if hmac_key is not None else None
         self.crc_engine = CRCEngine() if crc else None
         self.reed_solomon = reed_solomon
         self.scrambler = CCSDSRxScrambler() if randomize else None
@@ -204,7 +203,7 @@ class AX100:
         self.exception = exception
         self.verbose = verbose
 
-    def encode(self, packet: Union[Packet, bytes, bytearray, memoryview]) -> bytes:
+    def encode(self, packet: Packet | bytes | bytearray | memoryview) -> bytes:
         if isinstance(packet, Packet):
             x = packet.encode()
         else:
@@ -239,7 +238,7 @@ class AX100:
 
         return self.prefill * b"\xaa" + x + self.tailfill * b"\xaa"
 
-    def decode(self, data: Union[bytes, bytearray, memoryview]) -> Packet | None:
+    def decode(self, data: bytes | bytearray | memoryview) -> Packet | None:
         if self.syncword:
             if self.verbose:
                 if data[0:4] != self.ASM:
@@ -404,7 +403,6 @@ def Tcp(Interface):
         """
         use listen='0.0.0.0' for tcp server mode
         """
-        pass
 
 
 def Udp(Interface):
@@ -428,4 +426,3 @@ def SerialKISS(Interface):
         """
         use dev='tcp://127.0.0.1:2620' for tcp client mode
         """
-        pass

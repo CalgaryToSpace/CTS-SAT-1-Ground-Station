@@ -1,16 +1,14 @@
 #!/usr/bin/env python
-# coding: utf-8
 
 # In[6]:
 
 
-import pycsp as csp
-import pycsplink as csplink
 import socket
 import time
-
 from typing import Literal
 
+import pycsp as csp
+import pycsplink as csplink
 
 # In[7]:
 
@@ -61,7 +59,7 @@ class GrcLink:
 # In[11]:
 
 
-with open("hmac_key.txt", "r") as f:
+with open("hmac_key.txt") as f:
     hmac_key = bytes.fromhex(f.read().strip())
 
 uplink = csplink.AX100(
@@ -91,7 +89,7 @@ ttc = None
 # In[12]:
 
 
-if not ttc is None:
+if ttc is not None:
     ttc.close()
 ttc = GrcLink(timeout=1)
 
@@ -150,7 +148,6 @@ def cts_query(prop: Literal["process", "memfree", "buffree", "uptime"], dst=TTC_
         val = int.from_bytes(resp.payload, "big")
     except TimeoutError:
         val = None
-        pass
 
     return val
 
@@ -187,7 +184,7 @@ def cts_query(prop: Literal["process", "memfree", "buffree", "uptime"], dst=TTC_
 # In[15]:
 
 
-with open("hmac_key.txt", "r") as f:
+with open("hmac_key.txt") as f:
     hmac_key = bytes.fromhex(f.read().strip())
 
 uplink = csplink.AX100(
@@ -217,7 +214,7 @@ ttc = None
 # In[16]:
 
 
-if not ttc is None:
+if ttc is not None:
     ttc.close()
 ttc = GrcLink()
 

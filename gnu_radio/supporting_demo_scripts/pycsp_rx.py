@@ -1,18 +1,13 @@
 #!/usr/bin/env python
-# coding: utf-8
 
 # In[1]:
 
 
-import pycsp as csp
-import pycsplink as csplink
 import socket
-import time
-
-from typing import Literal
-from types import SimpleNamespace
 import struct
 
+import pycsp as csp
+import pycsplink as csplink
 
 # In[ ]:
 
@@ -67,7 +62,7 @@ def parse_obc_downlink(data):
     if data[0] == 3:
         return data[1:].decode()
 
-    elif data[0] == 4:
+    if data[0] == 4:
         if len(data) < 13:
             raise ValueError("packet too short")
 
@@ -89,14 +84,13 @@ def parse_obc_downlink(data):
             "content": content,
         }
 
-    else:
-        return data
+    return data
 
 
 # In[ ]:
 
 
-with open("hmac_key.txt", "r") as f:
+with open("hmac_key.txt") as f:
     hmac_key = bytes.fromhex(f.read().strip())
 
 uplink = csplink.AX100(
@@ -126,7 +120,7 @@ ttc = None
 # In[ ]:
 
 
-if not ttc is None:
+if ttc is not None:
     ttc.close()
 ttc = GrcLink()
 
