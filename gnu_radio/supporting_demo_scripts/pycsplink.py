@@ -1,40 +1,52 @@
-import reed_solomon_ccsds as rs
-from pycsp import Packet, HMACEngine, CRCEngine
-from typing import Union
 import socket
+from typing import Union
+
+import reed_solomon_ccsds as rs
+from pycsp import CRCEngine, HMACEngine, Packet
+
 try:
     import pyserial
 except:
     pyserial = None
 
+
 class Golay24:
     N = 12
     H = [
-        0x8008ED, 0x4001DB, 0x2003B5, 0x100769,
-        0x080ED1, 0x040DA3, 0x020B47, 0x01068F,
-        0x008D1D, 0x004A3B, 0x002477, 0x001FFE,
+        0x8008ED,
+        0x4001DB,
+        0x2003B5,
+        0x100769,
+        0x080ED1,
+        0x040DA3,
+        0x020B47,
+        0x01068F,
+        0x008D1D,
+        0x004A3B,
+        0x002477,
+        0x001FFE,
     ]
-    
-    @staticmethod  
+
+    @staticmethod
     def __parity(x: int) -> int:
         """
         Return the parity (0 if even number of 1‑bits, 1 if odd).
         """
         return x.bit_count() & 1
 
-    @classmethod     
+    @classmethod
     def encode(cls, r: int) -> int:
         """
         Encode a 12‑bit word into a 24‑bit Golay codeword.
-    
+
         Args:
             data: integer whose lower 12 bits are the information word (0 ≤ data < 4096).
-    
+
         Returns:
             A 24‑bit integer: (12 parity bits << 12) | (12 data bits).
         """
-        assert r < 4096, 'data must be 0..4095'
-        
+        assert r < 4096, "data must be 0..4095"
+
         # Compute the 12‑bit syndrome/parity
         s = 0
         for h in cls.H:
@@ -42,19 +54,19 @@ class Golay24:
             s <<= 1
             # XOR in the parity of (H[i] & r)
             s |= cls.__parity(h & r)
-    
+
         # Assemble codeword: parity bits in high half, data bits in low half
         codeword = ((s & 0xFFF) << cls.N) | r
         return codeword
 
-    @classmethod  
+    @classmethod
     def decode(cls, codeword: int) -> tuple[int, int]:
         """
         Decode a 24‑bit Golay codeword.
-    
+
         Args:
             codeword: 24‑bit integer (parity<<12 | data)
-    
+
         Returns:
             (corrected_codeword, error_count), where error_count = number of flipped bits
             If uncorrectable, returns (original_codeword, -1).
@@ -64,39 +76,40 @@ class Golay24:
         s = 0
         for h in cls.H:
             s = (s << 1) | cls.__parity(h & r)
-    
+
         # Step 2: if wt(s) ≤ 3, error vector e = (s << 12)
         if s.bit_count() <= 3:
             e = s << cls.N
             return (r ^ e, e.bit_count())
-    
+
         # Step 3: for each i, if wt(s ^ B(i)) ≤ 2, e = ((s ^ B(i)) << 12) | (1 << (11‑i))
         for i in range(cls.N):
             b = cls.H[i] & 0xFFF  # B(i)
             if (s ^ b).bit_count() <= 2:
                 e = ((s ^ b) << cls.N) | (1 << (cls.N - i - 1))
                 return (r ^ e, e.bit_count())
-    
+
         # Step 4: compute modified syndrome q = B * s
         q = 0
         for i in range(cls.N):
             b = cls.H[i] & 0xFFF
             q = (q << 1) | cls.__parity(b & s)
-    
+
         # Step 5: if wt(q) ≤ 3, e = q
         if q.bit_count() <= 3:
             e = q
             return (r ^ e, e.bit_count())
-    
+
         # Step 6: for each i, if wt(q ^ B(i)) ≤ 2, e = (1 << (2*12 - i - 1)) | (q ^ B(i))
         for i in range(cls.N):
             b = cls.H[i] & 0xFFF
             if (q ^ b).bit_count() <= 2:
-                e = (1 << (2*cls.N - i - 1)) | (q ^ b)
+                e = (1 << (2 * cls.N - i - 1)) | (q ^ b)
                 return (r ^ e, e.bit_count())
-    
+
         # Step 7: uncorrectable
         return (codeword, -1)
+
 
 class CCSDSRxScrambler:
     """
@@ -105,6 +118,8 @@ class CCSDSRxScrambler:
       • order = 8, fbmask = 0xA9, initreg = 0xFF
       • uses a 256‑byte precomputed table
     """
+
+    # fmt: off
     _TABLE = bytes([
         0xFF, 0x48, 0x0E, 0xC0, 0x9A, 0x0D, 0x70, 0xBC,
         0x8E, 0x2C, 0x93, 0xAD, 0xA7, 0xB7, 0x46, 0xCE,
@@ -139,14 +154,15 @@ class CCSDSRxScrambler:
         0x4B, 0xBE, 0xE6, 0x19, 0x51, 0x5F, 0x9F, 0x05,
         0x08, 0x78, 0xC4, 0x4A, 0x66, 0xF5, 0x58,
     ])
+    # fmt: on
 
-    def __init__(self, skip:int=0):
+    def __init__(self, skip: int = 0):
         """
         :param skip: number of initial bytes to leave unscrambled
         """
         self.skip = skip
 
-    def __call__(self, data:Union[bytes, bytearray, memoryview]) -> bytes:
+    def __call__(self, data: Union[bytes, bytearray, memoryview]) -> bytes:
         """
         Scramble (descramble) the input data according to the CCSDS RX table.
         First `skip` bytes are passed through; the rest are XOR’d with the table.
@@ -160,10 +176,23 @@ class CCSDSRxScrambler:
             out[i] = data[i] ^ tbl[(i - self.skip) % tlen]
         return out
 
+
 class AX100:
-    ASM = b'\x93\x0b\x51\xde'
-    
-    def __init__(self, hmac_key:bytes=None, crc=False, reed_solomon=False, randomize=True, len_field=True, syncword=True, prefill=32, tailfill=1, exception=False, verbose=False):
+    ASM = b"\x93\x0b\x51\xde"
+
+    def __init__(
+        self,
+        hmac_key: bytes = None,
+        crc=False,
+        reed_solomon=False,
+        randomize=True,
+        len_field=True,
+        syncword=True,
+        prefill=32,
+        tailfill=1,
+        exception=False,
+        verbose=False,
+    ):
         self.hmac_engine = HMACEngine(hmac_key) if not hmac_key is None else None
         self.crc_engine = CRCEngine() if crc else None
         self.reed_solomon = reed_solomon
@@ -175,7 +204,7 @@ class AX100:
         self.exception = exception
         self.verbose = verbose
 
-    def encode(self, packet:Union[Packet, bytes, bytearray, memoryview]) -> bytes:
+    def encode(self, packet: Union[Packet, bytes, bytearray, memoryview]) -> bytes:
         if isinstance(packet, Packet):
             x = packet.encode()
         else:
@@ -189,7 +218,7 @@ class AX100:
 
         if self.reed_solomon:
             padding = 0
-            if len(x) > 223: 
+            if len(x) > 223:
                 x = x[:223]
             else:
                 padding = 223 - len(x)
@@ -202,38 +231,42 @@ class AX100:
             x = self.scrambler(x)
 
         if self.len_field:
-            golay = Golay24.encode(len(x)).to_bytes(3, 'big')
+            golay = Golay24.encode(len(x)).to_bytes(3, "big")
             x = golay + x
 
         if self.syncword:
             x = self.ASM + x
-        
-        return self.prefill*b'\xaa' + x + self.tailfill*b'\xaa'
 
-    def decode(self, data:Union[bytes, bytearray, memoryview]) -> Packet|None:
+        return self.prefill * b"\xaa" + x + self.tailfill * b"\xaa"
+
+    def decode(self, data: Union[bytes, bytearray, memoryview]) -> Packet | None:
         if self.syncword:
-            if self.verbose: 
-                if data[0:4] != self.ASM: print('ASM ERROR')
+            if self.verbose:
+                if data[0:4] != self.ASM:
+                    print("ASM ERROR")
             data = data[4:]
 
         if self.len_field:
-            pkt_len, errcnt = Golay24.decode(int.from_bytes(data[0:3], 'big'))
-            pkt_len &= 0xfff
-            if errcnt < 0: 
-                if self.exception: raise ValueError('GOLAY ERROR')
+            pkt_len, errcnt = Golay24.decode(int.from_bytes(data[0:3], "big"))
+            pkt_len &= 0xFFF
+            if errcnt < 0:
+                if self.exception:
+                    raise ValueError("GOLAY ERROR")
                 return None
 
-            data = data[3:3+pkt_len]
+            data = data[3 : 3 + pkt_len]
 
-        if self.scrambler:  # descramble here 
+        if self.scrambler:  # descramble here
             data = self.scrambler(data)
 
         if self.reed_solomon:
             if len(data) < 32:
-                if self.verbose: print('packet too short')
-                if self.exception: raise ValueError('packet too short')
+                if self.verbose:
+                    print("packet too short")
+                if self.exception:
+                    raise ValueError("packet too short")
                 return None
-            
+
             if len(data) > 255:
                 data = data[255:]
             else:
@@ -243,52 +276,64 @@ class AX100:
             try:
                 errs, decoded = rs.decode(data, False, 1)
                 if self.verbose and errs[0] != 0:
-                    print('RS CORR=%d' % errs[0])
+                    print("RS CORR=%d" % errs[0])
             except rs.UncorrectableError:
-                if self.verbose: print('RS ERROR')
-                if self.exception: raise ValueError('RS ERROR')
+                if self.verbose:
+                    print("RS ERROR")
+                if self.exception:
+                    raise ValueError("RS ERROR")
                 return None
-                
+
             data = decoded[padding:]
 
         if self.crc_engine:
             crc_val = data[-4:]
             if len(crc_val) != 4:
-                if self.verbose: print('packet too short')
-                if self.exception: raise ValueError('packet too short')
+                if self.verbose:
+                    print("packet too short")
+                if self.exception:
+                    raise ValueError("packet too short")
                 return None
 
             if crc_val != self.crc_engine(data[:-4]):
-                if self.verbose: print('CRC ERROR')
-                if self.exception: raise ValueError('CRC ERROR')
+                if self.verbose:
+                    print("CRC ERROR")
+                if self.exception:
+                    raise ValueError("CRC ERROR")
                 return None
-                
+
             data = data[:-4]
-        
+
         if self.hmac_engine:
             hmac_val = data[-4:]
             if len(hmac_val) != 4:
-                if self.verbose: print('packet too short')
-                if self.exception: raise ValueError('packet too short')
+                if self.verbose:
+                    print("packet too short")
+                if self.exception:
+                    raise ValueError("packet too short")
                 return None
-                    
+
             if hmac_val != self.hmac_engine(data[:-4]):
-                if self.verbose: print('HMAC ERROR')
-                if self.exception: raise ValueError('HMAC ERROR')
+                if self.verbose:
+                    print("HMAC ERROR")
+                if self.exception:
+                    raise ValueError("HMAC ERROR")
                 return None
-            
+
             data = data[:-4]
-        
+
         packet = Packet()
         packet.decode(data)
         return packet
+
 
 class KISS:
     def __init__(self):
         pass
 
+
 class GrcLink:
-    def __init__(self, host='127.0.0.1', port=52001, mtu=1024, timeout=1):
+    def __init__(self, host="127.0.0.1", port=52001, mtu=1024, timeout=1):
         self.s = socket.create_connection((host, port))
         self.mtu = mtu
         self.timeout = timeout
@@ -296,7 +341,7 @@ class GrcLink:
 
     def __del__(self):
         self.close()
-    
+
     def send(self, raw_data, data):
         self.s.sendall(raw_data + data)
 
@@ -305,56 +350,82 @@ class GrcLink:
 
     def close(self):
         self.s.close()
+
+
 class Interface:
-    def __init__(self, name='', mtu=256, timeout=1):
+    def __init__(self, name="", mtu=256, timeout=1):
         self.mtu = mtu
         self.timeout = timeout
         self.name = name
-        
-    def send(self, pkt:Packet):
+
+    def send(self, pkt: Packet):
         pass
 
-    def recv(self, timeout=None) -> Packet|None:
+    def recv(self, timeout=None) -> Packet | None:
         return None
 
+
 class Loopback(Interface):
-    def __init__(self, name='lo', mtu=65536, timeout=1, queue_limit=1024):
+    def __init__(self, name="lo", mtu=65536, timeout=1, queue_limit=1024):
         super().__init__(name, mtu, timeout)
         self.queue = []
         self.queue_limit = queue_limit
-    
-    def send(self, pkt:Packet):
+
+    def send(self, pkt: Packet):
         if len(self.queue) >= self.queue_limit:
             self.queue.pop(0)
         self.queue.append(pkt)
-    
+
     def recv(self, timeout=None):
         try:
             return self.queue.pop()
         except:
             return None
 
+
 def GrcAX100(Interface):
-    def __init__(self, name='radio', remote='127.0.0.1', port=52001, mtu=256, timeout=1):
+    def __init__(
+        self, name="radio", remote="127.0.0.1", port=52001, mtu=256, timeout=1
+    ):
         pass
+
 
 def Tcp(Interface):
-    def __init__(self, name='tcp', remote='127.0.0.1', port=52001, listen=None, max_clients=0, mtu=65536, timeout=1):
-        '''
+    def __init__(
+        self,
+        name="tcp",
+        remote="127.0.0.1",
+        port=52001,
+        listen=None,
+        max_clients=0,
+        mtu=65536,
+        timeout=1,
+    ):
+        """
         use listen='0.0.0.0' for tcp server mode
-        '''
+        """
         pass
+
 
 def Udp(Interface):
-    def __init__(self, name='udp', 
-                 listen='127.0.0.1', port=2612, 
-                 remote=None, remote_port=2612, 
-                 mtu=65507, timeout=1):
+    def __init__(
+        self,
+        name="udp",
+        listen="127.0.0.1",
+        port=2612,
+        remote=None,
+        remote_port=2612,
+        mtu=65507,
+        timeout=1,
+    ):
         pass
 
+
 def SerialKISS(Interface):
-    def __init__(self, name='serial', dev='/dev/ttyUSB0', baud=115200, mtu=256, timeout=1):
-        '''
+    def __init__(
+        self, name="serial", dev="/dev/ttyUSB0", baud=115200, mtu=256, timeout=1
+    ):
+        """
         use dev='tcp://127.0.0.1:2620' for tcp client mode
-        '''
+        """
         pass

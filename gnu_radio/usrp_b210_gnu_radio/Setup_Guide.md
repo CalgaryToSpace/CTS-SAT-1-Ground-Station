@@ -92,7 +92,5 @@ sudo apt-get install gr-satellites
 3. Activate venv, then install Python dependencies:
 
 ```
-pip install xtea
-pip install crc
-pip install reed_solomon_ccsds
+pip install xtea crc reed_solomon_ccsds
 ```
