@@ -7,11 +7,12 @@
 # GNU Radio Python Flow Graph
 # Title: AX100 Radio Link
 # Author: Shu Luo
-# GNU Radio version: 3.10.6.0
+# Copyright: CalgaryToSpace
+# GNU Radio version: 3.10.9.2
 
-from packaging.version import Version as StrictVersion
 from PyQt5 import Qt
 from gnuradio import qtgui
+from PyQt5 import QtCore
 from gnuradio import analog
 from gnuradio import blocks
 from gnuradio import digital
@@ -29,8 +30,6 @@ from gnuradio import gr, pdu
 from gnuradio import network
 from gnuradio import uhd
 import time
-from gnuradio.qtgui import Range, RangeWidget
-from PyQt5 import QtCore
 import math
 import satellites.components.deframers
 import satellites.components.demodulators
@@ -64,10 +63,9 @@ class radio_ax100(gr.top_block, Qt.QWidget):
         self.settings = Qt.QSettings("GNU Radio", "radio_ax100")
 
         try:
-            if StrictVersion(Qt.qVersion()) < StrictVersion("5.0.0"):
-                self.restoreGeometry(self.settings.value("geometry").toByteArray())
-            else:
-                self.restoreGeometry(self.settings.value("geometry"))
+            geometry = self.settings.value("geometry")
+            if geometry:
+                self.restoreGeometry(geometry)
         except BaseException as exc:
             print(f"Qt GUI: Could not restore geometry: {str(exc)}", file=sys.stderr)
 
@@ -95,22 +93,22 @@ class radio_ax100(gr.top_block, Qt.QWidget):
         # Blocks
         ##################################################
 
-        self._tx_pwr_range = Range(-10, 13, 0.1, 0, 200)
-        self._tx_pwr_win = RangeWidget(self._tx_pwr_range, self.set_tx_pwr, "Tx Power", "counter_slider", float, QtCore.Qt.Horizontal)
+        self._tx_pwr_range = qtgui.Range(-10, 13, 0.1, 0, 200)
+        self._tx_pwr_win = qtgui.RangeWidget(self._tx_pwr_range, self.set_tx_pwr, "Tx Power", "counter_slider", float, QtCore.Qt.Horizontal)
         self.top_grid_layout.addWidget(self._tx_pwr_win, 2, 0, 1, 1)
         for r in range(2, 3):
             self.top_grid_layout.setRowStretch(r, 1)
         for c in range(0, 1):
             self.top_grid_layout.setColumnStretch(c, 1)
-        self._rx_gain_range = Range(0, 76, 1, 65, 200)
-        self._rx_gain_win = RangeWidget(self._rx_gain_range, self.set_rx_gain, "Rx Gain", "counter_slider", float, QtCore.Qt.Horizontal)
+        self._rx_gain_range = qtgui.Range(0, 76, 1, 65, 200)
+        self._rx_gain_win = qtgui.RangeWidget(self._rx_gain_range, self.set_rx_gain, "Rx Gain", "counter_slider", float, QtCore.Qt.Horizontal)
         self.top_grid_layout.addWidget(self._rx_gain_win, 1, 0, 1, 1)
         for r in range(1, 2):
             self.top_grid_layout.setRowStretch(r, 1)
         for c in range(0, 1):
             self.top_grid_layout.setColumnStretch(c, 1)
-        self._freq_range = Range(430e6, 440e6, 1e2, 436.15e6, 200)
-        self._freq_win = RangeWidget(self._freq_range, self.set_freq, "Freq", "counter_slider", float, QtCore.Qt.Horizontal)
+        self._freq_range = qtgui.Range(430e6, 440e6, 1e2, 436.15e6, 200)
+        self._freq_win = qtgui.RangeWidget(self._freq_range, self.set_freq, "Freq", "counter_slider", float, QtCore.Qt.Horizontal)
         self.top_grid_layout.addWidget(self._freq_win, 0, 0, 1, 1)
         for r in range(0, 1):
             self.top_grid_layout.setRowStretch(r, 1)
@@ -253,7 +251,6 @@ class radio_ax100(gr.top_block, Qt.QWidget):
         self.digital_chunks_to_symbols_xx_0 = digital.chunks_to_symbols_bf([-1, 1], 1)
         self.blocks_unpack_k_bits_bb_0 = blocks.unpack_k_bits_bb(8)
         self.blocks_repeat_0 = blocks.repeat(gr.sizeof_char*1, int(sps))
-        self.blocks_message_debug_0 = blocks.message_debug(True)
         self.analog_frequency_modulator_fc_0 = analog.frequency_modulator_fc((2*math.pi*fdev/iq_rate))
 
 
@@ -261,7 +258,6 @@ class radio_ax100(gr.top_block, Qt.QWidget):
         # Connections
         ##################################################
         self.msg_connect((self.network_socket_pdu_0, 'pdus'), (self.pdu_pdu_to_tagged_stream_0, 'pdus'))
-        self.msg_connect((self.satellites_ax100_deframer_0, 'out'), (self.blocks_message_debug_0, 'print'))
         self.msg_connect((self.satellites_ax100_deframer_0, 'out'), (self.network_socket_pdu_0, 'pdus'))
         self.connect((self.analog_frequency_modulator_fc_0, 0), (self.interp_fir_filter_xxx_0, 0))
         self.connect((self.blocks_repeat_0, 0), (self.digital_chunks_to_symbols_xx_0, 0))
@@ -421,9 +417,6 @@ class radio_ax100(gr.top_block, Qt.QWidget):
 
 def main(top_block_cls=radio_ax100, options=None):
 
-    if StrictVersion("4.5.0") <= StrictVersion(Qt.qVersion()) < StrictVersion("5.0.0"):
-        style = gr.prefs().get_string('qtgui', 'style', 'raster')
-        Qt.QApplication.setGraphicsSystem(style)
     qapp = Qt.QApplication(sys.argv)
 
     tb = top_block_cls()
