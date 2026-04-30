@@ -218,14 +218,14 @@ class XTEAEngine:
 
         self.ciper = xtea.new(rkey, mode=xtea.MODE_CTR, counter=counter)
 
-    def encrypt(self, data: bytes | bytearray | memoryview, nonce: bytes[4]):
+    def encrypt(self, data: bytes | bytearray | memoryview, nonce: bytes):
         assert len(nonce) == 4, "len(nonce) must be 4"
         self.nonce = nonce
         self.count = 1
         self.firstrun = self.legacy_unsafe
         return self.ciper.encrypt(data)
 
-    def decrypt(self, data: bytes | bytearray | memoryview, nonce: bytes[4]):
+    def decrypt(self, data: bytes | bytearray | memoryview, nonce: bytes):
         return self.encrypt(data, nonce)
 
 
