@@ -37,23 +37,32 @@ DPORT_UPTIME = 6
 
 
 class GrcLink:
-    def __init__(self, addr="127.0.0.1", port=52001, mtu=1024, timeout=1):
+    def __init__(
+        self,
+        addr: str = "127.0.0.1",
+        port: int = 52001,
+        mtu: int = 1024,
+        timeout: int = 1,
+    ):
         self.s = socket.create_connection((addr, port))
         self.mtu = mtu
         self.timeout = timeout
         self.s.settimeout(timeout)
 
-    def __del__(self):
+    def __del__(self) -> None:
         self.close()
 
-    def send(self, raw_data, data):
+    def send(self, raw_data: bytes, data: bytes) -> None:
         self.s.sendall(raw_data + data)
 
     def recv(self):
         return self.s.recv(self.mtu)
 
-    def close(self):
-        self.s.close()
+    def close(self) -> None:
+        try:
+            self.s.close()
+        except AttributeError:  # If socket not created yet, steamroll.
+            pass
 
 
 # In[11]:
@@ -97,7 +106,7 @@ ttc = GrcLink(timeout=1)
 # In[13]:
 
 
-def cts_ping(dst=TTC_ADDR):
+def cts_ping(dst: int = TTC_ADDR):
     SPORT = 16  # 0..63
     packet = csp.Packet(
         GCS_ADDR, dst, DPORT_PING, SPORT, prio="norm", hmac_key=None, crc=False
@@ -115,7 +124,9 @@ def cts_ping(dst=TTC_ADDR):
         print('TIMEOUT')"""
 
 
-def cts_send(cmd, dst=OBC_ADDR):
+def cts_send(cmd: str, dst: int = OBC_ADDR):
+    print(f'cts_send("{cmd})"')
+
     SPORT = 16  # 0..63
     DPORT = 7
     packet = csp.Packet(
@@ -230,6 +241,7 @@ ttc = GrcLink()
 
 for i in range(10):
     # cts_ping()
+    cts_send("CTS1+hello_world()!")
     time.sleep(0.2)
 
 

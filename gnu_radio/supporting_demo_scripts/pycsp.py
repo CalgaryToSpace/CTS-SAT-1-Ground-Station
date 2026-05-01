@@ -38,10 +38,10 @@ class HeaderV1:
         prio: int | Literal["critical", "high", "norm", "low"] = "norm",
         flags: int = 0,
         endian: Literal["big", "little"] = "big",
-        hmac: bool = None,
-        xtea: bool = None,
-        rdp: bool = None,
-        crc: bool = None,
+        hmac: bool | None = None,
+        xtea: bool | None = None,
+        rdp: bool | None = None,
+        crc: bool | None = None,
     ):
         # Validate fields
         assert 0 <= src <= 31, "src addr must be 0..31"
@@ -71,10 +71,12 @@ class HeaderV1:
         if crc is not None:
             self.crc = crc
 
-        self.endian = endian
+        self.endian: Literal["big", "little"] = endian
 
     @classmethod
-    def from_bytes(cls, b: bytes, endian: str = "big") -> "CSP.HeaderV1":
+    def from_bytes(
+        cls, b: bytes, endian: Literal["big", "little"] = "big"
+    ) -> "HeaderV1":
         """
         Parse a 4-byte CSP header (V1)
         """
@@ -156,7 +158,7 @@ class CRCEngine:
     """
 
     def __init__(self, endian: Literal["big", "little"] = "big"):
-        self.endian = endian
+        self.endian: Literal["big", "little"] = endian
         self.engine = crc.Calculator(
             crc.Configuration(
                 width=32,
@@ -207,7 +209,7 @@ class XTEAEngine:
         rkey = hashlib.sha1(key).digest()[0:16]
         self.legacy_unsafe = legacy_unsafe
 
-        def counter():
+        def counter() -> bytes:
             iv = self.nonce + self.count.to_bytes(4, "big")
             if self.firstrun:
                 self.firstrun = False
@@ -249,10 +251,10 @@ class Packet:
         sport: int = 0,
         prio: int | Literal["critical", "high", "norm", "low"] = "norm",
         payload: bytes = b"",
-        hmac_key: bytes = None,
-        xtea_key: bytes = None,
-        rdp: bool = None,
-        crc: bool = None,
+        hmac_key: bytes | None = None,
+        xtea_key: bytes | None = None,
+        rdp: bool | None = None,
+        crc: bool | None = None,
         flags: int = 0,
         header_endian: Literal["big", "little"] = "big",
         crc_include_header: bool = False,

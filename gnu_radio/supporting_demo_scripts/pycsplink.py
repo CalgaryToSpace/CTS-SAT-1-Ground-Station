@@ -161,7 +161,7 @@ class CCSDSRxScrambler:
         """
         self.skip = skip
 
-    def __call__(self, data: bytes | bytearray | memoryview) -> bytes:
+    def __call__(self, data: bytes | bytearray | memoryview) -> bytes | bytearray:
         """
         Scramble (descramble) the input data according to the CCSDS RX table.
         First `skip` bytes are passed through; the rest are XOR’d with the table.
@@ -181,18 +181,20 @@ class AX100:
 
     def __init__(
         self,
-        hmac_key: bytes = None,
-        crc=False,
-        reed_solomon=False,
-        randomize=True,
-        len_field=True,
-        syncword=True,
-        prefill=32,
-        tailfill=1,
-        exception=False,
-        verbose=False,
+        hmac_key: bytes | None = None,
+        crc: bool = False,
+        reed_solomon: bool = False,
+        randomize: bool = True,
+        len_field: bool = True,
+        syncword: bool = True,
+        prefill: int = 32,
+        tailfill: int = 1,
+        exception: bool = False,
+        verbose: bool = False,
     ):
-        self.hmac_engine = HMACEngine(hmac_key) if hmac_key is not None else None
+        self.hmac_engine: HMACEngine | None = (
+            HMACEngine(hmac_key) if hmac_key is not None else None
+        )
         self.crc_engine = CRCEngine() if crc else None
         self.reed_solomon = reed_solomon
         self.scrambler = CCSDSRxScrambler() if randomize else None
@@ -332,7 +334,7 @@ class KISS:
 
 
 class GrcLink:
-    def __init__(self, host="127.0.0.1", port=52001, mtu=1024, timeout=1):
+    def __init__(self, host: str = "127.0.0.1", port=52001, mtu=1024, timeout=1):
         self.s = socket.create_connection((host, port))
         self.mtu = mtu
         self.timeout = timeout
