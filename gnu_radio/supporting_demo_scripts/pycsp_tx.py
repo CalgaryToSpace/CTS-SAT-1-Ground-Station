@@ -1,9 +1,3 @@
-#!/usr/bin/env python
-
-# In[6]:
-
-
-import socket
 import time
 from typing import Literal
 
@@ -31,38 +25,6 @@ DPORT_MEMFREE = 3
 DPORT_REBOOT = 4
 DPORT_BUF_FREE = 5
 DPORT_UPTIME = 6
-
-
-# In[9]:
-
-
-class GrcLink:
-    def __init__(
-        self,
-        addr: str = "127.0.0.1",
-        port: int = 52001,
-        mtu: int = 1024,
-        timeout: int = 1,
-    ):
-        self.s = socket.create_connection((addr, port))
-        self.mtu = mtu
-        self.timeout = timeout
-        self.s.settimeout(timeout)
-
-    def __del__(self) -> None:
-        self.close()
-
-    def send(self, raw_data: bytes, data: bytes) -> None:
-        self.s.sendall(raw_data + data)
-
-    def recv(self):
-        return self.s.recv(self.mtu)
-
-    def close(self) -> None:
-        try:
-            self.s.close()
-        except AttributeError:  # If socket not created yet, steamroll.
-            pass
 
 
 # In[11]:
@@ -100,7 +62,7 @@ ttc = None
 
 if ttc is not None:
     ttc.close()
-ttc = GrcLink(timeout=1)
+ttc = csplink.GrcLink(timeout=1)
 
 
 # In[13]:
@@ -227,20 +189,13 @@ ttc = None
 
 if ttc is not None:
     ttc.close()
-ttc = GrcLink()
+ttc = csplink.GrcLink()
 
 
 # In[ ]:
 
 
-# ttc.close()
-
-
-# In[ ]:
-
-
-for i in range(10):
-    # cts_ping()
+for _ in range(10):
     cts_send("CTS1+hello_world()!")
     time.sleep(0.2)
 
@@ -248,7 +203,8 @@ for i in range(10):
 # In[ ]:
 
 
-# [print(key, cts_query(key)) for key in ['process', 'memfree', 'buffree', 'uptime']]
+if 0:
+    [print(key, cts_query(key)) for key in ["process", "memfree", "buffree", "uptime"]]
 
 
 # In[ ]:

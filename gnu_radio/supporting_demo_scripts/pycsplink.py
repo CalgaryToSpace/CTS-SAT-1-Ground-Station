@@ -1,3 +1,4 @@
+import contextlib
 import socket
 
 import reed_solomon_ccsds as rs
@@ -328,29 +329,32 @@ class AX100:
         return packet
 
 
-class KISS:
-    def __init__(self):
-        pass
-
-
 class GrcLink:
-    def __init__(self, host: str = "127.0.0.1", port=52001, mtu=1024, timeout=1):
-        self.s = socket.create_connection((host, port))
+    def __init__(
+        self,
+        addr: str = "127.0.0.1",
+        port: int = 52001,
+        mtu: int = 1024,
+        timeout: int = 1,
+    ) -> None:
+        self.s = socket.create_connection((addr, port))
         self.mtu = mtu
         self.timeout = timeout
         self.s.settimeout(timeout)
 
-    def __del__(self):
+    def __del__(self) -> None:
         self.close()
 
-    def send(self, raw_data, data):
+    def send(self, raw_data: bytes, data: bytes) -> None:
         self.s.sendall(raw_data + data)
 
-    def recv(self):
+    def recv(self) -> bytes:
         return self.s.recv(self.mtu)
 
-    def close(self):
-        self.s.close()
+    def close(self) -> None:
+        with contextlib.suppress(AttributeError):
+            # If socket not created yet, steamroll.
+            pass
 
 
 class Interface:

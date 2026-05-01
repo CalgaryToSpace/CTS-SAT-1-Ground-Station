@@ -35,29 +35,6 @@ DPORT_UPTIME = 6
 # In[ ]:
 
 
-class GrcLink:
-    def __init__(self, addr="127.0.0.1", port=52001, mtu=1024, timeout=1):
-        self.s = socket.create_connection((addr, port))
-        self.mtu = mtu
-        self.timeout = timeout
-        self.s.settimeout(timeout)
-
-    def __del__(self):
-        self.close()
-
-    def send(self, raw_data, data):
-        self.s.sendall(raw_data + data)
-
-    def recv(self):
-        return self.s.recv(self.mtu)
-
-    def close(self):
-        self.s.close()
-
-
-# In[ ]:
-
-
 def parse_obc_downlink(data):
     if data[0] == 3:
         return data[1:].decode()
@@ -122,7 +99,7 @@ ttc = None
 
 if ttc is not None:
     ttc.close()
-ttc = GrcLink()
+ttc = csplink.GrcLink()
 
 
 # In[ ]:
