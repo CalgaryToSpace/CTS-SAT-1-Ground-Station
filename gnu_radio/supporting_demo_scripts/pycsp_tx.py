@@ -1,4 +1,5 @@
 import time
+from pathlib import Path
 from typing import Literal
 
 import pycsp as csp
@@ -29,9 +30,12 @@ DPORT_UPTIME = 6
 
 # In[11]:
 
-
-with open("hmac_key.txt") as f:
-    hmac_key = bytes.fromhex(f.read().strip())
+hmac_key_file_path = Path("hmac_key.txt")
+if hmac_key_file_path.exists():
+    hmac_key = bytes.fromhex(hmac_key_file_path.read_text().strip())
+else:
+    print("WARNING: Using fake HMAC key as hmac_key.txt does not exist.")
+    hmac_key = bytes.fromhex("ABCDABCDABCDABCDABCDABCDABCDABCD")
 
 uplink = csplink.AX100(
     hmac_key=hmac_key,
