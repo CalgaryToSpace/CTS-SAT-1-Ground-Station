@@ -92,7 +92,7 @@ def cts_ping(dst: int = TTC_ADDR):
 
 
 def cts_send(cmd: str, dst: int = OBC_ADDR):
-    print(f'cts_send("{cmd})"')
+    logger.info(f'cts_send("{cmd})"')
 
     SPORT = 16  # 0..63
     DPORT = 7
@@ -195,7 +195,8 @@ ttc = csplink.GrcLink()
 
 
 for _ in range(10):
-    cts_send("CTS1+hello_world()!")
+    cur_time = int(time.time() * 1000)
+    cts_send(f"CTS1+hello_world()@tssent={cur_time}!")
     time.sleep(0.2)
 
 
@@ -232,4 +233,4 @@ cts_send("CTS1+fs_list_directory(/,0,10)!")
 
 # In[ ]:
 while True:
-    cts_send(input())
+    cts_send(input(">>> "))
