@@ -4,6 +4,7 @@ from typing import Literal
 
 import pycsp as csp
 import pycsplink as csplink
+from loguru import logger
 
 # In[7]:
 
@@ -34,7 +35,7 @@ hmac_key_file_path = Path("hmac_key.txt")
 if hmac_key_file_path.exists():
     hmac_key = bytes.fromhex(hmac_key_file_path.read_text().strip())
 else:
-    print("WARNING: Using fake HMAC key as hmac_key.txt does not exist.")
+    logger.warning("WARNING: Using fake HMAC key as hmac_key.txt does not exist.")
     hmac_key = bytes.fromhex("ABCDABCDABCDABCDABCDABCDABCDABCD")
 
 uplink = csplink.AX100(
@@ -157,12 +158,6 @@ def cts_query(prop: Literal["process", "memfree", "buffree", "uptime"], dst=TTC_
 #
 # DOES NOT WORK
 
-
-# In[15]:
-
-
-with open("hmac_key.txt") as f:
-    hmac_key = bytes.fromhex(f.read().strip())
 
 uplink = csplink.AX100(
     hmac_key=hmac_key,

@@ -1,13 +1,11 @@
-#!/usr/bin/env python
-
 # In[1]:
 
-
-import socket
 import struct
+from pathlib import Path
 
 import pycsp as csp
 import pycsplink as csplink
+from loguru import logger
 
 # In[ ]:
 
@@ -35,7 +33,7 @@ DPORT_UPTIME = 6
 # In[ ]:
 
 
-def parse_obc_downlink(data):
+def parse_obc_downlink(data: bytes):
     if data[0] == 3:
         return data[1:].decode()
 
@@ -67,8 +65,13 @@ def parse_obc_downlink(data):
 # In[ ]:
 
 
-with open("hmac_key.txt") as f:
-    hmac_key = bytes.fromhex(f.read().strip())
+hmac_key_file_path = Path("hmac_key.txt")
+if hmac_key_file_path.exists():
+    hmac_key = bytes.fromhex(hmac_key_file_path.read_text().strip())
+else:
+    logger.warning("WARNING: Using fake HMAC key as hmac_key.txt does not exist.")
+    hmac_key = bytes.fromhex("ABCDABCDABCDABCDABCDABCDABCDABCD")
+
 
 uplink = csplink.AX100(
     hmac_key=hmac_key,
@@ -105,14 +108,8 @@ ttc = csplink.GrcLink()
 # In[ ]:
 
 
-# ttc.close()
-
-
-# In[ ]:
-
-
 while True:
-    ttc = GrcLink(timeout=1)
+    ttc = csplink.GrcLink(timeout=1)
 
     try:
         rx = ttc.recv()
@@ -124,16 +121,16 @@ while True:
         # decode packets
         resp = downlink.decode(rx)
         if not resp:
-            print(resp)
+            logger.info(resp)
             continue
 
         if resp.header.src == OBC_ADDR and resp.header.dst == GCS_ADDR:
-            print(parse_obc_downlink(resp.payload))
+            logger.info(parse_obc_downlink(resp.payload))
         else:
-            print(resp, resp.payload.hex())
+            logger.info(resp, resp.payload.hex())
 
     except ValueError as e:
-        print(e)
+        logger.error(e)
     except TimeoutError:
         pass
     except KeyboardInterrupt:
