@@ -9,6 +9,11 @@ dependencies = [
     "cts1_gs_tool_lib",
     "cts1_gs_database",
     "cts1_gs_dashboard",
+
+    # Dependencies for GNU Radio demo scripts mostly.
+    "xtea>=0.7.1",
+    "crc>=7.1.0",
+    "reed-solomon-ccsds>=1.0.3",
 ]
 
 [dependency-groups]
