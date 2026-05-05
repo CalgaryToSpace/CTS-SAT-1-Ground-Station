@@ -9,6 +9,8 @@ dependencies = [
     "cts1_gs_tool_lib",
     "cts1_gs_database",
     "cts1_gs_dashboard",
+    "loguru>=0.7.3",
+    "numpy",
 ]
 
 [dependency-groups]
@@ -35,4 +37,7 @@ select = ["ALL", "ANN"]
 ignore = [
     "S101", # Allow asserts.
     "D", # Docstring rules are too strict.
+    "COM812", # Recommended disable by ruff formatter.
+    "ISC001", # Recommended disable by ruff formatter.
+    # "PD901", # Allow "df" variable name.
 ]

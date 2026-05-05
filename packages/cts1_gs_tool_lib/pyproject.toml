@@ -4,7 +4,10 @@ version = "0.1.0"
 description = "Interfaces with forwarder for common ground support functions."
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "tyro",
+    "polars",
+]
 
 [dependency-groups]
 dev = [
