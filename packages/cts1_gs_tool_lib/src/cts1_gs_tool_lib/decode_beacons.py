@@ -345,9 +345,9 @@ def main(input_csv: Path, output_csv: Path, output_json: Path | None = None) -> 
     df_packets = pl.DataFrame(packets)
     del packets
 
-    df_packets = df_packets.sort("uptime_ms", "received_timestamp").unique(
-        "uptime_ms", keep="first", maintain_order=True
-    )
+    df_packets = df_packets.sort(
+        "unix_epoch_time_ms", "uptime_ms", "received_timestamp"
+    ).unique(["unix_epoch_time_ms", "uptime_ms"], keep="first", maintain_order=True)
 
     if output_json:
         with output_json.open("w", encoding="utf-8") as f:
