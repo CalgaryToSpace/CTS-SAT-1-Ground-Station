@@ -8,7 +8,7 @@ from pathlib import Path
 # TODO: Restructure into OOP!!
 
 # Open File
-def extract_data_from_file(input_file_path: Path) -> list[str]:
+def extract_data_from_file(input_file_path: Path) -> str:
     """ Reads data from binary file, and converts to hex string
     then splits the string every 2 characters
 
@@ -28,22 +28,23 @@ def extract_data_from_file(input_file_path: Path) -> list[str]:
             line_num = 0
             for line in log_file:
                 line_num += 1
-                print(f'This is the {line_num} of data')
+                # print(f'This is the {line_num} of data')
                 hex_string = line.hex()
-                print(hex_string)
+                # print(hex_string)
                 # Append hexidecimal string to array of strings
+                # packet_to_hex_string.join(hex_string)
                 packet_to_hex_string.append(hex_string)
-        
-                
+                 
+            single_packet_to_string = ''.join(packet_to_hex_string)
+            
+ 
             # break
 
-            
-
     # Return array of hexadecimal strings
-    return packet_to_hex_string
+    return single_packet_to_string
                
 
-def search_packet(packet:list[str]) -> list[str]:
+def search_packet(packet:str) -> list[str]:
     """
     Searches string for the starting seqeunce of an MPI data frame
     OCFFFFOC
@@ -53,11 +54,14 @@ def search_packet(packet:list[str]) -> list[str]:
     """
 # list[str]:
     data_frames: list[str] = []
-    for byte in packet:
+    # for byte in packet:
         # data_frame_search = re.compile(r"0CFFFF0C([0-9A-F][0-9A-F] ?)+", re.IGNORECASE)
         # match = data_frame_search.search(byte)
 
-        data_frame_search = byte.split(r'0cffff0c')
+    data_frame_search = packet.split(r'0cffff0c')
+
+
+    # print(data_frame_search)
 
         # Whenever the sequence 0CFFFF0C is encountered a new list index is created carry the data frame information
         # if match:
@@ -66,10 +70,11 @@ def search_packet(packet:list[str]) -> list[str]:
         # 'data_frame_search' is now a LIST of strings
         # To add to a MASS LIST iterate through each index in the 'data_frame_search' array 
         # Append each value to a MASS LIST
-        for data_frame in data_frame_search:
-            data_frames.append(data_frame)
-
-    return data_frames
+    # for data_frame in data_frame_search:
+    #     data_frames.append(data_frame)
+            
+        # print(data_frames)
+    return data_frame_search
 
 def hex_string_to_2n(data_n_frame: str) ->list[str]:
     """
@@ -83,28 +88,55 @@ def hex_string_to_2n(data_n_frame: str) ->list[str]:
 
     # print(f'length of data frame now: {len(data_2n_frame)}')
 
-    for byte in data_2n_frame:
-        print(len(data_2n_frame))
-        print(byte)
+    # for byte in data_2n_frame:
+    #     print(len(data_2n_frame))
+    #     print(byte)
+
+    # print(data_2n_frame)
 
     return data_2n_frame
 
 def hex_to_decimal() -> int:
     ''' Converts a hexadecimal string into a decimal'''
 
+def pixel_value(pixel_data_1: int, pixel_data_2: int) -> int:
+    """  
+    Calculate the value of the pixel
 
-def id_bytes_in_data_frame(data_frame: str) ->list[dict]:
+    Args: 
+        pixel_data_1: First byte defined for pixel
+        pixel_data_2: Second byte defined for pixel
+    Returns:
+        pixel_val: Value of the pixel for the 
+    """
+    pixel_val = pixel_data_1 + pixel_data_2
+
+    return pixel_val
+
+
+def id_bytes_in_data_frame(data_frame: list[str]) ->list[dict]:
     """ Add each data frame to a resulting DICTIONARY???
     """
+    #TODO: Test if data does calculations directly in hex or needs to be converted into decimal
     # Regex split data into 2s
+    
+
+
     mpi_data_frame: list[str] = []
+    index = 0 
+    for hex_val in data_frame:
+        mpi_data_frame.append(hex_val) 
+       
+        
+    
     mpi_data_frame = hex_string_to_2n(data_frame)
+    # print(mpi_data_frame)
     # Convert each string to hex prior to processing (make function)
-    mpi_dict_list: list[dict]
+    mpi_dict_list: list[dict] = []
     byte_arr: list[str]
     pixel_array: list[int] # Size of the array will be determined by Byte 17 - Byte 16
 
-    print(f'length of MPI DATA FRAME {len(mpi_data_frame)}')
+    # print(f'length of MPI DATA FRAME {len(mpi_data_frame)}')
     # Create Dictionary 
     mpi_dictionary = dict()
     # keys = ['Sync Byte 1', 'Sync Byte 2', 'Sync Byte 3', 'Sync Byte 4',
@@ -124,16 +156,18 @@ def id_bytes_in_data_frame(data_frame: str) ->list[dict]:
     mpi_dictionary.update({"Sync Byte 4": mpi_data_frame[3]})
 
     # Byte 4 & 5 - Frame Counter
-    byte_4 = int(mpi_data_frame[4], 16) # Convert byte 4 hexadecimal string to decimal type 'int'
-    byte_5 = int(mpi_data_frame[5], 16) # Convert byte 5 hexadecimal string to decimal type 'int'
+    byte_4 = int(mpi_data_frame[0], 16) # Convert byte 4 hexadecimal string to decimal type 'int'
+    byte_5 = int(mpi_data_frame[1], 16) # Convert byte 5 hexadecimal string to decimal type 'int'
     counter = (byte_4*256) + byte_5
+    print(byte_4)
+    print(byte_5)
 
     # Update MPI Data Frame Dictionary with Frame Number Element
     mpi_dictionary.update({"Frame Number": counter})
 
     # Byte 6  & 7 - Board Temperature
-    byte_6 = int(mpi_data_frame[6], 16)
-    byte_7 = int(mpi_data_frame[7], 16)
+    byte_6 = int(mpi_data_frame[2], 16)
+    byte_7 = int(mpi_data_frame[3], 16)
 
     temperature = ((byte_6)*256 + byte_7) / 128.0
 
@@ -141,23 +175,87 @@ def id_bytes_in_data_frame(data_frame: str) ->list[dict]:
     mpi_dictionary.update({"Board Temperature": temperature})
 
     # Byte 8 - Firmware version
+    byte_8 = int(mpi_data_frame[4], 16)
+    mpi_dictionary.update({"Firmware Version": byte_8})
 
-    # Byte 9
-    # Byte 10
-    # Byte 10
-    # Byte 11
-    # Byte 12
-    # Byte 13
-    # Byte 14
-    # Byte 15
+    # Byte 9 & 10 - Detector Status
+    byte_9 = int(mpi_data_frame[5], 16)
+    byte_10 = int(mpi_data_frame[6], 16)
+
+    detector_status = byte_9*256 + byte_10
+
+    mpi_dictionary.update({"Detector Status": detector_status})
+    
+    
+    # Byte 11 & 12 - Inner Dome Voltage Setting
+    byte_11 = int(mpi_data_frame[7], 16)
+    byte_12 = int(mpi_data_frame[8], 16)
+
+    # Set inner dome scan
+    inner_dome_v_setting = byte_11 * 256 + byte_12
+
+    mpi_dictionary.update({"Inner Dome Voltage Setting": inner_dome_v_setting})
+    
+
+    # Byte 13 - Inner Dome Scan Index
+    byte_13 = int(mpi_data_frame[9], 16)
+
+    inner_dome_scan_index = byte_13
+    mpi_dictionary.update({"Inner Dome Scan Index": inner_dome_scan_index})
+
+    # Byte 14 & 15 - Inner Dome Voltage ADC Reading
+    byte_14 = int(mpi_data_frame[10], 16)
+    byte_15 = int(mpi_data_frame[11], 16)
+
+    
+    eu = byte_14*256 + byte_15
+    # v_id = (float)(eu & ('0x3ff'))*0.105361 - 101.808
+
+    # mpi_dictionary.update({"Inner Dome Voltage ADC Reading": v_id})
+
     # Byte 16 (Defines FIRST pixel index)
+    byte_16 = int(mpi_data_frame[12], 16)
     # Byte 17 (Defines LAST pixel index)
-    # Byte 18
-    # Byte 19
-    # Byte 20 & 21
-    # Byte 22 & 23
+    byte_17 = int(mpi_data_frame[13], 16)
+    
+    mpi_dictionary.update({"First Pixel Index": byte_16})
+    mpi_dictionary.update({"Last Pixel Index": byte_17})
+
+    # Determine Length of Pixel Data
+    pixel_len = byte_17 - byte_16
+
+    # Byte 18 & 19 - Integration Period
+
+    byte_18 = int(mpi_data_frame[14], 16)
+    byte_19 = int(mpi_data_frame[15], 16)
+
+    integration_period_set = byte_18*256 + byte_19
+
+    mpi_dictionary.update({"Integration Period": integration_period_set})
+
+
+    # Byte 20 & 21 - First Pixel Index
+
+    byte_20 = int(mpi_data_frame[16], 16)
+    byte_21 = int(mpi_data_frame[17], 16)
+
+    #TODO: Create a function that determines the value of the pixel
+    # for loop
+    # update pixel array with values
+   
+
+    first_pixel = byte_20 + byte_21
+
+
+    # Byte 22 & 23 - Second Pixel Index
     # ...
     # CRC Bytes
+    crc_byte_1 = 0 # mpi_data_frame[pixel_len - 2]
+    crc_byte_2 = 0 # mpi_data_frame[pixel_len - 1]
+
+    crc_check = crc_byte_1 + crc_byte_2
+    
+    mpi_dictionary.update({"CRC Check": crc_check})
 
     mpi_dict_list.append(mpi_dictionary)
 
@@ -233,8 +331,27 @@ def main() -> None:
 
     # Parse through each index of FRAME and decode each byte to human readable format
     # for frame_index in frame:
+    listy: list[dict] = []
+    index = 1
+    for data in frame:
+        print(f'Data Length {len(data)}')
+        print(data)
+        if (len(data) <= 8):
+            continue
+        listy.append(id_bytes_in_data_frame(data))
+        index += 1
 
-    id_bytes_in_data_frame(frame[1])
+    print(len(listy))
+    # print(listy)
+    
+
+    j = 0
+    while j < len(listy): 
+        print()
+        for key, value in listy[j][0].items():
+            print(f"{key}: {value}")
+            j += 1
+            # print(j)
 
 
     
