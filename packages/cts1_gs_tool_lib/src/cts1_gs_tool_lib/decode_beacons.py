@@ -23,7 +23,7 @@ import polars as pl
 import tyro
 from loguru import logger
 
-# ── Constants ────────────────────────────────────────────────────────────────
+# -- Constants ----------------------------------------------------------------
 
 CSP_HEADER_SIZE = 4
 FRIENDLY_MESSAGE_SIZE = 42  # COMMS_BEACON_FRIENDLY_MESSAGE_SIZE
@@ -108,7 +108,7 @@ FIELD_NAMES = [
     "gnss_rx_mode_enum",
 ]
 
-# ── Enum maps ────────────────────────────────────────────────────────────────
+# -- Enum maps ----------------------------------------------------------------
 
 PACKET_TYPE_MAP = {
     0x01: "BEACON_BASIC",
@@ -175,7 +175,7 @@ def e(mapping: dict[int, str], value: int) -> str:
     return mapping.get(value, f"UNKNOWN({value})")
 
 
-# ── Decoder ──────────────────────────────────────────────────────────────────
+# -- Decoder ------------------------------------------------------------------
 
 
 def decode_packet(
@@ -283,7 +283,7 @@ def decode_packet(
     }
 
 
-# ── CSV parsing ──────────────────────────────────────────────────────────────
+# -- CSV parsing --------------------------------------------------------------
 
 
 def parse_input_csv(path: Path) -> tuple[list[dict[str, Any]], int]:
@@ -328,7 +328,7 @@ def parse_input_csv(path: Path) -> tuple[list[dict[str, Any]], int]:
     return packets, skipped_count
 
 
-# ── Main ─────────────────────────────────────────────────────────────────────
+# -- Main ---------------------------------------------------------------------
 
 
 def main(input_csv: Path, output_csv: Path, output_json: Path | None = None) -> None:
@@ -359,7 +359,7 @@ def main(input_csv: Path, output_csv: Path, output_json: Path | None = None) -> 
         logger.info(f"  CSV  → {output_csv}")
 
     # Pretty-print the most recent packet.
-    print("\n\n── Last decoded packet ──────────────────────────────────────────")  # noqa: T201
+    print("\n\n-- Last decoded packet ------------------------------------------")  # noqa: T201
     for k, v in df_packets.tail(1).to_dicts()[0].items():
         print(f"  {k:<44} {v}")  # noqa: T201
 
