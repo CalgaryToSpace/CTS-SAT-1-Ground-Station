@@ -15,8 +15,6 @@ Requirements:
 - Must parse through each MPI Data Frame by READING and RETAINING the start tag 0c ff ff 0c (DISREGARD FOR CASE)
 - Must input all pixel data into an array for analysis
 - Must plot pixel data 
-
-
 """
 
 # Open File
@@ -28,13 +26,13 @@ def extract_data_from_file(input_file_path: Path) -> str:
         packet_type: The number of packets to extract
         input_file_path: The Path to the input file
     Returns: 
-        A list of bytes in hexadecimal
+        A list of bytes in hexadecimal separated in pairs
 
     """
     # regex = re.compile(r"([0-9A-F][0-9A-F] ?)+", re.IGNORECASE)
 
     # 
-    packet_to_hex_string: list[str] = []
+    packets_to_hex_string: list[str] = []
 
     # Open parsed source file for extraction of MPI Data
     with open(input_file_path, "rb") as log_file:
@@ -62,17 +60,15 @@ def extract_data_from_file(input_file_path: Path) -> str:
                 Append hexidecimal string to array of strings
                 packet_to_hex_string.join(hex_string)
                 """
+                
+                # Append the converted hex string to a list of strings containing MPI data
+                packets_to_hex_string.append(hex_string)
 
-                # 
-                packet_to_hex_string.append(hex_string)
-                 
-            single_packet_to_string = ''.join(packet_to_hex_string)
+            # Convert the "packets_to_hex_string" list to a single string 
+            single_string_of_packets = ''.join(packets_to_hex_string)
             
- 
-            # break
-
-    # Return array of hexadecimal strings
-    return single_packet_to_string
+    # Return the single string hexadecimal data
+    return single_string_of_packets
                
 
 def search_packet(packet:str) -> list[str]:
@@ -363,27 +359,28 @@ def main() -> None:
 
     # Parse through each index of FRAME and decode each byte to human readable format
     # for frame_index in frame:
-    listy: list[dict] = []
-    index = 1
-    for data in frame:
-        print(f'Data Length {len(data)}')
-        print(data)
-        if (len(data) <= 8):
-            continue
-        listy.append(id_bytes_in_data_frame(data))
-        index += 1
 
-    print(len(listy))
-    # print(listy)
+    # listy: list[dict] = []
+    # index = 1
+    # for data in frame:
+    #     print(f'Data Length {len(data)}')
+    #     print(data)
+    #     if (len(data) <= 8):
+    #         continue
+    #     listy.append(id_bytes_in_data_frame(data))
+    #     index += 1
+
+    # print(len(listy))
+    # # print(listy)
     
 
-    j = 0
-    while j < 150: #len(listy)
-        print()
-        for key, value in listy[j][0].items():
-            print(f"{key}: {value}")
-            j += 1
-            # print(j)
+    # j = 0
+    # while j < 150: #len(listy)
+    #     print()
+    #     for key, value in listy[j][0].items():
+    #         print(f"{key}: {value}")
+    #         j += 1
+    #         # print(j)
 
 
     
