@@ -7,6 +7,18 @@ from pathlib import Path
 
 # TODO: Restructure into OOP!!
 
+# TODO:
+"""
+Requirements:
+- Must read parsed MPI downlinked data
+- Must process response code to a telecommand, XX (254_10 or 0xfe_16) _ = BASE #
+- Must parse through each MPI Data Frame by READING and RETAINING the start tag 0c ff ff 0c (DISREGARD FOR CASE)
+- Must input all pixel data into an array for analysis
+- Must plot pixel data 
+
+
+"""
+
 # Open File
 def extract_data_from_file(input_file_path: Path) -> str:
     """ Reads data from binary file, and converts to hex string
@@ -21,18 +33,37 @@ def extract_data_from_file(input_file_path: Path) -> str:
     """
     # regex = re.compile(r"([0-9A-F][0-9A-F] ?)+", re.IGNORECASE)
 
+    # 
     packet_to_hex_string: list[str] = []
 
+    # Open parsed source file for extraction of MPI Data
     with open(input_file_path, "rb") as log_file:
             # for i in range(1):
-            line_num = 0
+
+            # DEBUGGING LINE
+            # line_num = 0
+            # DEBUGGING LINE END
+
+            # Iterate through each line in the log file
             for line in log_file:
+                
+                """
+                # DEBUGGING ONLY:
                 line_num += 1
-                # print(f'This is the {line_num} of data')
+                print(f'This is the {line_num} of data')
+                
+                """
+                # Convert the binary data in each line to HEX STRING
                 hex_string = line.hex()
-                # print(hex_string)
-                # Append hexidecimal string to array of strings
-                # packet_to_hex_string.join(hex_string)
+
+                """
+                # DEBUGGING ONLY
+                print(hex_string)
+                Append hexidecimal string to array of strings
+                packet_to_hex_string.join(hex_string)
+                """
+
+                # 
                 packet_to_hex_string.append(hex_string)
                  
             single_packet_to_string = ''.join(packet_to_hex_string)
@@ -80,6 +111,7 @@ def hex_string_to_2n(data_n_frame: str) ->list[str]:
     """
     Takes a string and divides every two characters;
     Allows for indentifying 1 byte of data in the MPI data frame
+
     """
     data_2n_frame: list[str] = []
 
@@ -346,7 +378,7 @@ def main() -> None:
     
 
     j = 0
-    while j < len(listy): 
+    while j < 150: #len(listy)
         print()
         for key, value in listy[j][0].items():
             print(f"{key}: {value}")
