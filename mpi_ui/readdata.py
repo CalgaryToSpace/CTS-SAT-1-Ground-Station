@@ -77,30 +77,18 @@ def search_packet(packet:str) -> list[str]:
     OCFFFFOC
 
     If a data frame is found, the information is added to a data frame array for processing
+
+    Args: 
+        packet: The string of the packet received from MPI data downlink
+    Returns: 
+        A list of the MPI data packet split into its data frames, starting with "0cffff0c"
     
     """
-# list[str]:
-    data_frames: list[str] = []
-    # for byte in packet:
-        # data_frame_search = re.compile(r"0CFFFF0C([0-9A-F][0-9A-F] ?)+", re.IGNORECASE)
-        # match = data_frame_search.search(byte)
 
-    data_frame_search = packet.split(r'0cffff0c')
+    # Search the packet string and split the string whenever '0cffff0c' is found
+    # '0cffff0c' will be at the front of eacah split packet
+    data_frame_search = re.split(r'(?=0cffff0c)', packet)
 
-
-    # print(data_frame_search)
-
-        # Whenever the sequence 0CFFFF0C is encountered a new list index is created carry the data frame information
-        # if match:
-        #     data_frame = match.group()
-
-        # 'data_frame_search' is now a LIST of strings
-        # To add to a MASS LIST iterate through each index in the 'data_frame_search' array 
-        # Append each value to a MASS LIST
-    # for data_frame in data_frame_search:
-    #     data_frames.append(data_frame)
-            
-        # print(data_frames)
     return data_frame_search
 
 def hex_string_to_2n(data_n_frame: str) ->list[str]:
@@ -141,7 +129,21 @@ def pixel_value(pixel_data_1: int, pixel_data_2: int) -> int:
 
     return pixel_val
 
+def mpi_response_code(response_code: str) ->None:
+    """
+    Takes the first index of the MPI data packet and translates its response code
 
+    Arg: 
+        repsonse_code: The response code retrieved from the MPI packet
+    Returns: 
+        None
+    """
+    # The last two strings will indicate if the MPI command was successfully exectuted
+    # Reading '0xfe' indcates success
+    if response_code[-2:] == 'fe':
+        # The next to last two strings will indicate what MPI telecommand was succesfully executed:
+        
+        
 def id_bytes_in_data_frame(data_frame: list[str]) ->list[dict]:
     """ Add each data frame to a resulting DICTIONARY???
     """
@@ -346,9 +348,10 @@ def main() -> None:
     # END of DEBUGGING
 
     # Search each line of the packet for MPI Data Frames
-    frame = search_packet(packets_in_hex_string)
+    list_of_frames = search_packet(packets_in_hex_string)
 
     # FOR DEBUGGING: Print out the Data Frames
+    # print(frame)
     # data_num = 0
     # for frame_stuff in frame:
     #     data_num +=1
@@ -357,18 +360,27 @@ def main() -> None:
     #     print(frame_stuff)
     # END of DEBUGGING
 
-    # Parse through each index of FRAME and decode each byte to human readable format
-    # for frame_index in frame:
+    # Parse through each index of LIST_OF_FRAMES and decode each byte to human readable format
 
-    # listy: list[dict] = []
-    # index = 1
-    # for data in frame:
-    #     print(f'Data Length {len(data)}')
-    #     print(data)
-    #     if (len(data) <= 8):
-    #         continue
-    #     listy.append(id_bytes_in_data_frame(data))
-    #     index += 1
+    frames: list[dict] = []
+    # Retrieve length of the entire LIST_OF_FRAMES
+    length_of_frame_list = len(list_of_frames)
+
+    # The value of the length of the list will be used to parse through the entire list
+    # and also identify the response code of the MPI
+    for frame in range(length_of_frame_list): #list_of_frames:
+        if frame == 0:
+            print(f'Data Length {len(list_of_frames[frame])}')
+            # Identify the MPI response code
+        else:
+            print(f'Data Length {len(list_of_frames[frame])}')
+            print(list_of_frames[frame])
+            # Identify the data bytes in the frame
+            frames.append(id_bytes_in_data_frame(frame))
+        # if (len(frame) <= 8):
+        #     continue
+        # 
+        # index += 1
 
     # print(len(listy))
     # # print(listy)
@@ -380,7 +392,7 @@ def main() -> None:
     #     for key, value in listy[j][0].items():
     #         print(f"{key}: {value}")
     #         j += 1
-    #         # print(j)
+            # print(j)
 
 
     
@@ -388,11 +400,6 @@ if __name__ == "__main__":
     main()
 
 
-
-
-# Read Binary File
-# Convert Binary Values to Hexadecimal and save to variable
-# Print Data
 
 
 ##### CUTS #############
@@ -425,3 +432,32 @@ if __name__ == "__main__":
                 #     # packets.append(packet_bytes)
                 #     packets.append(hex_string)
                 #     break
+
+
+### From 'search packet'
+# list[str]:
+    data_frames: list[str] = []
+    # for byte in packet:
+        # data_frame_search = re.compile(r"0CFFFF0C([0-9A-F][0-9A-F] ?)+", re.IGNORECASE)
+        # match = data_frame_search.search(byte)
+
+    # data_frame_search = packet.split(r'(?=0cffff0c)')
+
+# Read Binary File
+# Convert Binary Values to Hexadecimal and save to variable
+# Print Data
+
+# print(data_frame_search)
+
+        # Whenever the sequence 0CFFFF0C is encountered a new list index is created carry the data frame information
+        # if match:
+        #     data_frame = match.group()
+
+        # 'data_frame_search' is now a LIST of strings
+        # To add to a MASS LIST iterate through each index in the 'data_frame_search' array 
+        # Append each value to a MASS LIST
+    # for data_frame in data_frame_search:
+    #     data_frames.append(data_frame)
+            
+        # print(data_frames)
+###
