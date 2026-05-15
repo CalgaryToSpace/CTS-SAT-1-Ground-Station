@@ -173,12 +173,17 @@ def update_stored_command_preview(
         resp_fname_suffix_tag = None
 
     tssent_timestamp_ms = None
+    tsexec_timestamp_ms = None
+
 
     if tssent_datetime_input:
         tssent_timestamp_ms = parse_datetime_to_timestamp_ms(tssent_datetime_input)
+        tsexec_timestamp_ms = parse_datetime_to_timestamp_ms(tssent_datetime_input)
 
         if tssent_timestamp_ms is None:
             logger.error(f"Invalid tssent datetime: {tssent_datetime_input}")
+        if tsexec_timestamp_ms is None:
+            logger.error(f"Invalid tsexec datetime: {tssent_datetime_input}")
 
     # Get the selected command and its arguments.
     selected_command = get_telecommand_by_name(selected_command_name)
@@ -206,6 +211,8 @@ def update_stored_command_preview(
 
     if tssent_timestamp_ms is not None:
         extra_suffix_tags["tssent"] = str(tssent_timestamp_ms)
+    if tsexec_timestamp_ms is not None:
+        extra_suffix_tags["tsexec"] = str(tsexec_timestamp_ms)
 
     return generate_telecommand_preview(
         tcmd_name=selected_command_name,
