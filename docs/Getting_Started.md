@@ -4,7 +4,7 @@
 
 1. Install the `uv` package manager: https://docs.astral.sh/uv/getting-started/installation/
 2. Clone this repo, and open a terminal in the repo root.
-3. Run `uv sync` to create a virtual environment and install all workspace dependencies.
+3. Run `uv sync --dev` to create a virtual environment and install all workspace dependencies.
 
 ### Using Tools
 

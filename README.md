@@ -1,7 +1,5 @@
 # CTS-SAT-1-Ground-Station
-Ground Station documentation and software for the CTS-SAT-1 (FrontierSat) 3U CubeSat mission.
-This software intends to receive, store, and display telemetry from the satellite, and is used to send
-telecommands during live passes.
+Ground Station documentation and software for the CTS-SAT-1 (FrontierSat) 3U CubeSat mission. This software intends to receive, store, and display telemetry from the satellite, and is used to send telecommands during live passes.
 
 ## Quick Links
 
