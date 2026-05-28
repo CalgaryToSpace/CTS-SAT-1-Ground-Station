@@ -9,6 +9,7 @@ members = [
     "cts1-gs-forwarder",
     "cts1-gs-parent",
     "cts1-gs-tool-lib",
+    "cts1-mo-tools",
 ]
 
 [[package]]
@@ -86,6 +87,7 @@ dependencies = [
     { name = "cts1-gs-database" },
     { name = "cts1-gs-forwarder" },
     { name = "cts1-gs-tool-lib" },
+    { name = "cts1-mo-tools" },
     { name = "loguru" },
     { name = "numpy" },
 ]
@@ -103,6 +105,7 @@ requires-dist = [
     { name = "cts1-gs-database", editable = "packages/cts1_gs_database" },
     { name = "cts1-gs-forwarder", editable = "packages/cts1_gs_forwarder" },
     { name = "cts1-gs-tool-lib", editable = "packages/cts1_gs_tool_lib" },
+    { name = "cts1-mo-tools", editable = "packages/cts1_mo_tools" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "numpy" },
 ]
@@ -118,6 +121,33 @@ dev = [
 name = "cts1-gs-tool-lib"
 version = "0.1.0"
 source = { editable = "packages/cts1_gs_tool_lib" }
+dependencies = [
+    { name = "polars" },
+    { name = "tyro" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "polars" },
+    { name = "tyro" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=8.3.4" },
+    { name = "ruff", specifier = ">=0.8.1" },
+]
+
+[[package]]
+name = "cts1-mo-tools"
+version = "0.1.0"
+source = { editable = "packages/cts1_mo_tools" }
 dependencies = [
     { name = "polars" },
     { name = "tyro" },

@@ -331,7 +331,7 @@ def parse_input_csv(path: Path) -> tuple[list[dict[str, Any]], int]:
 # -- Main ---------------------------------------------------------------------
 
 
-def main(input_csv: Path, output_csv: Path, output_json: Path | None = None) -> None:
+def run(input_csv: Path, output_csv: Path, output_json: Path | None = None) -> None:
     """Decode CTS1 beacon packets from a SatNOGS-style pipe-delimited CSV.
 
     Also writes a sidecar JSON file alongside the output CSV
@@ -364,5 +364,10 @@ def main(input_csv: Path, output_csv: Path, output_json: Path | None = None) -> 
         print(f"  {k:<44} {v}")  # noqa: T201
 
 
+def main() -> None:
+    """Entry point."""
+    tyro.cli(run)
+
+
 if __name__ == "__main__":
-    tyro.cli(main)
+    main()
