@@ -1,19 +1,21 @@
-## Getting Started
+# Getting Started
 
-### Set Up `uv`
+## Set Up `uv`
 
 1. Install the `uv` package manager: https://docs.astral.sh/uv/getting-started/installation/
 2. Clone this repo, and open a terminal in the repo root.
 3. Run `uv sync --dev` to create a virtual environment and install all workspace dependencies.
 
-### Using Tools
+## Using Tools
 
-#### SatNOGs Decoder
+### SatNOGS Decoder
 
-1. Run `uv run packages/cts1_gs_tool_lib/src/cts1_gs_tool_lib/decode_beacons.py --help` to confirm installation and
-learn more about the script.
-4. Run `uv run packages/cts1_gs_tool_lib/src/cts1_gs_tool_lib/decode_beacons.py --input-csv "PATH" --output-csv "PATH"`
-replacing the paths with your SatNOGs input data and desired output location.
+1. Run `uv run cts1_decode_satnogs_packets --help` to confirm installation and
+learn more about the tool.
+2. Make an account at SatNOGS and sign in.
+3. Export data frames from the "Data Export" section at: https://db.satnogs.org/satellite/GGCH-4346-1583-9419-5634#data
+4. Run `uv run cts1_decode_satnogs_packets --input-csv "PATH" --output-csv "PATH"`
+    * Replace the paths with your SatNOGS input data and desired output location.
 
 ## Development
 

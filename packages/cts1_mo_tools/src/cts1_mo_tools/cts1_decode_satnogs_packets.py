@@ -1,5 +1,5 @@
 """
-CTS-SAT-1 Beacon Packet Decoder.
+CTS-SAT-1 Packet Decoder (from SatNOGS data).
 
 Decodes COMMS_*_packet_t structs from the SatNOGS-style CSV export.
 

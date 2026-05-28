@@ -11,7 +11,7 @@ dependencies = [
 ]
 
 [project.scripts]
-cts1_decode_beacons = "cts1_mo_tools.cts1_decode_beacons:main"
+cts1_decode_satnogs_packets = "cts1_mo_tools.cts1_decode_satnogs_packets:main"
 
 [dependency-groups]
 dev = [
