@@ -1,7 +1,7 @@
 """
 CTS-SAT-1 Beacon Packet Decoder.
 
-Decodes COMMS_beacon_basic_packet_t structs from the SatNOGS-style CSV export.
+Decodes COMMS_*_packet_t structs from the SatNOGS-style CSV export.
 
 CSV format (pipe-delimited):
   timestamp | hex_payload | (empty) | ground_station
@@ -22,6 +22,8 @@ from ordered_set import OrderedSet
 CSP_HEADER_SIZE = 4
 FRIENDLY_MESSAGE_SIZE = 42  # COMMS_BEACON_FRIENDLY_MESSAGE_SIZE
 END_MESSAGE_SIZE = 4  # "END\0"
+
+AX100_DOWNLINK_MAX_BYTES_SIZE = 200
 
 FIXED_FMT = (
     "<"
@@ -61,10 +63,12 @@ FIXED_FMT = (
     "B"  # gnss_uart_interrupt_enabled
     "B"  # gnss_rx_mode_enum
 )
-FIXED_SIZE = struct.calcsize(FIXED_FMT)
-TOTAL_STRUCT_SIZE = FIXED_SIZE + FRIENDLY_MESSAGE_SIZE + END_MESSAGE_SIZE  # 130 bytes
+BEACON_FIXED_SIZE = struct.calcsize(FIXED_FMT)
+BEACON_TOTAL_STRUCT_SIZE = (
+    BEACON_FIXED_SIZE + FRIENDLY_MESSAGE_SIZE + END_MESSAGE_SIZE
+)  # 130 bytes
 
-FIELD_NAMES = [
+BEACON_FIELD_NAMES = [
     "packet_type",
     "satellite_name",
     "active_rf_switch_antenna",
@@ -102,6 +106,31 @@ FIELD_NAMES = [
     "gnss_rx_mode_enum",
 ]
 
+# COMMS_tcmd_response_packet_t layout (after the CSP header):
+#   uint8_t  packet_type        1
+#   uint64_t ts_sent            8
+#   uint8_t  response_code      1
+#   uint16_t duration_ms        2
+#   uint8_t  response_seq_num   1
+#   uint8_t  response_max_seq_num 1
+#   uint8_t  data[186]
+TCMD_RESPONSE_HEADER_FMT = "<B Q B H B B"
+TCMD_RESPONSE_HEADER_SIZE = struct.calcsize(TCMD_RESPONSE_HEADER_FMT)
+TCMD_RESPONSE_MAX_DATA = AX100_DOWNLINK_MAX_BYTES_SIZE - 1 - 8 - 1 - 2 - 1 - 1  # 186
+
+# COMMS_bulk_file_downlink_packet_t layout (after the CSP header):
+#   uint8_t  packet_type   1
+#   uint32_t file_offset   4
+#   uint8_t  data[195]
+BULK_DOWNLINK_HEADER_FMT = "<B I"
+BULK_DOWNLINK_HEADER_SIZE = struct.calcsize(BULK_DOWNLINK_HEADER_FMT)
+BULK_DOWNLINK_MAX_DATA = AX100_DOWNLINK_MAX_BYTES_SIZE - 1 - 4  # 195
+
+# COMMS_log_message_packet_t layout (after the CSP header):
+#   uint8_t packet_type   1
+#   uint8_t data[199]
+LOG_MESSAGE_MAX_DATA = AX100_DOWNLINK_MAX_BYTES_SIZE - 1  # 199
+
 # -- Enum maps ----------------------------------------------------------------
 
 PACKET_TYPE_MAP = {
@@ -111,6 +140,7 @@ PACKET_TYPE_MAP = {
     0x04: "TCMD_RESPONSE",
     0x10: "BULK_FILE_DOWNLINK",
 }
+PACKET_TYPE_MAP_INV = {v: k for k, v in PACKET_TYPE_MAP.items()}
 RF_SWITCH_CONTROL_MODE_MAP = {
     0: "TOGGLE_BEFORE_EVERY_BEACON",
     1: "FORCE_ANT1",
@@ -169,29 +199,29 @@ def e(mapping: dict[int, str], value: int) -> str:
     return mapping.get(value, f"UNKNOWN({value})")
 
 
-# -- Decoder ------------------------------------------------------------------
+# -- Decoders -----------------------------------------------------------------
 
 
-def decode_beacon_packet(hex_str: str) -> dict[str, Any]:
-    raw = bytes.fromhex(hex_str)
-    if len(raw) < CSP_HEADER_SIZE + TOTAL_STRUCT_SIZE:
-        msg = f"Too short: {len(raw)} bytes"
+def decode_beacon_basic_packet(payload: bytes) -> dict[str, Any]:
+    """Decode a COMMS_beacon_basic_packet_t payload (CSP header already stripped)."""
+    if len(payload) < BEACON_TOTAL_STRUCT_SIZE:
+        msg = (
+            f"Too short for BEACON_BASIC: {len(payload)} bytes "
+            f"(need {BEACON_TOTAL_STRUCT_SIZE})"
+        )
         raise ValueError(msg)
-
-    csp = raw[:CSP_HEADER_SIZE]
-    payload = raw[CSP_HEADER_SIZE:]
 
     vals = struct.unpack_from(FIXED_FMT, payload, 0)
 
-    if vals[0] != 0x01:  # BEACON_BASIC
-        msg = f"Unapplicable packet type: {vals[0]}"
+    if vals[0] != PACKET_TYPE_MAP_INV["BEACON_BASIC"]:
+        msg = f"Unexpected packet_type byte for BEACON_BASIC: {vals[0]:#04x}"
         raise ValueError(msg)
 
-    rf = dict(zip(FIELD_NAMES, vals, strict=True))
-    fm_raw = payload[FIXED_SIZE : FIXED_SIZE + FRIENDLY_MESSAGE_SIZE]
+    rf = dict(zip(BEACON_FIELD_NAMES, vals, strict=True))
+    fm_raw = payload[BEACON_FIXED_SIZE : BEACON_FIXED_SIZE + FRIENDLY_MESSAGE_SIZE]
     friendly = fm_raw.split(b"\x00")[0].decode("utf-8", errors="replace")
     end_raw = payload[
-        FIXED_SIZE + FRIENDLY_MESSAGE_SIZE : FIXED_SIZE
+        BEACON_FIXED_SIZE + FRIENDLY_MESSAGE_SIZE : BEACON_FIXED_SIZE
         + FRIENDLY_MESSAGE_SIZE
         + END_MESSAGE_SIZE
     ]
@@ -206,7 +236,6 @@ def decode_beacon_packet(hex_str: str) -> dict[str, Any]:
     )
 
     return {
-        "csp_header_hex": csp.hex(),
         "packet_type": e(PACKET_TYPE_MAP, rf["packet_type"]),
         # Identity
         "satellite_name": sat_name,
@@ -278,31 +307,187 @@ def decode_beacon_packet(hex_str: str) -> dict[str, Any]:
     }
 
 
-def decode_packet_safe(hex_str: str) -> dict[str, str] | None:
-    try:
-        return decode_beacon_packet(hex_str)
-    except ValueError:
-        pass
+def decode_beacon_peripheral_packet(payload: bytes) -> dict[str, Any]:
+    """Decode a COMMS_PACKET_TYPE_BEACON_PERIPHERAL payload.
 
-    # If we failed to decode the packet, attempt to decode just the packet type.
+    No struct is defined in the header for this type yet; we surface the raw
+    bytes so the row is still tagged correctly rather than silently dropped.
+    """
+    return {
+        "packet_type": "BEACON_PERIPHERAL",
+        "raw_payload_hex": payload.hex(),
+        "_note": "BEACON_PERIPHERAL struct not yet defined; raw bytes preserved",
+    }
+
+
+def decode_log_message_packet(payload: bytes) -> dict[str, Any]:
+    """Decode a COMMS_log_message_packet_t payload (CSP header already stripped).
+
+    Layout:
+        uint8_t  packet_type   (1 byte, always 0x03)
+        uint8_t  data[199]     (null-terminated UTF-8 log string)
+    """
+    if len(payload) < 1:
+        msg = "Too short for LOG_MESSAGE: 0 bytes"
+        raise ValueError(msg)
+
+    if payload[0] != PACKET_TYPE_MAP_INV["LOG_MESSAGE"]:
+        msg = f"Unexpected packet_type byte for LOG_MESSAGE: {payload[0]:#04x}"
+        raise ValueError(msg)
+
+    data_bytes = payload[1 : 1 + LOG_MESSAGE_MAX_DATA]
+    # Treat as null-terminated string; preserve anything after the first null
+    # as a hex dump for forensic purposes.
+    null_pos = data_bytes.find(b"\x00")
+    if null_pos >= 0:
+        message = data_bytes[:null_pos].decode("utf-8", errors="replace")
+        trailing = data_bytes[null_pos + 1 :]
+        trailing_nonzero = trailing.rstrip(b"\x00")
+        trailing_hex = trailing_nonzero.hex() if trailing_nonzero else None
+    else:
+        message = data_bytes.decode("utf-8", errors="replace")
+        trailing_hex = None
+
+    return {
+        "packet_type": "LOG_MESSAGE",
+        "log_message": message,
+        "log_trailing_data_hex": trailing_hex,
+    }
+
+
+def decode_tcmd_response_packet(payload: bytes) -> dict[str, Any]:
+    """Decode a COMMS_tcmd_response_packet_t payload (CSP header already stripped).
+
+    Layout:
+        uint8_t  packet_type          (1 byte, always 0x04)
+        uint64_t ts_sent              (8 bytes)
+        uint8_t  response_code        (1 byte)
+        uint16_t duration_ms          (2 bytes)
+        uint8_t  response_seq_num     (1 byte)
+        uint8_t  response_max_seq_num (1 byte)
+        uint8_t  data[186]
+    """
+    if len(payload) < TCMD_RESPONSE_HEADER_SIZE:
+        msg = (
+            f"Too short for TCMD_RESPONSE: {len(payload)} bytes "
+            f"(need at least {TCMD_RESPONSE_HEADER_SIZE})"
+        )
+        raise ValueError(msg)
+
+    (
+        packet_type,
+        ts_sent,
+        response_code,
+        duration_ms,
+        response_seq_num,
+        response_max_seq_num,
+    ) = struct.unpack_from(TCMD_RESPONSE_HEADER_FMT, payload, 0)
+
+    if packet_type != PACKET_TYPE_MAP_INV["TCMD_RESPONSE"]:
+        msg = f"Unexpected packet_type byte for TCMD_RESPONSE: {packet_type:#04x}"
+        raise ValueError(msg)
+
+    data_bytes = payload[
+        TCMD_RESPONSE_HEADER_SIZE : TCMD_RESPONSE_HEADER_SIZE + TCMD_RESPONSE_MAX_DATA
+    ]
+    # Treat the response data as a null-terminated string if it looks like text.
+    null_pos = data_bytes.find(b"\x00")
+    if null_pos >= 0:
+        response_text = data_bytes[:null_pos].decode("utf-8", errors="replace")
+    else:
+        response_text = data_bytes.decode("utf-8", errors="replace")
+
+    return {
+        "packet_type": "TCMD_RESPONSE",
+        "tcmd_ts_sent": ts_sent,
+        "tcmd_response_code": response_code,
+        "tcmd_duration_ms": duration_ms,
+        "tcmd_response_seq_num": response_seq_num,
+        "tcmd_response_max_seq_num": response_max_seq_num,
+        "tcmd_response_text": response_text,
+    }
+
+
+def decode_bulk_file_downlink_packet(payload: bytes) -> dict[str, Any]:
+    """Decode a COMMS_bulk_file_downlink_packet_t payload (CSP header already stripped).
+
+    Layout:
+        uint8_t  packet_type  (1 byte, always 0x10)
+        uint32_t file_offset  (4 bytes)
+        uint8_t  data[195]
+    """
+    if len(payload) < BULK_DOWNLINK_HEADER_SIZE:
+        msg = (
+            f"Too short for BULK_FILE_DOWNLINK: {len(payload)} bytes "
+            f"(need at least {BULK_DOWNLINK_HEADER_SIZE})"
+        )
+        raise ValueError(msg)
+
+    packet_type, file_offset = struct.unpack_from(BULK_DOWNLINK_HEADER_FMT, payload, 0)
+
+    if packet_type != PACKET_TYPE_MAP_INV["BULK_FILE_DOWNLINK"]:
+        msg = f"Unexpected packet_type byte for BULK_FILE_DOWNLINK: {packet_type:#04x}"
+        raise ValueError(msg)
+
+    data_bytes = payload[
+        BULK_DOWNLINK_HEADER_SIZE : BULK_DOWNLINK_HEADER_SIZE + BULK_DOWNLINK_MAX_DATA
+    ]
+
+    return {
+        "packet_type": "BULK_FILE_DOWNLINK",
+        "bulk_file_offset": file_offset,
+        "bulk_data_len": len(data_bytes),
+        "bulk_data_hex": data_bytes.hex(),
+    }
+
+
+# Map packet_type byte → decoder function (payload = post-CSP bytes).
+_PACKET_DECODERS = {
+    0x01: decode_beacon_basic_packet,
+    0x02: decode_beacon_peripheral_packet,
+    0x03: decode_log_message_packet,
+    0x04: decode_tcmd_response_packet,
+    0x10: decode_bulk_file_downlink_packet,
+}
+
+
+def decode_packet_safe(hex_str: str) -> dict[str, Any] | None:
+    """Attempt to decode any supported packet type.
+
+    Returns a dict with at least ``packet_type`` set, or None if the bytes
+    cannot be interpreted at all.
+    """
     try:
         raw = bytes.fromhex(hex_str)
-        if len(raw) <= CSP_HEADER_SIZE:
-            return None
-
-        packet_type = e(PACKET_TYPE_MAP, raw[CSP_HEADER_SIZE])
-        if "UNKNOWN" in packet_type:
-            packet_type = "UNKNOWN"  # Remove the number suffix in parens.
-
-        return {
-            "csp_header_hex": raw[:CSP_HEADER_SIZE].hex(),
-            "packet_type": packet_type,
-        }
     except ValueError:
         return None
 
+    if len(raw) <= CSP_HEADER_SIZE:
+        return None
 
-# -- CSV parsing --------------------------------------------------------------
+    csp = raw[:CSP_HEADER_SIZE]
+    payload = raw[CSP_HEADER_SIZE:]
+    packet_type_byte = payload[0]
+
+    base = {"csp_header_hex": csp.hex()}
+
+    decoder = _PACKET_DECODERS.get(packet_type_byte)
+    if decoder is not None:
+        try:
+            decoded = decoder(payload)
+        except (ValueError, struct.error) as exc:
+            logger.warning(
+                f"Failed to decode packet type {packet_type_byte:#04x}: {exc}"
+            )
+            # Fall through to the partial decode below.
+        else:
+            return {**base, **decoded}
+
+    # Unknown or malformed: at least tag the packet type name.
+    packet_type_name = e(PACKET_TYPE_MAP, packet_type_byte)
+    if "UNKNOWN" in packet_type_name:
+        packet_type_name = "UNKNOWN"
+    return {**base, "packet_type": packet_type_name}
 
 
 # -- Main ---------------------------------------------------------------------
@@ -332,7 +517,7 @@ def run(input_csv: Path, output_csv: Path) -> None:
         if decoded:
             decoded_packets[hex_val] = decoded
 
-    # Now make a dataframe to join back.
+    # Build a dataframe from the decoded results and join back.
     df_decoded = pl.DataFrame(
         [
             {"hex_payload": hex_val, **decoded_packet}
@@ -360,12 +545,21 @@ def run(input_csv: Path, output_csv: Path) -> None:
         df.write_csv(output_csv)
         logger.info(f"  CSV  → {output_csv}")
 
-    # Pretty-print the most recent packet.
-    df_beacons = df.filter(pl.col("packet_type") == pl.lit("BASIC_BEACON"))
+    # Pretty-print the most recent BEACON_BASIC packet.
+    df_beacons = df.filter(pl.col("packet_type") == pl.lit("BEACON_BASIC"))
     if len(df_beacons) > 0:
-        print("\n\n-- Last decoded packet ------------------------------------------")  # noqa: T201
+        print("\n\n-- Last BEACON_BASIC packet -------------------------------------")  # noqa: T201
         for k, v in df_beacons.tail(1).to_dicts()[0].items():
             print(f"  {k:<44} {v}")  # noqa: T201
+
+    # Summary counts by packet type.
+    print("\n\n-- Packet type summary ------------------------------------------")  # noqa: T201
+    df_summary = (
+        df.group_by("packet_type")
+        .agg(pl.len().alias("count"))
+        .sort("count", descending=True)
+    )
+    logger.info(f"Packet type summary: {df_summary}")
 
 
 def main() -> None:
