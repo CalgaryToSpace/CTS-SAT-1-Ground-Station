@@ -4,7 +4,7 @@ CTS-SAT-1 Packet Decoder (from SatNOGS data).
 Decodes COMMS_*_packet_t structs from the SatNOGS-style CSV export.
 
 CSV format (pipe-delimited):
-  timestamp | hex_payload | (empty) | ground_station
+  timestamp | hex_payload | observation_id | ground_station
 """
 
 import datetime
@@ -501,12 +501,15 @@ def run(input_csv: Path, output_csv: Path) -> None:
         input_csv,
         separator="|",
         has_header=False,
-        new_columns=["received_timestamp", "hex_payload", "empty", "ground_station"],
+        new_columns=[
+            "received_timestamp",
+            "hex_payload",
+            "observation_id",
+            "ground_station",
+        ],
     )
 
     logger.info(f"Read: {len(df)} rows")
-
-    df = df.drop("empty")
 
     # Create a separate dataframe of decoded packets.
     decoded_packets: dict[str, dict[str, Any]] = {
