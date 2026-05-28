@@ -5,23 +5,17 @@ Decodes COMMS_beacon_basic_packet_t structs from the SatNOGS-style CSV export.
 
 CSV format (pipe-delimited):
   timestamp | hex_payload | (empty) | ground_station
-
-Packet layout (all little-endian, #pragma pack(1)):
-  4  bytes  CSP header         (stripped, not decoded)
-  130 bytes  COMMS_beacon_basic_packet_t
-  0-4 bytes  optional trailing bytes appended by ground station (CRC/metadata)
 """
 
 import datetime
-import json
 import struct
-import sys
 from pathlib import Path
 from typing import Any
 
 import polars as pl
 import tyro
 from loguru import logger
+from ordered_set import OrderedSet
 
 # -- Constants ----------------------------------------------------------------
 
@@ -178,17 +172,21 @@ def e(mapping: dict[int, str], value: int) -> str:
 # -- Decoder ------------------------------------------------------------------
 
 
-def decode_packet(
-    hex_str: str, received_timestamp: str, ground_station: str
-) -> dict[str, Any]:
+def decode_beacon_packet(hex_str: str) -> dict[str, Any]:
     raw = bytes.fromhex(hex_str)
     if len(raw) < CSP_HEADER_SIZE + TOTAL_STRUCT_SIZE:
         msg = f"Too short: {len(raw)} bytes"
         raise ValueError(msg)
+
     csp = raw[:CSP_HEADER_SIZE]
     payload = raw[CSP_HEADER_SIZE:]
 
     vals = struct.unpack_from(FIXED_FMT, payload, 0)
+
+    if vals[0] != 0x01:  # BEACON_BASIC
+        msg = f"Unapplicable packet type: {vals[0]}"
+        raise ValueError(msg)
+
     rf = dict(zip(FIELD_NAMES, vals, strict=True))
     fm_raw = payload[FIXED_SIZE : FIXED_SIZE + FRIENDLY_MESSAGE_SIZE]
     friendly = fm_raw.split(b"\x00")[0].decode("utf-8", errors="replace")
@@ -208,13 +206,9 @@ def decode_packet(
     )
 
     return {
-        # Meta
-        "received_timestamp": received_timestamp,
-        "ground_station": ground_station,
         "csp_header_hex": csp.hex(),
-        "end_sentinel_ok": end_ok,
-        # Identity
         "packet_type": e(PACKET_TYPE_MAP, rf["packet_type"]),
+        # Identity
         "satellite_name": sat_name,
         # RF switch
         "active_rf_switch_antenna": rf["active_rf_switch_antenna"],
@@ -280,88 +274,98 @@ def decode_packet(
         "gnss_rx_mode": e(GNSS_RX_MODE_MAP, rf["gnss_rx_mode_enum"]),
         # Friendly
         "friendly_message": friendly,
+        "end_sentinel_ok": end_ok,
     }
+
+
+def decode_packet_safe(hex_str: str) -> dict[str, str] | None:
+    try:
+        return decode_beacon_packet(hex_str)
+    except ValueError:
+        pass
+
+    # If we failed to decode the packet, attempt to decode just the packet type.
+    try:
+        raw = bytes.fromhex(hex_str)
+        if len(raw) <= CSP_HEADER_SIZE:
+            return None
+
+        packet_type = e(PACKET_TYPE_MAP, raw[CSP_HEADER_SIZE])
+        if "UNKNOWN" in packet_type:
+            packet_type = "UNKNOWN"  # Remove the number suffix in parens.
+
+        return {
+            "csp_header_hex": raw[:CSP_HEADER_SIZE].hex(),
+            "packet_type": packet_type,
+        }
+    except ValueError:
+        return None
 
 
 # -- CSV parsing --------------------------------------------------------------
 
 
-def parse_input_csv(path: Path) -> tuple[list[dict[str, Any]], int]:
-    packets: list[dict[str, Any]] = []
-    skipped_count = 0
-
-    with path.open(newline="", encoding="utf-8") as f:
-        for lineno, raw_line in enumerate(f, 1):
-            line = raw_line.rstrip("\n")
-            if not line:
-                continue
-            parts = line.split("|")
-            if len(parts) < 2:  # noqa: PLR2004
-                continue
-            timestamp = parts[0].strip()
-            hex_payload = parts[1].strip()
-            ground_station = parts[3].strip() if len(parts) > 3 else ""  # noqa: PLR2004
-            if not hex_payload:
-                skipped_count += 1
-                continue
-            try:
-                raw = bytes.fromhex(hex_payload)
-            except ValueError:
-                logger.warning(
-                    f"  [line {lineno}] Invalid hex, skipping.", file=sys.stderr
-                )
-                skipped_count += 1
-                continue
-            if len(raw) < CSP_HEADER_SIZE + 1:
-                skipped_count += 1
-                continue
-            ptype = raw[CSP_HEADER_SIZE]
-            if ptype != 0x01:
-                skipped_count += 1
-                continue
-            try:
-                packets.append(decode_packet(hex_payload, timestamp, ground_station))
-            except Exception as ex:  # noqa: BLE001
-                logger.info(f"  [line {lineno}] Decode error: {ex}", file=sys.stderr)
-                skipped_count += 1
-
-    return packets, skipped_count
-
-
 # -- Main ---------------------------------------------------------------------
 
 
-def run(input_csv: Path, output_csv: Path, output_json: Path | None = None) -> None:
-    """Decode CTS1 beacon packets from a SatNOGS-style pipe-delimited CSV.
-
-    Also writes a sidecar JSON file alongside the output CSV
-    (same path, .json extension).
-    """
+def run(input_csv: Path, output_csv: Path) -> None:
+    """Decode CTS-SAT-1 packets from a SatNOGS-style pipe-delimited CSV."""
     logger.info(f"Reading: {input_csv}")
-    packets: list[dict[str, Any]]
-    packets, skipped = parse_input_csv(input_csv)
-    logger.info(f"Decoded: {len(packets)} beacon packets  |  Skipped: {skipped}")
 
-    df_packets = pl.DataFrame(packets)
-    del packets
+    df = pl.read_csv(
+        input_csv,
+        separator="|",
+        has_header=False,
+        new_columns=["received_timestamp", "hex_payload", "empty", "ground_station"],
+    )
 
-    df_packets = df_packets.sort(
-        "unix_epoch_time_ms", "uptime_ms", "received_timestamp"
-    ).unique(["unix_epoch_time_ms", "uptime_ms"], keep="first", maintain_order=True)
+    logger.info(f"Read: {len(df)} rows")
 
-    if output_json:
-        with output_json.open("w", encoding="utf-8") as f:
-            json.dump(df_packets.to_dict(), f, indent=2, default=str)
-        logger.info(f"  JSON → {output_json}")
+    df = df.drop("empty")
+
+    # Create a separate dataframe of decoded packets.
+    decoded_packets: dict[str, dict[str, Any]] = {
+        # Keys: hex_str, Vals: decoded packet
+    }
+    for hex_val in df["hex_payload"].unique():
+        decoded = decode_packet_safe(hex_val)
+        if decoded:
+            decoded_packets[hex_val] = decoded
+
+    # Now make a dataframe to join back.
+    df_decoded = pl.DataFrame(
+        [
+            {"hex_payload": hex_val, **decoded_packet}
+            for hex_val, decoded_packet in decoded_packets.items()
+        ],
+        infer_schema_length=None,  # Use all rows.
+    )
+
+    df = df.join(
+        df_decoded,
+        on="hex_payload",
+        how="left",
+        validate="m:1",  # Same payload can be received many times.
+        maintain_order="left_right",  # Preserve the order of the original CSV.
+    )
+    del df_decoded
+
+    # Move the "hex_payload" column to the end.
+    df = df.select(
+        *(OrderedSet(df.columns) - {"hex_payload"}),
+        "hex_payload",
+    )
 
     if output_csv:
-        df_packets.write_csv(output_csv)
+        df.write_csv(output_csv)
         logger.info(f"  CSV  → {output_csv}")
 
     # Pretty-print the most recent packet.
-    print("\n\n-- Last decoded packet ------------------------------------------")  # noqa: T201
-    for k, v in df_packets.tail(1).to_dicts()[0].items():
-        print(f"  {k:<44} {v}")  # noqa: T201
+    df_beacons = df.filter(pl.col("packet_type") == pl.lit("BASIC_BEACON"))
+    if len(df_beacons) > 0:
+        print("\n\n-- Last decoded packet ------------------------------------------")  # noqa: T201
+        for k, v in df_beacons.tail(1).to_dicts()[0].items():
+            print(f"  {k:<44} {v}")  # noqa: T201
 
 
 def main() -> None:

@@ -7,10 +7,11 @@ requires-python = ">=3.11"
 dependencies = [
     "tyro",
     "polars",
+    "ordered-set",
 ]
 
 [project.scripts]
-cts1_fetch_satnogs = "cts1_mo_tools.cts1_fetch_satnogs:main"
+cts1_decode_beacons = "cts1_mo_tools.cts1_decode_beacons:main"
 
 [dependency-groups]
 dev = [
