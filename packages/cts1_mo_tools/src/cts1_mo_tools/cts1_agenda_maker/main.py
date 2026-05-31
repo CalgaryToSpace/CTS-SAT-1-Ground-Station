@@ -66,14 +66,15 @@ def format_command(name_args: str, tssent_ms: int, tsexec_ms: int) -> str:
     tsexec_ms: unix ms for scheduled execution (0 = immediate)
     """
     name_args = name_args.strip()
-    if not name_args.endswith(")"):
-        name_args += "()"
-    return (
-        f"{COMMAND_PREFIX}{name_args}"
-        f"@tssent={tssent_ms}"
-        f"@tsexec={tsexec_ms}"
-        f"{COMMAND_SUFFIX}"
-    )
+
+    out = f"{name_args}@tssent={tssent_ms}@tsexec={tsexec_ms}"
+
+    if not out.startswith(COMMAND_PREFIX):
+        out = f"{COMMAND_PREFIX}{out}"
+    if not out.endswith(COMMAND_SUFFIX):
+        out = f"{out}{COMMAND_SUFFIX}"
+
+    return out
 
 
 def set_status(
