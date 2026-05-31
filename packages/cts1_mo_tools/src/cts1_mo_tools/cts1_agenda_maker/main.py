@@ -41,18 +41,18 @@ state = {
 
 
 def parse_iso(s: str) -> datetime:
-    """Parse an ISO 8601 string (including bare Z suffix) to a timezone-aware datetime."""
-    return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    """Parse an ISO 8601 string to a timezone-aware datetime."""
+    dt = datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        msg = f"datetime has no timezone! That's bad! Input string: {s}"
+        raise ValueError(msg)
+
+    return dt
 
 
-def iso_to_local_str(iso: str) -> str:
-    """Convert an ISO 8601 string to the user's local time in ISO format with offset."""
-    try:
-        return (
-            datetime.fromisoformat(iso).astimezone().replace(microsecond=0).isoformat()
-        )
-    except Exception:
-        return iso
+def dt_to_local_str(dt: datetime) -> str:
+    """Format a timezone-aware datetime as local time in ISO format with offset."""
+    return dt.astimezone().replace(microsecond=0).isoformat()
 
 
 def format_command(name_args: str, tssent_ms: int, tsexec_ms: int) -> str:
@@ -117,20 +117,37 @@ def _update_obs_count() -> None:
 
 
 def _append_obs_rows(
-    page: list[dict[str, Any]], uplink_end_dt: datetime | None
+    obs_list: list[dict[str, Any]], uplink_end_dt: datetime | None
 ) -> None:
-    for obs in page:
+    for obs in obs_list:
         obs_id = obs.get("id", "?")
-        start = obs.get("start", "?")
-        end = obs.get("end", "?")
         gs = obs.get("ground_station", "?")
 
+        start_dt: datetime | None = None
+        end_dt: datetime | None = None
+        with contextlib.suppress(Exception):
+            start_dt = parse_iso(obs["start"])
+        with contextlib.suppress(Exception):
+            end_dt = parse_iso(obs["end"])
+
+        start_utc = (
+            start_dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if start_dt
+            else obs.get("start", "?")
+        )
+        end_utc = (
+            end_dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if end_dt
+            else obs.get("end", "?")
+        )
+        start_local = dt_to_local_str(start_dt) if start_dt else "?"
+        end_local = dt_to_local_str(end_dt) if end_dt else "?"
+
         wait_str = "—"
-        if uplink_end_dt is not None:
-            with contextlib.suppress(Exception):
-                delta = parse_iso(start) - uplink_end_dt
-                if delta.total_seconds() >= 0:
-                    wait_str = str(delta)
+        if uplink_end_dt is not None and start_dt is not None:
+            delta = start_dt - uplink_end_dt
+            if delta.total_seconds() >= 0:
+                wait_str = str(delta)
 
         with dpg.table_row(parent="obs_table"):
 
@@ -149,10 +166,10 @@ def _append_obs_rows(
 
             dpg.add_text(str(obs_id))
             dpg.add_text(str(gs))
-            dpg.add_text(start)
-            dpg.add_text(end)
-            dpg.add_text(iso_to_local_str(start))
-            dpg.add_text(iso_to_local_str(end))
+            dpg.add_text(start_utc)
+            dpg.add_text(end_utc)
+            dpg.add_text(start_local)
+            dpg.add_text(end_local)
             dpg.add_text(wait_str)
 
     _update_obs_count()
@@ -180,7 +197,7 @@ def fetch_observations() -> None:
     # Parse uplink start. Used for API filters and the wait-time column.
     uplink_start_dt: datetime | None = None
     with contextlib.suppress(Exception):
-        dt = datetime.fromisoformat(get_str("uplink_start"))
+        dt = parse_iso(get_str("uplink_start"))
         if dt.tzinfo is not None:
             uplink_start_dt = dt
 
@@ -216,7 +233,7 @@ def fetch_observations() -> None:
                     (180, 200, 255, 255),
                 )
 
-            all_obs.sort(key=lambda o: o.get("start", ""))
+            all_obs.sort(key=lambda o: parse_iso(o["start"]))
             state["observations"] = all_obs
             _append_obs_rows(all_obs, uplink_end_dt)
             set_status(
@@ -513,7 +530,7 @@ def build_gui() -> None:
                         dpg.add_text("Fetch next")
                         dpg.add_input_int(
                             tag="next_hours_input",
-                            default_value=6,
+                            default_value=3,
                             min_value=1,
                             max_value=720,
                             width=70,
