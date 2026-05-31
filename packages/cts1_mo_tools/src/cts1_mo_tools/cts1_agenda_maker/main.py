@@ -112,6 +112,13 @@ def _update_obs_count() -> None:
         dpg.set_value("obs_count_text", f"{total} fetched, {selected} selected")
 
 
+def format_timedelta(delta: timedelta) -> str:
+    if delta < timedelta(seconds=0):
+        return f"{-delta} ago"
+
+    return str(delta)
+
+
 # ─────────────────────────────────────────────────────────────
 # SATNOGS
 # ─────────────────────────────────────────────────────────────
@@ -144,11 +151,10 @@ def _append_obs_rows(
         start_local = dt_to_local_str(start_dt) if start_dt else "?"
         end_local = dt_to_local_str(end_dt) if end_dt else "?"
 
-        wait_str = "—"
+        wait_str = "N/A"
         if uplink_end_dt is not None and start_dt is not None:
             delta = start_dt - uplink_end_dt
-            if delta.total_seconds() >= 0:
-                wait_str = str(delta)
+            wait_str = format_timedelta(delta)
 
         with dpg.table_row(parent="obs_table"):
 
