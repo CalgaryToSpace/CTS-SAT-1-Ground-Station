@@ -260,6 +260,15 @@ def _stop_fetch() -> None:
     _fetch_stop.set()
 
 
+def _deselect_all() -> None:
+    state["selected_obs_ids"] = set()
+    for row in dpg.get_item_children("obs_table", slot=1) or []:
+        children = dpg.get_item_children(row, slot=1) or []
+        if children:
+            dpg.set_value(children[0], value=False)
+    _update_obs_count()
+
+
 # -------------------------------------------------------------
 # COMMAND GENERATION
 # -------------------------------------------------------------
@@ -640,6 +649,11 @@ def build_gui() -> None:  # noqa: PLR0915
                 dpg.add_spacer(height=4)
                 with dpg.group(horizontal=True):  # pyright: ignore[reportGeneralTypeIssues]
                     dpg.add_text("", tag="obs_count_text", color=(160, 170, 190, 255))
+                    dpg.add_spacer(width=12)
+                    dpg.add_button(
+                        label="Deselect All",
+                        callback=_deselect_all,
+                    )
                 dpg.add_text(
                     "(All observations are selected by default. Uncheck to exclude.)",
                     color=(160, 170, 190, 255),
