@@ -89,21 +89,21 @@ def set_status(
 def get_float(tag: str, default: float = 0.0) -> float:
     try:
         return float(dpg.get_value(tag))
-    except Exception:
+    except ValueError:
         return default
 
 
 def get_int(tag: str, default: int = 0) -> int:
     try:
         return int(dpg.get_value(tag))
-    except Exception:
+    except ValueError:
         return default
 
 
 def get_str(tag: str) -> str:
     try:
         return str(dpg.get_value(tag)).strip()
-    except Exception:
+    except ValueError:
         return ""
 
 
@@ -158,10 +158,10 @@ def _append_obs_rows(
             delta = start_dt - uplink_end_dt
             wait_str = format_timedelta(delta)
 
-        with dpg.table_row(parent="obs_table"):
+        with dpg.table_row(parent="obs_table"):  # pyright: ignore[reportGeneralTypeIssues]
 
             def make_cb(oid: int) -> Callable[[Any, bool], None]:
-                def cb(_: Any, v: bool) -> None:
+                def cb(_: Any, v: bool) -> None:  # noqa: FBT001
                     if v:
                         state["selected_obs_ids"].add(oid)
                     else:
@@ -184,7 +184,7 @@ def _append_obs_rows(
     _update_obs_count()
 
 
-def fetch_observations() -> None:
+def fetch_observations() -> None:  # noqa: C901
     sat_id = get_str("sat_id_input")
     if not sat_id:
         set_status("[!] Enter a SatNOGS satellite ID first.", (255, 200, 0, 255))
@@ -246,7 +246,7 @@ def fetch_observations() -> None:
                     f"[ok] Loaded {len(all_obs)} future observations.",
                     (100, 255, 150, 255),
                 )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             set_status(f"[x] Fetch error: {exc}", (255, 100, 100, 255))
         finally:
             dpg.configure_item("fetch_btn", enabled=True)
@@ -265,7 +265,7 @@ def _stop_fetch() -> None:
 # -------------------------------------------------------------
 
 
-def generate_agenda() -> None:
+def generate_agenda() -> None:  # noqa: C901, PLR0912, PLR0915
     """Core generation logic."""
     # -- Settings ----------------------------------------------
     uplink_start_str = get_str("uplink_start")
@@ -285,7 +285,7 @@ def generate_agenda() -> None:
                 (255, 100, 100, 255),
             )
             return
-    except Exception:
+    except Exception:  # noqa: BLE001
         set_status(
             "[x] Invalid 'Start of Uplink Pass'. "
             "Use ISO format with timezone: 2024-05-01T12:00:00-07:00",
@@ -484,288 +484,286 @@ def generate_agenda() -> None:
 # -------------------------------------------------------------
 
 
-def build_gui() -> None:
+def build_gui() -> None:  # noqa: PLR0915
     dpg.create_context()
 
-    with dpg.font_registry():
+    with dpg.font_registry():  # pyright: ignore[reportGeneralTypeIssues]
         pass  # use default font
 
-    with dpg.theme() as global_theme:
-        with dpg.theme_component(dpg.mvAll):
-            dpg.add_theme_color(dpg.mvThemeCol_WindowBg, (22, 27, 34, 255))
-            dpg.add_theme_color(dpg.mvThemeCol_TitleBg, (30, 40, 55, 255))
-            dpg.add_theme_color(dpg.mvThemeCol_TitleBgActive, (40, 80, 130, 255))
-            dpg.add_theme_color(dpg.mvThemeCol_FrameBg, (35, 45, 60, 255))
-            dpg.add_theme_color(dpg.mvThemeCol_FrameBgHovered, (50, 65, 90, 255))
-            dpg.add_theme_color(dpg.mvThemeCol_Button, (40, 90, 160, 255))
-            dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (55, 120, 200, 255))
-            dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, (30, 70, 130, 255))
-            dpg.add_theme_color(dpg.mvThemeCol_Header, (40, 80, 130, 255))
-            dpg.add_theme_color(dpg.mvThemeCol_CheckMark, (100, 200, 255, 255))
-            dpg.add_theme_color(dpg.mvThemeCol_Text, (220, 230, 245, 255))
-            dpg.add_theme_color(dpg.mvThemeCol_Tab, (30, 50, 80, 255))
-            dpg.add_theme_color(dpg.mvThemeCol_TabActive, (40, 90, 160, 255))
-            dpg.add_theme_color(dpg.mvThemeCol_TabHovered, (55, 120, 200, 255))
-            dpg.add_theme_color(dpg.mvThemeCol_Separator, (60, 80, 110, 255))
-            dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, 4)
-            dpg.add_theme_style(dpg.mvStyleVar_WindowRounding, 6)
-            dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing, 8, 6)
+    with dpg.theme() as global_theme, dpg.theme_component(dpg.mvAll):  # pyright: ignore[reportGeneralTypeIssues]
+        dpg.add_theme_color(dpg.mvThemeCol_WindowBg, (22, 27, 34, 255))
+        dpg.add_theme_color(dpg.mvThemeCol_TitleBg, (30, 40, 55, 255))
+        dpg.add_theme_color(dpg.mvThemeCol_TitleBgActive, (40, 80, 130, 255))
+        dpg.add_theme_color(dpg.mvThemeCol_FrameBg, (35, 45, 60, 255))
+        dpg.add_theme_color(dpg.mvThemeCol_FrameBgHovered, (50, 65, 90, 255))
+        dpg.add_theme_color(dpg.mvThemeCol_Button, (40, 90, 160, 255))
+        dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (55, 120, 200, 255))
+        dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, (30, 70, 130, 255))
+        dpg.add_theme_color(dpg.mvThemeCol_Header, (40, 80, 130, 255))
+        dpg.add_theme_color(dpg.mvThemeCol_CheckMark, (100, 200, 255, 255))
+        dpg.add_theme_color(dpg.mvThemeCol_Text, (220, 230, 245, 255))
+        dpg.add_theme_color(dpg.mvThemeCol_Tab, (30, 50, 80, 255))
+        dpg.add_theme_color(dpg.mvThemeCol_TabActive, (40, 90, 160, 255))
+        dpg.add_theme_color(dpg.mvThemeCol_TabHovered, (55, 120, 200, 255))
+        dpg.add_theme_color(dpg.mvThemeCol_Separator, (60, 80, 110, 255))
+        dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, 4)
+        dpg.add_theme_style(dpg.mvStyleVar_WindowRounding, 6)
+        dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing, 8, 6)
 
     dpg.bind_theme(global_theme)
 
     now_local = datetime.now().astimezone().replace(microsecond=0).isoformat()
 
-    with dpg.window(
-        label="CTS-SAT-1 Command Agenda Generator",
-        tag="main_window",
-        width=1200,
-        height=800,
-        no_close=True,
+    with (
+        dpg.window(
+            label="CTS-SAT-1 Command Agenda Generator",
+            tag="main_window",
+            width=1200,
+            height=800,
+            no_close=True,
+        ),  # pyright: ignore[reportGeneralTypeIssues]
+        dpg.tab_bar(),  # pyright: ignore[reportGeneralTypeIssues]
     ):
-        with dpg.tab_bar():
-            # ==================================================
-            # TAB 1 - SETTINGS
-            # ==================================================
-            with dpg.tab(label="  Settings"):
-                dpg.add_spacer(height=8)
+        # ==================================================
+        # TAB 1 - SETTINGS
+        # ==================================================
+        with dpg.tab(label="Settings"):  # pyright: ignore[reportGeneralTypeIssues]
+            dpg.add_spacer(height=8)
 
-                # -- Uplink window ------------------------------
-                with dpg.collapsing_header(
-                    label="Uplink Pass Window", default_open=True
-                ):
-                    dpg.add_spacer(height=4)
-                    with dpg.group(horizontal=True):
-                        dpg.add_text("Start of Uplink Pass (ISO with timezone):")
-                        dpg.add_input_text(
-                            tag="uplink_start",
-                            default_value=now_local,
-                            width=260,
-                            hint="2024-05-01T12:00:00-07:00",
-                        )
-                    dpg.add_tooltip("uplink_start")
-                    with dpg.tooltip("uplink_start"):
-                        dpg.add_text(
-                            "ISO 8601 with timezone offset. Timezone is required.\n"
-                            "Examples: 2024-05-01T12:00:00-07:00  or  2024-05-01T19:00:00Z\n"
-                            "This sets the tssent for the first command.\n"
-                            "Only observations that START after (uplink_start + duration)\n"
-                            "will be included."
-                        )
-
-                    with dpg.group(horizontal=True):
-                        dpg.add_text("Uplink Pass Duration (minutes):     ")
-                        dpg.add_input_float(
-                            tag="uplink_dur",
-                            default_value=15.0,
-                            min_value=0.1,
-                            max_value=60.0,
-                            width=120,
-                            format="%.1f",
-                        )
-
-                        dpg.add_tooltip("uplink_dur")
-                        with dpg.tooltip("uplink_dur"):
-                            dpg.add_text(
-                                "Fine to overestimate the duration by a few minutes."
-                            )
-
-                dpg.add_spacer(height=10)
-
-                # -- SatNOGS fetch ------------------------------
-                with dpg.collapsing_header(
-                    label="SatNOGS Observations", default_open=True
-                ):
-                    dpg.add_spacer(height=4)
-                    with dpg.group(horizontal=True):
-                        dpg.add_text("Satellite NORAD ID:")
-                        dpg.add_input_text(
-                            tag="sat_id_input",
-                            default_value="69015",
-                            width=120,
-                            hint="e.g. 69015",
-                        )
-                        dpg.add_text("Fetch next")
-                        dpg.add_input_int(
-                            tag="next_hours_input",
-                            default_value=3,
-                            min_value=1,
-                            max_value=720,
-                            width=70,
-                        )
-                        dpg.add_text("hrs after uplink")
-                        dpg.add_button(
-                            label="Fetch Observations",
-                            tag="fetch_btn",
-                            callback=fetch_observations,
-                        )
-                        dpg.add_button(
-                            label="Stop",
-                            tag="stop_fetch_btn",
-                            callback=_stop_fetch,
-                            show=False,
-                        )
-                        dpg.add_loading_indicator(
-                            tag="fetch_spinner",
-                            show=False,
-                            radius=1.5,
-                            speed=1.5,
-                            color=(100, 180, 255, 255),
-                        )
-                    dpg.add_spacer(height=6)
-
-                    # Observations table
-                    with dpg.table(
-                        tag="obs_table",
-                        header_row=True,
-                        borders_outerH=True,
-                        borders_innerH=True,
-                        borders_innerV=True,
-                        borders_outerV=True,
-                        scrollY=True,
-                        height=180,
-                        resizable=True,
-                    ):
-                        dpg.add_table_column(
-                            label="[ok]", width_fixed=True, init_width_or_weight=30
-                        )
-                        dpg.add_table_column(
-                            label="Obs ID", width_fixed=True, init_width_or_weight=80
-                        )
-                        dpg.add_table_column(
-                            label="GS ID", width_fixed=True, init_width_or_weight=80
-                        )
-                        dpg.add_table_column(label="Start (UTC)")
-                        dpg.add_table_column(label="End (UTC)")
-                        dpg.add_table_column(label="Start (Local)")
-                        dpg.add_table_column(label="End (Local)")
-                        dpg.add_table_column(label="Wait (uplink LOS -> pass AOS)")
-
-                    dpg.add_spacer(height=4)
-                    with dpg.group(horizontal=True):
-                        dpg.add_text(
-                            "", tag="obs_count_text", color=(160, 170, 190, 255)
-                        )
-                    dpg.add_text(
-                        "(All observations are selected by default. Uncheck to exclude.)",
-                        color=(160, 170, 190, 255),
-                    )
-
-                dpg.add_spacer(height=10)
-
-                # -- Timing settings ----------------------------
-                with dpg.collapsing_header(label="Timing & Output", default_open=True):
-                    dpg.add_spacer(height=4)
-                    with dpg.group(horizontal=True):
-                        dpg.add_text("Command Execution Interval (seconds):")
-                        dpg.add_input_float(
-                            tag="cmd_interval",
-                            default_value=5.0,
-                            min_value=0.1,
-                            max_value=600.0,
-                            width=120,
-                            format="%.1f",
-                        )
-                    dpg.add_text(
-                        "  Time between consecutive tsexec values in the loop.",
-                        color=(160, 170, 190, 255),
-                    )
-
-                    dpg.add_spacer(height=6)
-                    with dpg.group(horizontal=True):
-                        dpg.add_text("Priority Command Injection Interval: ")
-                        dpg.add_input_int(
-                            tag="priority_interval",
-                            default_value=50,
-                            min_value=1,
-                            max_value=10000,
-                            width=120,
-                        )
-                    dpg.add_text(
-                        "  Insert priority commands every N loop commands.",
-                        color=(160, 170, 190, 255),
-                    )
-
-            # ==================================================
-            # TAB 2 - COMMANDS
-            # ==================================================
-            with dpg.tab(label="  Commands"):
-                dpg.add_spacer(height=8)
-
-                with dpg.collapsing_header(
-                    label="Loop Commands  (executed repeatedly during each pass)",
-                    default_open=True,
-                ):
-                    dpg.add_spacer(height=4)
-                    dpg.add_text(
-                        "Enter one command per line.  Format:  command_name(arg1,arg2)\n"
-                        "The tssent / tsexec tags are generated automatically.",
-                        color=(160, 170, 190, 255),
-                    )
-                    dpg.add_spacer(height=4)
+            # -- Uplink window ------------------------------
+            with dpg.collapsing_header(label="Uplink Pass Window", default_open=True):  # pyright: ignore[reportGeneralTypeIssues]
+                dpg.add_spacer(height=4)
+                with dpg.group(horizontal=True):  # pyright: ignore[reportGeneralTypeIssues]
+                    dpg.add_text("Start of Uplink Pass (ISO with timezone):")
                     dpg.add_input_text(
-                        tag="loop_cmds_input",
-                        multiline=True,
-                        height=200,
-                        width=-1,
-                        default_value=(
-                            "hello_world()\nrun_all_unit_tests()\nget_power_telemetry()"
-                        ),
-                        hint="hello_world()\nget_power_telemetry()\n...",
+                        tag="uplink_start",
+                        default_value=now_local,
+                        width=260,
+                        hint="2024-05-01T12:00:00-07:00",
+                    )
+                dpg.add_tooltip("uplink_start")
+                with dpg.tooltip("uplink_start"):  # pyright: ignore[reportGeneralTypeIssues]
+                    dpg.add_text(
+                        "ISO 8601 with timezone offset. Timezone is required.\n"
+                        "Examples: 2024-05-01T12:00:00-07:00 or 2024-05-01T19:00:00Z\n"
+                        "This sets the tssent for the first command.\n"
+                        "Only observations that START after (uplink_start + duration)\n"
+                        "will be included."
                     )
 
-                dpg.add_spacer(height=10)
+                with dpg.group(horizontal=True):  # pyright: ignore[reportGeneralTypeIssues]
+                    dpg.add_text("Uplink Pass Duration (minutes):     ")
+                    dpg.add_input_float(
+                        tag="uplink_dur",
+                        default_value=15.0,
+                        min_value=0.1,
+                        max_value=60.0,
+                        width=120,
+                        format="%.1f",
+                    )
 
-                with dpg.collapsing_header(
-                    label="Priority Commands  (injected every N commands with the SAME tssent)",
-                    default_open=True,
-                ):
-                    dpg.add_spacer(height=4)
-                    dpg.add_text(
-                        """
+                    dpg.add_tooltip("uplink_dur")
+                    with dpg.tooltip("uplink_dur"):  # pyright: ignore[reportGeneralTypeIssues]
+                        dpg.add_text(
+                            "Fine to overestimate the duration by a few minutes."
+                        )
+
+            dpg.add_spacer(height=10)
+
+            # -- SatNOGS fetch ------------------------------
+            with dpg.collapsing_header(label="SatNOGS Observations", default_open=True):  # pyright: ignore[reportGeneralTypeIssues]
+                dpg.add_spacer(height=4)
+                with dpg.group(horizontal=True):  # pyright: ignore[reportGeneralTypeIssues]
+                    dpg.add_text("Satellite NORAD ID:")
+                    dpg.add_input_text(
+                        tag="sat_id_input",
+                        default_value="69015",
+                        width=120,
+                        hint="e.g. 69015",
+                    )
+                    dpg.add_text("Fetch next")
+                    dpg.add_input_int(
+                        tag="next_hours_input",
+                        default_value=3,
+                        min_value=1,
+                        max_value=720,
+                        width=70,
+                    )
+                    dpg.add_text("hrs after uplink")
+                    dpg.add_button(
+                        label="Fetch Observations",
+                        tag="fetch_btn",
+                        callback=fetch_observations,
+                    )
+                    dpg.add_button(
+                        label="Stop",
+                        tag="stop_fetch_btn",
+                        callback=_stop_fetch,
+                        show=False,
+                    )
+                    dpg.add_loading_indicator(
+                        tag="fetch_spinner",
+                        show=False,
+                        radius=1.5,
+                        speed=1.5,
+                        color=(100, 180, 255, 255),
+                    )
+                dpg.add_spacer(height=6)
+
+                # Observations table
+                with dpg.table(
+                    tag="obs_table",
+                    header_row=True,
+                    borders_outerH=True,
+                    borders_innerH=True,
+                    borders_innerV=True,
+                    borders_outerV=True,
+                    scrollY=True,
+                    height=180,
+                    resizable=True,
+                ):  # pyright: ignore[reportGeneralTypeIssues]
+                    dpg.add_table_column(
+                        label="[ok]", width_fixed=True, init_width_or_weight=30
+                    )
+                    dpg.add_table_column(
+                        label="Obs ID", width_fixed=True, init_width_or_weight=80
+                    )
+                    dpg.add_table_column(
+                        label="GS ID", width_fixed=True, init_width_or_weight=80
+                    )
+                    dpg.add_table_column(label="Start (UTC)")
+                    dpg.add_table_column(label="End (UTC)")
+                    dpg.add_table_column(label="Start (Local)")
+                    dpg.add_table_column(label="End (Local)")
+                    dpg.add_table_column(label="Wait (uplink LOS -> pass AOS)")
+
+                dpg.add_spacer(height=4)
+                with dpg.group(horizontal=True):  # pyright: ignore[reportGeneralTypeIssues]
+                    dpg.add_text("", tag="obs_count_text", color=(160, 170, 190, 255))
+                dpg.add_text(
+                    "(All observations are selected by default. Uncheck to exclude.)",
+                    color=(160, 170, 190, 255),
+                )
+
+            dpg.add_spacer(height=10)
+
+            # -- Timing settings ----------------------------
+            with dpg.collapsing_header(label="Timing & Output", default_open=True):  # pyright: ignore[reportGeneralTypeIssues]
+                dpg.add_spacer(height=4)
+                with dpg.group(horizontal=True):  # pyright: ignore[reportGeneralTypeIssues]
+                    dpg.add_text("Command Execution Interval (seconds):")
+                    dpg.add_input_float(
+                        tag="cmd_interval",
+                        default_value=5.0,
+                        min_value=0.1,
+                        max_value=600.0,
+                        width=120,
+                        format="%.1f",
+                    )
+                dpg.add_text(
+                    "  Time between consecutive tsexec values in the loop.",
+                    color=(160, 170, 190, 255),
+                )
+
+                dpg.add_spacer(height=6)
+                with dpg.group(horizontal=True):  # pyright: ignore[reportGeneralTypeIssues]
+                    dpg.add_text("Priority Command Injection Interval: ")
+                    dpg.add_input_int(
+                        tag="priority_interval",
+                        default_value=50,
+                        min_value=1,
+                        max_value=10000,
+                        width=120,
+                    )
+                dpg.add_text(
+                    "  Insert priority commands every N loop commands.",
+                    color=(160, 170, 190, 255),
+                )
+
+        # ==================================================
+        # TAB 2 - COMMANDS
+        # ==================================================
+        with dpg.tab(label="Commands"):  # pyright: ignore[reportGeneralTypeIssues]
+            dpg.add_spacer(height=8)
+
+            with dpg.collapsing_header(
+                label="Loop Commands  (executed repeatedly during each pass)",
+                default_open=True,
+            ):  # pyright: ignore[reportGeneralTypeIssues]
+                dpg.add_spacer(height=4)
+                dpg.add_text(
+                    "Enter one command per line.  Format:  command_name(arg1,arg2)\n"
+                    "The tssent / tsexec tags are generated automatically.",
+                    color=(160, 170, 190, 255),
+                )
+                dpg.add_spacer(height=4)
+                dpg.add_input_text(
+                    tag="loop_cmds_input",
+                    multiline=True,
+                    height=200,
+                    width=-1,
+                    default_value=(
+                        "hello_world()\nrun_all_unit_tests()\nget_power_telemetry()"
+                    ),
+                    hint="hello_world()\nget_power_telemetry()\n...",
+                )
+
+            dpg.add_spacer(height=10)
+
+            with dpg.collapsing_header(
+                label=(
+                    "Priority Commands  "
+                    "(injected every N commands with the SAME tssent each time)"
+                ),
+                default_open=True,
+            ):  # pyright: ignore[reportGeneralTypeIssues]
+                dpg.add_spacer(height=4)
+                dpg.add_text(
+                    """
 Enter one command per line.
 Optionally append  @tsexec=<ms>  for a fixed execution time, or omit for immediate (0).
 Each priority command keeps its first tssent so the satellite de-duplicates.""".strip(),
-                        color=(160, 170, 190, 255),
-                    )
-                    dpg.add_spacer(height=4)
-                    dpg.add_input_text(
-                        tag="priority_cmds_input",
-                        multiline=True,
-                        height=140,
-                        width=-1,
-                        default_value=(
-                            "CTS1+config_set_int_var(TCMD_require_unique_tssent,1)!\n"
-                        ),
-                    )
-
-            # ==================================================
-            # TAB 3 - GENERATE / PREVIEW
-            # ==================================================
-            with dpg.tab(label="  Generate"):
-                dpg.add_spacer(height=8)
-
-                with dpg.group(horizontal=True):
-                    dpg.add_button(
-                        label="  Generate Command Agenda  ",
-                        callback=generate_agenda,
-                        height=36,
-                    )
-                    dpg.add_spacer(width=20)
-                    dpg.add_text("", tag="status_text")
-
-                dpg.add_spacer(height=10)
-                dpg.add_separator()
-                dpg.add_spacer(height=6)
-                dpg.add_text("Preview:", color=(160, 170, 190, 255))
+                    color=(160, 170, 190, 255),
+                )
                 dpg.add_spacer(height=4)
                 dpg.add_input_text(
-                    tag="preview_text",
+                    tag="priority_cmds_input",
                     multiline=True,
-                    readonly=True,
-                    height=-1,
+                    height=140,
                     width=-1,
-                    default_value="(generate agenda to see preview)",
+                    default_value=(
+                        "CTS1+config_set_int_var(TCMD_require_unique_tssent,1)!\n"
+                    ),
                 )
+
+        # ==================================================
+        # TAB 3 - GENERATE / PREVIEW
+        # ==================================================
+        with dpg.tab(label="  Generate"):  # pyright: ignore[reportGeneralTypeIssues]
+            dpg.add_spacer(height=8)
+
+            with dpg.group(horizontal=True):  # pyright: ignore[reportGeneralTypeIssues]
+                dpg.add_button(
+                    label="  Generate Command Agenda  ",
+                    callback=generate_agenda,
+                    height=36,
+                )
+                dpg.add_spacer(width=20)
+                dpg.add_text("", tag="status_text")
+
+            dpg.add_spacer(height=10)
+            dpg.add_separator()
+            dpg.add_spacer(height=6)
+            dpg.add_text("Preview:", color=(160, 170, 190, 255))
+            dpg.add_spacer(height=4)
+            dpg.add_input_text(
+                tag="preview_text",
+                multiline=True,
+                readonly=True,
+                height=-1,
+                width=-1,
+                default_value="(generate agenda to see preview)",
+            )
 
     dpg.create_viewport(
         title="CTS-SAT-1 Command Agenda Generator",
