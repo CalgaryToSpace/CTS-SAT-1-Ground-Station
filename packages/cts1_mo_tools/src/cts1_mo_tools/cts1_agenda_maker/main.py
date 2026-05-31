@@ -103,7 +103,7 @@ def get_str(tag: str) -> str:
 # ─────────────────────────────────────────────────────────────
 
 
-def fetch_observations():
+def fetch_observations() -> None:
     sat_id = get_str("sat_id_input")
     if not sat_id:
         set_status("⚠ Enter a SatNOGS satellite ID first.", (255, 200, 0, 255))
@@ -189,10 +189,17 @@ def generate_agenda() -> None:
 
     # Parse uplink window
     try:
-        uplink_start_ms = iso_to_ms(uplink_start_str)
+        dt_uplink = datetime.fromisoformat(uplink_start_str)
+        if dt_uplink.tzinfo is None:
+            set_status(
+                "✗ 'Start of Uplink Pass' must include a timezone (e.g. 2024-05-01T12:00:00-07:00 or ...Z).",
+                (255, 100, 100, 255),
+            )
+            return
+        uplink_start_ms = int(dt_uplink.timestamp() * 1000)
     except Exception:
         set_status(
-            "✗ Invalid 'Start of Uplink Pass'. Use ISO format: 2024-05-01T12:00:00Z",
+            "✗ Invalid 'Start of Uplink Pass'. Use ISO format with timezone: 2024-05-01T12:00:00-07:00",
             (255, 100, 100, 255),
         )
         return
@@ -365,6 +372,8 @@ def build_gui() -> None:
 
     dpg.bind_theme(global_theme)
 
+    now_local = datetime.now().astimezone().replace(microsecond=0).isoformat()
+
     with dpg.window(
         label="CTS-SAT-1 Command Agenda Generator",
         tag="main_window",
@@ -388,9 +397,9 @@ def build_gui() -> None:
                         dpg.add_text("Satellite NORAD ID:")
                         dpg.add_input_text(
                             tag="sat_id_input",
-                            default_value="",
+                            default_value="69015",
                             width=120,
-                            hint="e.g. 58694",
+                            hint="e.g. 69015",
                         )
                         dpg.add_button(
                             label="Fetch Observations",
@@ -437,17 +446,19 @@ def build_gui() -> None:
                 ):
                     dpg.add_spacer(height=4)
                     with dpg.group(horizontal=True):
-                        dpg.add_text("Start of Uplink Pass (UTC ISO):")
+                        dpg.add_text("Start of Uplink Pass (ISO with timezone):")
                         dpg.add_input_text(
                             tag="uplink_start",
-                            default_value="2024-01-01T00:00:00Z",
-                            width=240,
-                            hint="2024-05-01T12:00:00Z",
+                            default_value=now_local,
+                            width=260,
+                            hint="2024-05-01T12:00:00-07:00",
                         )
                     dpg.add_tooltip("uplink_start")
                     with dpg.tooltip("uplink_start"):
                         dpg.add_text(
-                            "ISO 8601 UTC. This sets the tssent for the first command.\n"
+                            "ISO 8601 with timezone offset. Timezone is required.\n"
+                            "Examples: 2024-05-01T12:00:00-07:00  or  2024-05-01T19:00:00Z\n"
+                            "This sets the tssent for the first command.\n"
                             "Only observations that START after (uplink_start + duration)\n"
                             "will be included."
                         )
@@ -543,9 +554,10 @@ def build_gui() -> None:
                 ):
                     dpg.add_spacer(height=4)
                     dpg.add_text(
-                        "Enter one command per line.\n"
-                        "Optionally append  @tsexec=<ms>  for a fixed execution time, or omit for immediate (0).\n"
-                        "Each priority command keeps its first tssent so the satellite de-duplicates it.",
+                        """
+Enter one command per line.
+Optionally append  @tsexec=<ms>  for a fixed execution time, or omit for immediate (0).
+Each priority command keeps its first tssent so the satellite de-duplicates.""".strip(),
                         color=(160, 170, 190, 255),
                     )
                     dpg.add_spacer(height=4)
@@ -554,8 +566,9 @@ def build_gui() -> None:
                         multiline=True,
                         height=140,
                         width=-1,
-                        default_value=("enable_radio_tx()\ndisable_radio_tx()"),
-                        hint="power_on()\npower_off()\nsome_cmd()@tsexec=1716611999999",
+                        default_value=(
+                            "CTS1+config_set_int_var(TCMD_require_unique_tssent,1)!\n"
+                        ),
                     )
 
             # ══════════════════════════════════════════════════
@@ -596,7 +609,7 @@ def build_gui() -> None:
     )
     dpg.setup_dearpygui()
     dpg.show_viewport()
-    dpg.set_primary_window("main_window", True)
+    dpg.set_primary_window("main_window", value=True)
     dpg.start_dearpygui()
     dpg.destroy_context()
 
