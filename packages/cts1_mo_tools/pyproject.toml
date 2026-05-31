@@ -10,6 +10,7 @@ dependencies = [
     "ordered-set",
     "dearpygui",
     "requests",
+    "dotenv",
 ]
 
 [project.scripts]

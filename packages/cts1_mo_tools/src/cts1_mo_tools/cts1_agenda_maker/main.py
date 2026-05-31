@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import dearpygui.dearpygui as dpg
+from dotenv import load_dotenv
 
 from .satnogs_data import iter_future_observation_pages
 
@@ -185,6 +186,7 @@ def fetch_observations() -> None:
     set_status("Fetching observations from SatNOGS…", (180, 200, 255, 255))
     dpg.configure_item("fetch_btn", enabled=False)
     dpg.configure_item("stop_fetch_btn", show=True)
+    dpg.configure_item("fetch_spinner", show=True)
 
     # Clear table and state
     if dpg.does_item_exist("obs_table"):
@@ -256,6 +258,7 @@ def fetch_observations() -> None:
         finally:
             dpg.configure_item("fetch_btn", enabled=True)
             dpg.configure_item("stop_fetch_btn", show=False)
+            dpg.configure_item("fetch_spinner", show=False)
 
     threading.Thread(target=_thread, daemon=True).start()
 
@@ -558,6 +561,14 @@ def build_gui() -> None:
                             callback=_stop_fetch,
                             show=False,
                         )
+                        dpg.add_loading_indicator(
+                            tag="fetch_spinner",
+                            show=False,
+                            radius=6.0,
+                            speed=1.5,
+                            color=(100, 180, 255, 255),
+                            secondary_color=(50, 80, 120, 255),
+                        )
                     dpg.add_spacer(height=6)
 
                     # Observations table
@@ -738,6 +749,8 @@ Each priority command keeps its first tssent so the satellite de-duplicates.""".
 
 
 def main() -> None:
+    load_dotenv()
+
     build_gui()
 
 
