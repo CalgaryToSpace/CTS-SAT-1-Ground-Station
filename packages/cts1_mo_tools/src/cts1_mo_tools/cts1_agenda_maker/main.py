@@ -216,30 +216,41 @@ def fetch_observations() -> None:
     def _thread() -> None:
         try:
             all_obs: list[dict[str, Any]] = []
+            state["observations"] = all_obs  # share reference so counter updates live
+            stopped = False
             for page in iter_future_observation_pages(
                 sat_id,
                 start_lt_filter=start_lt_filter,
                 end_gt_filter=end_gt_filter,
             ):
-                if _fetch_stop.is_set():
-                    set_status(
-                        f"⊘ Stopped. {len(all_obs)} observations loaded.",
-                        (255, 200, 0, 255),
-                    )
-                    return
                 all_obs.extend(page)
+                _append_obs_rows(page, uplink_end_dt)
                 set_status(
                     f"Fetching… {len(all_obs)} so far",
                     (180, 200, 255, 255),
                 )
+                if _fetch_stop.is_set():
+                    stopped = True
+                    break
 
+            # Sort in place and re-render all rows in ascending order
             all_obs.sort(key=lambda o: parse_iso(o["start"]))
-            state["observations"] = all_obs
+            if dpg.does_item_exist("obs_table"):
+                for row in dpg.get_item_children("obs_table", slot=1) or []:
+                    dpg.delete_item(row)
+            state["selected_obs_ids"] = set()
             _append_obs_rows(all_obs, uplink_end_dt)
-            set_status(
-                f"✓ Loaded {len(all_obs)} future observations.",
-                (100, 255, 150, 255),
-            )
+
+            if stopped:
+                set_status(
+                    f"⊘ Stopped. {len(all_obs)} observations loaded.",
+                    (255, 200, 0, 255),
+                )
+            else:
+                set_status(
+                    f"✓ Loaded {len(all_obs)} future observations.",
+                    (100, 255, 150, 255),
+                )
         except Exception as exc:
             set_status(f"✗ Fetch error: {exc}", (255, 100, 100, 255))
         finally:
