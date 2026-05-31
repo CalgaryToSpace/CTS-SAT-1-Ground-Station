@@ -298,7 +298,8 @@ def generate_agenda() -> None:  # noqa: C901, PLR0912, PLR0915
     # -- Settings ----------------------------------------------
     uplink_start_str = get_str("uplink_start")
     uplink_dur_min = get_float("uplink_dur", 10.0)
-    cmd_interval_sec = get_float("cmd_interval", 5.0)
+    block_interval_sec = get_float("block_interval", 20.0)
+    cmd_interval_sec = get_float("cmd_interval", 2.0)
     priority_interval = get_int("priority_interval", 50)
     sat_id = get_str("sat_id_input")
     next_hours = get_int("next_hours_input", 6)
@@ -377,7 +378,12 @@ def generate_agenda() -> None:  # noqa: C901, PLR0912, PLR0915
         f"# Observation fetch window end: {next_hours} hrs after uplink"
     )
     output_lines.append(f"# Valid observations: {len(valid_obs)}")
-    output_lines.append(f"# Command execution interval: {cmd_interval_sec:.1f} s")
+    output_lines.append(
+        f"# Time between loop command blocks: {block_interval_sec:.1f} s"
+    )
+    output_lines.append(
+        f"# Time between commands in a loop block: {cmd_interval_sec:.1f} s"
+    )
     output_lines.append(
         f"# Priority command injection interval: every {priority_interval} loop commands"  # noqa: E501
     )
@@ -400,6 +406,7 @@ def generate_agenda() -> None:  # noqa: C901, PLR0912, PLR0915
 
     tssent_dt = uplink_start_dt
     cmd_count = 0
+    block_interval = timedelta(seconds=block_interval_sec)
     cmd_interval = timedelta(seconds=cmd_interval_sec)
 
     # Assign each priority command a fixed tssent and emit them upfront
@@ -455,6 +462,7 @@ def generate_agenda() -> None:  # noqa: C901, PLR0912, PLR0915
 
         # Only emit commands while at least one pass is active.
         if active_passes:
+            cmd_tsexec_dt = tsexec_dt
             for cmd_raw in loop_cmds:
                 # Priority injection
                 if (
@@ -477,13 +485,14 @@ def generate_agenda() -> None:  # noqa: C901, PLR0912, PLR0915
                     format_command(
                         cmd_raw,
                         int(tssent_dt.timestamp() * 1000),
-                        int(tsexec_dt.timestamp() * 1000),
+                        int(cmd_tsexec_dt.timestamp() * 1000),
                     )
                 )
                 tssent_dt += timedelta(milliseconds=100)
+                cmd_tsexec_dt += cmd_interval
                 cmd_count += 1
 
-        tsexec_dt += cmd_interval
+        tsexec_dt += block_interval
 
     # Flush any remaining LOS events after the last command tick.
     while event_idx < len(events):
@@ -690,17 +699,33 @@ def build_gui() -> None:  # noqa: PLR0915
             with dpg.collapsing_header(label="Timing & Output", default_open=True):  # pyright: ignore[reportGeneralTypeIssues]
                 dpg.add_spacer(height=4)
                 with dpg.group(horizontal=True):  # pyright: ignore[reportGeneralTypeIssues]
-                    dpg.add_text("Command Execution Interval (seconds):")
+                    dpg.add_text("Time between loop command blocks (s):")
+                    dpg.add_input_float(
+                        tag="block_interval",
+                        default_value=20.0,
+                        min_value=0.1,
+                        max_value=3600.0,
+                        width=120,
+                        format="%.1f",
+                    )
+                dpg.add_text(
+                    "  How often a new block of loop commands is scheduled.",
+                    color=(160, 170, 190, 255),
+                )
+
+                dpg.add_spacer(height=6)
+                with dpg.group(horizontal=True):  # pyright: ignore[reportGeneralTypeIssues]
+                    dpg.add_text("Time between commands in a loop block (s):")
                     dpg.add_input_float(
                         tag="cmd_interval",
-                        default_value=5.0,
+                        default_value=2.0,
                         min_value=0.1,
                         max_value=600.0,
                         width=120,
                         format="%.1f",
                     )
                 dpg.add_text(
-                    "  Time between consecutive tsexec values in the loop.",
+                    "  tsexec spacing between consecutive commands within one block.",
                     color=(160, 170, 190, 255),
                 )
 
@@ -742,9 +767,13 @@ def build_gui() -> None:  # noqa: PLR0915
                     height=200,
                     width=-1,
                     default_value=(
-                        "hello_world()\nrun_all_unit_tests()\nget_power_telemetry()"
+                        "\n".join(  # noqa: FLY002
+                            [
+                                "CTS1+core_system_stats()!",
+                                "CTS1+get_all_system_thermal_info()!",
+                            ]
+                        )
                     ),
-                    hint="hello_world()\nget_power_telemetry()\n...",
                 )
 
             dpg.add_spacer(height=10)
@@ -771,7 +800,12 @@ Each priority command keeps its first tssent so the satellite de-duplicates.""".
                     height=140,
                     width=-1,
                     default_value=(
-                        "CTS1+config_set_int_var(TCMD_require_unique_tssent,1)!\n"
+                        "\n".join(  # noqa: FLY002
+                            [
+                                "CTS1+config_set_int_var(TCMD_require_unique_tssent,1)!",
+                                "CTS1+obc_set_stm32_sysclk_to_hse()!",
+                            ]
+                        )
                     ),
                 )
 
