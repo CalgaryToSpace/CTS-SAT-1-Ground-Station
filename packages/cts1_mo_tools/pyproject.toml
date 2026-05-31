@@ -8,10 +8,13 @@ dependencies = [
     "tyro",
     "polars",
     "ordered-set",
+    "dearpygui",
+    "requests",
 ]
 
 [project.scripts]
 cts1_decode_satnogs_packets = "cts1_mo_tools.cts1_decode_satnogs_packets:main"
+cts1_agenda_maker = "cts1_mo_tools.cts1_agenda_maker.main:main"
 
 [dependency-groups]
 dev = [
