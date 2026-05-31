@@ -8,8 +8,11 @@ telecommands, and produces a time-stamped command agenda file.
 # pyright: standard
 # dearpygui has typing issues.
 
+from collections.abc import Callable
+import contextlib
 import time
-from datetime import UTC, datetime, timezone
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import dearpygui.dearpygui as dpg
 import requests
@@ -52,7 +55,9 @@ def ms_to_iso(ms: int) -> str:
 def iso_to_local_str(iso: str) -> str:
     """Convert an ISO 8601 string to the user's local time in ISO format with offset."""
     try:
-        return datetime.fromisoformat(iso).astimezone().replace(microsecond=0).isoformat()
+        return (
+            datetime.fromisoformat(iso).astimezone().replace(microsecond=0).isoformat()
+        )
     except Exception:
         return iso
 
@@ -106,6 +111,10 @@ def get_str(tag: str) -> str:
         return ""
 
 
+def _format_wait(delta: timedelta) -> str:
+    return "—" if delta < timedelta(0) else str(delta)
+
+
 def _update_obs_count() -> None:
     if dpg.does_item_exist("obs_count_text"):
         total = len(state["observations"])
@@ -156,22 +165,34 @@ def fetch_observations() -> None:
         dpg.configure_item("fetch_btn", enabled=True)
 
 
-def _populate_obs_table(obs_list):
+def _populate_obs_table(obs_list: list[dict[str, Any]]) -> None:
     """Rebuild the observations table rows."""
     # Clear existing rows only; slot=1 are rows, slot=0 are column defs (keep those)
     if dpg.does_item_exist("obs_table"):
-        for row in (dpg.get_item_children("obs_table", slot=1) or []):
+        for row in dpg.get_item_children("obs_table", slot=1) or []:
             dpg.delete_item(row)
 
-    for obs in obs_list:
+    # Compute uplink end datetime for the wait-duration column (best-effort)
+    uplink_end_dt = None
+    with contextlib.suppress(Exception):
+        dt_uplink = datetime.fromisoformat(get_str("uplink_start"))
+        if dt_uplink.tzinfo is not None:
+            uplink_end_dt = dt_uplink + timedelta(minutes=get_float("uplink_dur", 10.0))
+
+    for obs in sorted(obs_list, key=lambda o: o.get("start", "")):
         obs_id = obs.get("id", "?")
         start = obs.get("start", "?")
         end = obs.get("end", "?")
         gs = obs.get("ground_station", "?")
 
+        wait_str = "—"
+        if uplink_end_dt is not None:
+            wait_str = _format_wait(datetime.fromisoformat(start) - uplink_end_dt)
+
         with dpg.table_row(parent="obs_table"):
-            def make_cb(oid):
-                def cb(_sender, v):
+
+            def make_cb(oid: int) -> Callable[[Any, bool], None]:
+                def cb(_sender: Any, v: bool) -> None:
                     if v:
                         state["selected_obs_ids"].add(oid)
                     else:
@@ -189,6 +210,7 @@ def _populate_obs_table(obs_list):
             dpg.add_text(end)
             dpg.add_text(iso_to_local_str(start))
             dpg.add_text(iso_to_local_str(end))
+            dpg.add_text(wait_str)
 
     _update_obs_count()
 
@@ -212,14 +234,16 @@ def generate_agenda() -> None:
         dt_uplink = datetime.fromisoformat(uplink_start_str)
         if dt_uplink.tzinfo is None:
             set_status(
-                "✗ 'Start of Uplink Pass' must include a timezone (e.g. 2024-05-01T12:00:00-07:00 or ...Z).",
+                "✗ 'Start of Uplink Pass' must include a timezone "
+                "(e.g. 2024-05-01T12:00:00-07:00 or ...Z).",
                 (255, 100, 100, 255),
             )
             return
         uplink_start_ms = int(dt_uplink.timestamp() * 1000)
     except Exception:
         set_status(
-            "✗ Invalid 'Start of Uplink Pass'. Use ISO format with timezone: 2024-05-01T12:00:00-07:00",
+            "✗ Invalid 'Start of Uplink Pass'. "
+            "Use ISO format with timezone: 2024-05-01T12:00:00-07:00",
             (255, 100, 100, 255),
         )
         return
@@ -453,10 +477,13 @@ def build_gui() -> None:
                         dpg.add_table_column(label="End (UTC)")
                         dpg.add_table_column(label="Start (Local)")
                         dpg.add_table_column(label="End (Local)")
+                        dpg.add_table_column(label="Wait (uplink LOS -> pass AOS)")
 
                     dpg.add_spacer(height=4)
                     with dpg.group(horizontal=True):
-                        dpg.add_text("", tag="obs_count_text", color=(160, 170, 190, 255))
+                        dpg.add_text(
+                            "", tag="obs_count_text", color=(160, 170, 190, 255)
+                        )
                     dpg.add_text(
                         "(All observations are selected by default. Uncheck to exclude.)",
                         color=(160, 170, 190, 255),
