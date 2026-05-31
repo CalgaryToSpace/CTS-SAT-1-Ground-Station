@@ -310,7 +310,7 @@ def generate_agenda() -> None:
         for obs in state["observations"]
         if obs.get("id") in state["selected_obs_ids"]
     ]
-    # Keep only observations that start AFTER end of uplink pass
+    # Keep only observations that start AFTER end of uplink pass.
     valid_obs = [obs for obs in selected if parse_iso(obs["start"]) > uplink_end_dt]
 
     if not valid_obs:
@@ -323,8 +323,19 @@ def generate_agenda() -> None:
     def _fmt(dt: datetime) -> str:
         return dt.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
 
-    # -- Build command list -------------------------------------
-    output_lines = []
+    # -- Build AOS/LOS event list -------------------------------
+    # Each entry: (datetime, event_type, obs)
+    # event_type is "AOS" or "LOS"
+    events: list[tuple[datetime, str, dict]] = []
+    for obs in valid_obs:
+        obs_start_dt = parse_iso(obs["start"])
+        obs_end_dt = parse_iso(obs["end"])
+        events.append((obs_start_dt, "AOS", obs))
+        events.append((obs_end_dt, "LOS", obs))
+    events.sort(key=lambda e: e[0])
+
+    # -- Assign priority command tssent upfront -----------------
+    output_lines: list[str] = []
     output_lines.append("# CTS-SAT-1 Command Agenda")
     output_lines.append(f"# Generated: {datetime.now(tz=UTC).isoformat()}")
     output_lines.append(
@@ -334,21 +345,14 @@ def generate_agenda() -> None:
     output_lines.append("")
 
     def _parse_priority_cmd(raw: str) -> tuple[str, int]:
-        """Return (name_args, tsexec_ms) from a priority command line.
-
-        Accepts bare names, names with @tsexec=N, and fully-formed
-        CTS1+...@tsexec=N! commands.
-        """
         s = raw.strip()
         s = s.removeprefix(COMMAND_PREFIX)
         s = s.removesuffix(COMMAND_SUFFIX)
-
         p_tsexec = 0
         m = re.search(r"@tsexec=(\d+)", s)
         if m:
             p_tsexec = int(m.group(1))
             s = s[: m.start()].strip()
-
         return s, p_tsexec
 
     tssent_dt = uplink_start_dt
@@ -368,19 +372,42 @@ def generate_agenda() -> None:
             tssent_dt += timedelta(milliseconds=100)
         output_lines.append("")
 
-    for obs in valid_obs:
-        obs_start_dt = parse_iso(obs["start"])
-        obs_end_dt = parse_iso(obs["end"])
+    # -- Single unified timeline --------------------------------
+    # Determine overall start and end of the command window.
+    first_aos = parse_iso(valid_obs[0]["start"])
+    last_los = max(parse_iso(obs["end"]) for obs in valid_obs)
 
-        output_lines.append(
-            f"# -- Observation {obs['id']} | GS {obs.get('ground_station', '?')} "
-            f"| {_fmt(obs_start_dt)} -> {_fmt(obs_end_dt)}"
-        )
+    # Convert event list to a lookup: time -> list of comment strings to inject.
+    # We'll consume these as tsexec_dt advances.
+    event_idx = 0
+    active_passes: set[int] = set()  # obs IDs currently in-view
 
-        tsexec_dt = obs_start_dt
-        while tsexec_dt < obs_end_dt:
+    tsexec_dt = first_aos
+    output_lines.append(f"# Timeline start: {_fmt(first_aos)}")
+    output_lines.append("")
+
+    while tsexec_dt < last_los:
+        # Inject any AOS/LOS events that fall before (or at) the current tsexec.
+        while event_idx < len(events) and events[event_idx][0] <= tsexec_dt:
+            ev_dt, ev_type, ev_obs = events[event_idx]
+            obs_id = ev_obs.get("id", "?")
+            gs = ev_obs.get("ground_station", "?")
+            if ev_type == "AOS":
+                active_passes.add(obs_id)
+                output_lines.append(
+                    f"# AOS Observation {obs_id} | GS {gs} | {_fmt(ev_dt)}"
+                )
+            else:
+                active_passes.discard(obs_id)
+                output_lines.append(
+                    f"# LOS Observation {obs_id} | GS {gs} | {_fmt(ev_dt)}"
+                )
+            event_idx += 1
+
+        # Only emit commands while at least one pass is active.
+        if active_passes:
             for cmd_raw in loop_cmds:
-                # Priority injection?
+                # Priority injection
                 if (
                     priority_cmds
                     and cmd_count > 0
@@ -389,28 +416,38 @@ def generate_agenda() -> None:
                     output_lines.append(f"# PRIORITY [{cmd_count}]")
                     for priority_cmd in priority_cmds:
                         p_name, p_tsexec = _parse_priority_cmd(priority_cmd)
-                        line = format_command(
-                            p_name,
-                            int(priority_tssent[priority_cmd].timestamp() * 1000),
-                            p_tsexec,
+                        output_lines.append(
+                            format_command(
+                                p_name,
+                                int(priority_tssent[priority_cmd].timestamp() * 1000),
+                                p_tsexec,
+                            )
                         )
-                        output_lines.append(line)
 
-                # Regular loop command
-                line = format_command(
-                    cmd_raw,
-                    int(tssent_dt.timestamp() * 1000),
-                    int(tsexec_dt.timestamp() * 1000),
+                output_lines.append(
+                    format_command(
+                        cmd_raw,
+                        int(tssent_dt.timestamp() * 1000),
+                        int(tsexec_dt.timestamp() * 1000),
+                    )
                 )
-                output_lines.append(line)
                 tssent_dt += timedelta(milliseconds=100)
-                tsexec_dt += cmd_interval
                 cmd_count += 1
 
-                if tsexec_dt >= obs_end_dt:
-                    break
+        tsexec_dt += cmd_interval
 
-        output_lines.append("")
+    # Flush any remaining LOS events after the last command tick.
+    while event_idx < len(events):
+        ev_dt, ev_type, ev_obs = events[event_idx]
+        obs_id = ev_obs.get("id", "?")
+        gs = ev_obs.get("ground_station", "?")
+        if ev_type == "AOS":
+            active_passes.add(obs_id)
+            output_lines.append(f"# AOS Observation {obs_id} | GS {gs} | {_fmt(ev_dt)}")
+        else:
+            active_passes.discard(obs_id)
+            output_lines.append(f"# LOS Observation {obs_id} | GS {gs} | {_fmt(ev_dt)}")
+        event_idx += 1
 
     state["generated_commands"] = output_lines
     dpg.set_value("preview_text", "\n".join(output_lines))
