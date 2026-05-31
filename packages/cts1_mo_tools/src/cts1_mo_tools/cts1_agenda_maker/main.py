@@ -8,19 +8,22 @@ telecommands, and produces a time-stamped command agenda file.
 # pyright: standard
 # dearpygui has typing issues.
 
-from collections.abc import Callable
 import contextlib
+import threading
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import dearpygui.dearpygui as dpg
-import requests
+
+from .satnogs_data import iter_future_observation_pages
+
+_fetch_stop = threading.Event()
 
 # ─────────────────────────────────────────────────────────────
 # CONSTANTS
 # ─────────────────────────────────────────────────────────────
-SATNOGS_BASE = "https://network.satnogs.org/api"
 COMMAND_PREFIX = "CTS1+"
 COMMAND_SUFFIX = "!"
 
@@ -127,59 +130,10 @@ def _update_obs_count() -> None:
 # ─────────────────────────────────────────────────────────────
 
 
-def fetch_observations() -> None:
-    sat_id = get_str("sat_id_input")
-    if not sat_id:
-        set_status("⚠ Enter a SatNOGS satellite ID first.", (255, 200, 0, 255))
-        return
-
-    set_status("Fetching observations from SatNOGS…", (180, 200, 255, 255))
-    dpg.configure_item("fetch_btn", enabled=False)
-
-    try:
-        url = f"{SATNOGS_BASE}/observations/"
-        params = {
-            "norad_cat_id": sat_id,
-            "status": "future",
-            "format": "json",
-            "page_size": 100,
-        }
-        r = requests.get(url, params=params, timeout=15)
-        r.raise_for_status()
-        data = r.json()
-        if isinstance(data, dict) and "results" in data:
-            obs_list = data["results"]
-        else:
-            obs_list = data
-
-        state["observations"] = obs_list
-        state["selected_obs_ids"] = set()
-        _populate_obs_table(obs_list)
-        set_status(
-            f"✓ Loaded {len(obs_list)} future observations.", (100, 255, 150, 255)
-        )
-
-    except Exception as exc:
-        set_status(f"✗ Fetch error: {exc}", (255, 100, 100, 255))
-    finally:
-        dpg.configure_item("fetch_btn", enabled=True)
-
-
-def _populate_obs_table(obs_list: list[dict[str, Any]]) -> None:
-    """Rebuild the observations table rows."""
-    # Clear existing rows only; slot=1 are rows, slot=0 are column defs (keep those)
-    if dpg.does_item_exist("obs_table"):
-        for row in dpg.get_item_children("obs_table", slot=1) or []:
-            dpg.delete_item(row)
-
-    # Compute uplink end datetime for the wait-duration column (best-effort)
-    uplink_end_dt = None
-    with contextlib.suppress(Exception):
-        dt_uplink = datetime.fromisoformat(get_str("uplink_start"))
-        if dt_uplink.tzinfo is not None:
-            uplink_end_dt = dt_uplink + timedelta(minutes=get_float("uplink_dur", 10.0))
-
-    for obs in sorted(obs_list, key=lambda o: o.get("start", "")):
+def _append_obs_rows(
+    page: list[dict[str, Any]], uplink_end_dt: datetime | None
+) -> None:
+    for obs in page:
         obs_id = obs.get("id", "?")
         start = obs.get("start", "?")
         end = obs.get("end", "?")
@@ -187,7 +141,8 @@ def _populate_obs_table(obs_list: list[dict[str, Any]]) -> None:
 
         wait_str = "—"
         if uplink_end_dt is not None:
-            wait_str = _format_wait(datetime.fromisoformat(start) - uplink_end_dt)
+            with contextlib.suppress(Exception):
+                wait_str = _format_wait(datetime.fromisoformat(start) - uplink_end_dt)
 
         with dpg.table_row(parent="obs_table"):
 
@@ -213,6 +168,75 @@ def _populate_obs_table(obs_list: list[dict[str, Any]]) -> None:
             dpg.add_text(wait_str)
 
     _update_obs_count()
+
+
+def fetch_observations() -> None:
+    sat_id = get_str("sat_id_input")
+    if not sat_id:
+        set_status("⚠ Enter a SatNOGS satellite ID first.", (255, 200, 0, 255))
+        return
+
+    _fetch_stop.clear()
+    set_status("Fetching observations from SatNOGS…", (180, 200, 255, 255))
+    dpg.configure_item("fetch_btn", enabled=False)
+    dpg.configure_item("stop_fetch_btn", show=True)
+
+    # Clear table and state
+    if dpg.does_item_exist("obs_table"):
+        for row in dpg.get_item_children("obs_table", slot=1) or []:
+            dpg.delete_item(row)
+    state["observations"] = []
+    state["selected_obs_ids"] = set()
+    _update_obs_count()
+
+    # Compute uplink end once so every page uses the same reference point
+    uplink_end_dt: datetime | None = None
+    with contextlib.suppress(Exception):
+        dt_uplink = datetime.fromisoformat(get_str("uplink_start"))
+        if dt_uplink.tzinfo is not None:
+            uplink_end_dt = dt_uplink + timedelta(minutes=get_float("uplink_dur", 10.0))
+
+    next_hours = get_int("next_hours_input", 6)
+    start_lt_filter: datetime | None = None
+    if next_hours > 0:
+        start_lt_filter = datetime.now(tz=UTC) + timedelta(hours=next_hours)
+
+    def _thread() -> None:
+        try:
+            all_obs: list[dict[str, Any]] = []
+            for page in iter_future_observation_pages(
+                sat_id, start_lt_filter=start_lt_filter
+            ):
+                if _fetch_stop.is_set():
+                    set_status(
+                        f"⊘ Stopped. {len(all_obs)} observations loaded.",
+                        (255, 200, 0, 255),
+                    )
+                    return
+                all_obs.extend(page)
+                set_status(
+                    f"Fetching… {len(all_obs)} so far",
+                    (180, 200, 255, 255),
+                )
+
+            all_obs.sort(key=lambda o: o.get("start", ""))
+            state["observations"] = all_obs
+            _append_obs_rows(all_obs, uplink_end_dt)
+            set_status(
+                f"✓ Loaded {len(all_obs)} future observations.",
+                (100, 255, 150, 255),
+            )
+        except Exception as exc:
+            set_status(f"✗ Fetch error: {exc}", (255, 100, 100, 255))
+        finally:
+            dpg.configure_item("fetch_btn", enabled=True)
+            dpg.configure_item("stop_fetch_btn", show=False)
+
+    threading.Thread(target=_thread, daemon=True).start()
+
+
+def _stop_fetch() -> None:
+    _fetch_stop.set()
 
 
 # ─────────────────────────────────────────────────────────────
@@ -445,10 +469,25 @@ def build_gui() -> None:
                             width=120,
                             hint="e.g. 69015",
                         )
+                        dpg.add_text("Next")
+                        dpg.add_input_int(
+                            tag="next_hours_input",
+                            default_value=6,
+                            min_value=1,
+                            max_value=720,
+                            width=70,
+                        )
+                        dpg.add_text("hours")
                         dpg.add_button(
                             label="Fetch Observations",
                             tag="fetch_btn",
                             callback=fetch_observations,
+                        )
+                        dpg.add_button(
+                            label="Stop",
+                            tag="stop_fetch_btn",
+                            callback=_stop_fetch,
+                            show=False,
                         )
                     dpg.add_spacer(height=6)
 
