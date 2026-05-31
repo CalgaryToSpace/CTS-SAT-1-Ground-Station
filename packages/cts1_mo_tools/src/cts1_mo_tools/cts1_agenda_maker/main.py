@@ -9,6 +9,7 @@ telecommands, and produces a time-stamped command agenda file.
 # dearpygui has typing issues.
 
 import contextlib
+import re
 import threading
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -332,12 +333,40 @@ def generate_agenda() -> None:
     output_lines.append(f"# Valid observations: {len(valid_obs)}")
     output_lines.append("")
 
+    def _parse_priority_cmd(raw: str) -> tuple[str, int]:
+        """Return (name_args, tsexec_ms) from a priority command line.
+
+        Accepts bare names, names with @tsexec=N, and fully-formed
+        CTS1+...@tsexec=N! commands.
+        """
+        s = raw.strip()
+        s = s.removeprefix(COMMAND_PREFIX)
+        s = s.removesuffix(COMMAND_SUFFIX)
+
+        p_tsexec = 0
+        m = re.search(r"@tsexec=(\d+)", s)
+        if m:
+            p_tsexec = int(m.group(1))
+            s = s[: m.start()].strip()
+
+        return s, p_tsexec
+
     tssent_dt = uplink_start_dt
     cmd_count = 0
     cmd_interval = timedelta(seconds=cmd_interval_sec)
 
-    # Track priority cmd tssent datetimes (de-dup key = tssent of first send)
+    # Assign each priority command a fixed tssent and emit them upfront
     priority_tssent: dict[str, datetime] = {}
+    if priority_cmds:
+        output_lines.append("# PRIORITY COMMANDS")
+        for priority_cmd in priority_cmds:
+            p_name, p_tsexec = _parse_priority_cmd(priority_cmd)
+            priority_tssent[priority_cmd] = tssent_dt
+            output_lines.append(
+                format_command(p_name, int(tssent_dt.timestamp() * 1000), p_tsexec)
+            )
+            tssent_dt += timedelta(milliseconds=100)
+        output_lines.append("")
 
     for obs in valid_obs:
         obs_start_dt = parse_iso(obs["start"])
@@ -357,29 +386,14 @@ def generate_agenda() -> None:
                     and cmd_count > 0
                     and (cmd_count % priority_interval) == 0
                 ):
-                    for pcmd in priority_cmds:
-                        # Parse optional explicit tsexec from the line: "cmd_name()@tsexec=..."  # noqa: E501
-                        p_tsexec = 0
-                        p_name = pcmd
-                        if "@tsexec=" in pcmd:
-                            parts = pcmd.split("@tsexec=", 1)
-                            p_name = parts[0].strip()
-                            try:
-                                p_tsexec = int(parts[1].strip())
-                            except ValueError:
-                                p_tsexec = 0
-
-                        # Use same tssent every time (de-dup on satellite)
-                        if pcmd not in priority_tssent:
-                            priority_tssent[pcmd] = tssent_dt
-                            tssent_dt += timedelta(milliseconds=100)
-
+                    output_lines.append(f"# PRIORITY [{cmd_count}]")
+                    for priority_cmd in priority_cmds:
+                        p_name, p_tsexec = _parse_priority_cmd(priority_cmd)
                         line = format_command(
                             p_name,
-                            int(priority_tssent[pcmd].timestamp() * 1000),
+                            int(priority_tssent[priority_cmd].timestamp() * 1000),
                             p_tsexec,
                         )
-                        output_lines.append(f"# PRIORITY [{cmd_count}]")
                         output_lines.append(line)
 
                 # Regular loop command
@@ -398,25 +412,6 @@ def generate_agenda() -> None:
 
         output_lines.append("")
 
-    # Append any priority commands that haven't been sent yet (first time)
-    if priority_cmds and not priority_tssent:
-        output_lines.append("# PRIORITY COMMANDS (standalone, none injected above)")
-        for pcmd in priority_cmds:
-            p_tsexec = 0
-            p_name = pcmd
-            if "@tsexec=" in pcmd:
-                parts = pcmd.split("@tsexec=", 1)
-                p_name = parts[0].strip()
-                try:
-                    p_tsexec = int(parts[1].strip())
-                except ValueError:
-                    p_tsexec = 0
-
-            priority_tssent[pcmd] = tssent_dt
-            line = format_command(p_name, int(tssent_dt.timestamp() * 1000), p_tsexec)
-            output_lines.append(line)
-            tssent_dt += timedelta(milliseconds=100)
-
     state["generated_commands"] = output_lines
     dpg.set_value("preview_text", "\n".join(output_lines))
     set_status(f"✓ Generated {cmd_count} commands.", (100, 255, 150, 255))
@@ -425,7 +420,6 @@ def generate_agenda() -> None:
 # ─────────────────────────────────────────────────────────────
 # GUI
 # ─────────────────────────────────────────────────────────────
-
 
 
 def build_gui() -> None:
@@ -628,7 +622,6 @@ def build_gui() -> None:
                         "  Insert priority commands every N loop commands.",
                         color=(160, 170, 190, 255),
                     )
-
 
             # ══════════════════════════════════════════════════
             # TAB 2 - COMMANDS
