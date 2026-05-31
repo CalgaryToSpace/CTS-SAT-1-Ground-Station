@@ -269,6 +269,15 @@ def _deselect_all() -> None:
     _update_obs_count()
 
 
+def _select_all() -> None:
+    for row in dpg.get_item_children("obs_table", slot=1) or []:
+        children = dpg.get_item_children(row, slot=1) or []
+        if children:
+            dpg.set_value(children[0], value=True)
+    state["selected_obs_ids"] = {obs.get("id") for obs in state["observations"]}
+    _update_obs_count()
+
+
 # -------------------------------------------------------------
 # COMMAND GENERATION
 # -------------------------------------------------------------
@@ -619,6 +628,11 @@ def build_gui() -> None:  # noqa: PLR0915
                     )
                 dpg.add_spacer(height=6)
 
+                dpg.add_text(
+                    "Select the observations to target with downlinks.",
+                    color=(160, 170, 190, 255),
+                )
+
                 # Observations table
                 with dpg.table(
                     tag="obs_table",
@@ -632,7 +646,7 @@ def build_gui() -> None:  # noqa: PLR0915
                     resizable=True,
                 ):  # pyright: ignore[reportGeneralTypeIssues]
                     dpg.add_table_column(
-                        label="[ok]", width_fixed=True, init_width_or_weight=30
+                        label="Use", width_fixed=True, init_width_or_weight=30
                     )
                     dpg.add_table_column(
                         label="Obs ID", width_fixed=True, init_width_or_weight=80
@@ -651,13 +665,14 @@ def build_gui() -> None:  # noqa: PLR0915
                     dpg.add_text("", tag="obs_count_text", color=(160, 170, 190, 255))
                     dpg.add_spacer(width=12)
                     dpg.add_button(
+                        label="Select All",
+                        callback=_select_all,
+                    )
+                    dpg.add_spacer(width=4)
+                    dpg.add_button(
                         label="Deselect All",
                         callback=_deselect_all,
                     )
-                dpg.add_text(
-                    "(All observations are selected by default. Uncheck to exclude.)",
-                    color=(160, 170, 190, 255),
-                )
 
             dpg.add_spacer(height=10)
 
