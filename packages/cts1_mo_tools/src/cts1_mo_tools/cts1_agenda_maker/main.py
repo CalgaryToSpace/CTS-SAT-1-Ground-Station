@@ -394,14 +394,20 @@ def generate_agenda() -> None:
             gs = ev_obs.get("ground_station", "?")
             if ev_type == "AOS":
                 active_passes.add(obs_id)
-                output_lines.append(
-                    f"# AOS Observation {obs_id} | GS {gs} | {_fmt(ev_dt)}"
-                )
+
             else:
                 active_passes.discard(obs_id)
-                output_lines.append(
-                    f"# LOS Observation {obs_id} | GS {gs} | {_fmt(ev_dt)}"
+
+            output_lines.append(
+                " | ".join(
+                    [
+                        f"# {ev_type} Observation {obs_id}",
+                        f"GS {gs}",
+                        _fmt(ev_dt),
+                        f"{len(active_passes)} station(s) in sight",
+                    ]
                 )
+            )
             event_idx += 1
 
         # Only emit commands while at least one pass is active.
