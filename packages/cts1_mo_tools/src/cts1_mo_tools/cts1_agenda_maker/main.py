@@ -49,6 +49,14 @@ def ms_to_iso(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000, tz=UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
+def iso_to_local_str(iso: str) -> str:
+    """Convert an ISO 8601 string to the user's local time in ISO format with offset."""
+    try:
+        return datetime.fromisoformat(iso).astimezone().replace(microsecond=0).isoformat()
+    except Exception:
+        return iso
+
+
 def format_command(name_args: str, tssent_ms: int, tsexec_ms: int) -> str:
     """
     Build a CTS1 telecommand string.
@@ -98,6 +106,13 @@ def get_str(tag: str) -> str:
         return ""
 
 
+def _update_obs_count() -> None:
+    if dpg.does_item_exist("obs_count_text"):
+        total = len(state["observations"])
+        selected = len(state["selected_obs_ids"])
+        dpg.set_value("obs_count_text", f"{total} fetched, {selected} selected")
+
+
 # ─────────────────────────────────────────────────────────────
 # SATNOGS
 # ─────────────────────────────────────────────────────────────
@@ -145,7 +160,7 @@ def _populate_obs_table(obs_list):
     """Rebuild the observations table rows."""
     # Clear existing rows only; slot=1 are rows, slot=0 are column defs (keep those)
     if dpg.does_item_exist("obs_table"):
-        for row in dpg.get_item_children("obs_table", slot=1):
+        for row in (dpg.get_item_children("obs_table", slot=1) or []):
             dpg.delete_item(row)
 
     for obs in obs_list:
@@ -155,13 +170,13 @@ def _populate_obs_table(obs_list):
         gs = obs.get("ground_station", "?")
 
         with dpg.table_row(parent="obs_table"):
-            # Checkbox
             def make_cb(oid):
-                def cb(s, v):
+                def cb(_sender, v):
                     if v:
                         state["selected_obs_ids"].add(oid)
                     else:
                         state["selected_obs_ids"].discard(oid)
+                    _update_obs_count()
 
                 return cb
 
@@ -172,6 +187,10 @@ def _populate_obs_table(obs_list):
             dpg.add_text(str(gs))
             dpg.add_text(start)
             dpg.add_text(end)
+            dpg.add_text(iso_to_local_str(start))
+            dpg.add_text(iso_to_local_str(end))
+
+    _update_obs_count()
 
 
 # ─────────────────────────────────────────────────────────────
@@ -432,8 +451,12 @@ def build_gui() -> None:
                         )
                         dpg.add_table_column(label="Start (UTC)")
                         dpg.add_table_column(label="End (UTC)")
+                        dpg.add_table_column(label="Start (Local)")
+                        dpg.add_table_column(label="End (Local)")
 
                     dpg.add_spacer(height=4)
+                    with dpg.group(horizontal=True):
+                        dpg.add_text("", tag="obs_count_text", color=(160, 170, 190, 255))
                     dpg.add_text(
                         "(All observations are selected by default. Uncheck to exclude.)",
                         color=(160, 170, 190, 255),
