@@ -114,10 +114,6 @@ def get_str(tag: str) -> str:
         return ""
 
 
-def _format_wait(delta: timedelta) -> str:
-    return "—" if delta < timedelta(0) else str(delta)
-
-
 def _update_obs_count() -> None:
     if dpg.does_item_exist("obs_count_text"):
         total = len(state["observations"])
@@ -142,12 +138,12 @@ def _append_obs_rows(
         wait_str = "—"
         if uplink_end_dt is not None:
             with contextlib.suppress(Exception):
-                wait_str = _format_wait(datetime.fromisoformat(start) - uplink_end_dt)
+                wait_str = str(datetime.fromisoformat(start) - uplink_end_dt)
 
         with dpg.table_row(parent="obs_table"):
 
             def make_cb(oid: int) -> Callable[[Any, bool], None]:
-                def cb(_sender: Any, v: bool) -> None:
+                def cb(_: Any, v: bool) -> None:
                     if v:
                         state["selected_obs_ids"].add(oid)
                     else:
@@ -189,23 +185,32 @@ def fetch_observations() -> None:
     state["selected_obs_ids"] = set()
     _update_obs_count()
 
-    # Compute uplink end once so every page uses the same reference point
-    uplink_end_dt: datetime | None = None
+    # Parse uplink start. Used for API filters and the wait-time column.
+    uplink_start_dt: datetime | None = None
     with contextlib.suppress(Exception):
-        dt_uplink = datetime.fromisoformat(get_str("uplink_start"))
-        if dt_uplink.tzinfo is not None:
-            uplink_end_dt = dt_uplink + timedelta(minutes=get_float("uplink_dur", 10.0))
+        dt = datetime.fromisoformat(get_str("uplink_start"))
+        if dt.tzinfo is not None:
+            uplink_start_dt = dt
+
+    uplink_end_dt: datetime | None = None
+    if uplink_start_dt is not None:
+        uplink_end_dt = uplink_start_dt + timedelta(
+            minutes=get_float("uplink_dur", 10.0)
+        )
 
     next_hours = get_int("next_hours_input", 6)
+    end_gt_filter: datetime | None = uplink_start_dt
     start_lt_filter: datetime | None = None
-    if next_hours > 0:
-        start_lt_filter = datetime.now(tz=UTC) + timedelta(hours=next_hours)
+    if uplink_start_dt is not None and next_hours > 0:
+        start_lt_filter = uplink_start_dt + timedelta(hours=next_hours)
 
     def _thread() -> None:
         try:
             all_obs: list[dict[str, Any]] = []
             for page in iter_future_observation_pages(
-                sat_id, start_lt_filter=start_lt_filter
+                sat_id,
+                start_lt_filter=start_lt_filter,
+                end_gt_filter=end_gt_filter,
             ):
                 if _fetch_stop.is_set():
                     set_status(
@@ -451,10 +456,46 @@ def build_gui() -> None:
     ):
         with dpg.tab_bar():
             # ══════════════════════════════════════════════════
-            # TAB 1 – SETTINGS
+            # TAB 1 - SETTINGS
             # ══════════════════════════════════════════════════
             with dpg.tab(label="⚙  Settings"):
                 dpg.add_spacer(height=8)
+
+                # ── Uplink window ──────────────────────────────
+                with dpg.collapsing_header(
+                    label="Uplink Pass Window", default_open=True
+                ):
+                    dpg.add_spacer(height=4)
+                    with dpg.group(horizontal=True):
+                        dpg.add_text("Start of Uplink Pass (ISO with timezone):")
+                        dpg.add_input_text(
+                            tag="uplink_start",
+                            default_value=now_local,
+                            width=260,
+                            hint="2024-05-01T12:00:00-07:00",
+                        )
+                    dpg.add_tooltip("uplink_start")
+                    with dpg.tooltip("uplink_start"):
+                        dpg.add_text(
+                            "ISO 8601 with timezone offset. Timezone is required.\n"
+                            "Examples: 2024-05-01T12:00:00-07:00  or  2024-05-01T19:00:00Z\n"
+                            "This sets the tssent for the first command.\n"
+                            "Only observations that START after (uplink_start + duration)\n"
+                            "will be included."
+                        )
+
+                    with dpg.group(horizontal=True):
+                        dpg.add_text("Uplink Pass Duration (minutes):     ")
+                        dpg.add_input_float(
+                            tag="uplink_dur",
+                            default_value=10.0,
+                            min_value=0.1,
+                            max_value=60.0,
+                            width=120,
+                            format="%.1f",
+                        )
+
+                dpg.add_spacer(height=10)
 
                 # ── SatNOGS fetch ──────────────────────────────
                 with dpg.collapsing_header(
@@ -469,7 +510,7 @@ def build_gui() -> None:
                             width=120,
                             hint="e.g. 69015",
                         )
-                        dpg.add_text("Next")
+                        dpg.add_text("Fetch next")
                         dpg.add_input_int(
                             tag="next_hours_input",
                             default_value=6,
@@ -477,7 +518,7 @@ def build_gui() -> None:
                             max_value=720,
                             width=70,
                         )
-                        dpg.add_text("hours")
+                        dpg.add_text("hrs after uplink")
                         dpg.add_button(
                             label="Fetch Observations",
                             tag="fetch_btn",
@@ -530,42 +571,6 @@ def build_gui() -> None:
 
                 dpg.add_spacer(height=10)
 
-                # ── Uplink window ──────────────────────────────
-                with dpg.collapsing_header(
-                    label="Uplink Pass Window", default_open=True
-                ):
-                    dpg.add_spacer(height=4)
-                    with dpg.group(horizontal=True):
-                        dpg.add_text("Start of Uplink Pass (ISO with timezone):")
-                        dpg.add_input_text(
-                            tag="uplink_start",
-                            default_value=now_local,
-                            width=260,
-                            hint="2024-05-01T12:00:00-07:00",
-                        )
-                    dpg.add_tooltip("uplink_start")
-                    with dpg.tooltip("uplink_start"):
-                        dpg.add_text(
-                            "ISO 8601 with timezone offset. Timezone is required.\n"
-                            "Examples: 2024-05-01T12:00:00-07:00  or  2024-05-01T19:00:00Z\n"
-                            "This sets the tssent for the first command.\n"
-                            "Only observations that START after (uplink_start + duration)\n"
-                            "will be included."
-                        )
-
-                    with dpg.group(horizontal=True):
-                        dpg.add_text("Uplink Pass Duration (minutes):     ")
-                        dpg.add_input_float(
-                            tag="uplink_dur",
-                            default_value=10.0,
-                            min_value=0.1,
-                            max_value=60.0,
-                            width=120,
-                            format="%.1f",
-                        )
-
-                dpg.add_spacer(height=10)
-
                 # ── Timing settings ────────────────────────────
                 with dpg.collapsing_header(label="Timing & Output", default_open=True):
                     dpg.add_spacer(height=4)
@@ -609,7 +614,7 @@ def build_gui() -> None:
                         )
 
             # ══════════════════════════════════════════════════
-            # TAB 2 – COMMANDS
+            # TAB 2 - COMMANDS
             # ══════════════════════════════════════════════════
             with dpg.tab(label="📋  Commands"):
                 dpg.add_spacer(height=8)
@@ -662,7 +667,7 @@ Each priority command keeps its first tssent so the satellite de-duplicates.""".
                     )
 
             # ══════════════════════════════════════════════════
-            # TAB 3 – GENERATE / PREVIEW
+            # TAB 3 - GENERATE / PREVIEW
             # ══════════════════════════════════════════════════
             with dpg.tab(label="🚀  Generate"):
                 dpg.add_spacer(height=8)
