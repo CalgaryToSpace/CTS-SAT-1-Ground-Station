@@ -10,7 +10,6 @@ telecommands, and produces a time-stamped command agenda file.
 
 import contextlib
 import threading
-import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -41,18 +40,9 @@ state = {
 # ─────────────────────────────────────────────────────────────
 
 
-def ts_ms() -> int:
-    return int(time.time() * 1000)
-
-
-def iso_to_ms(iso: str) -> int:
-    """Convert ISO 8601 UTC string to milliseconds since epoch."""
-    dt = datetime.fromisoformat(iso)
-    return int(dt.timestamp() * 1000)
-
-
-def ms_to_iso(ms: int) -> str:
-    return datetime.fromtimestamp(ms / 1000, tz=UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+def parse_iso(s: str) -> datetime:
+    """Parse an ISO 8601 string (including bare Z suffix) to a timezone-aware datetime."""
+    return datetime.fromisoformat(s.replace("Z", "+00:00"))
 
 
 def iso_to_local_str(iso: str) -> str:
@@ -138,7 +128,9 @@ def _append_obs_rows(
         wait_str = "—"
         if uplink_end_dt is not None:
             with contextlib.suppress(Exception):
-                wait_str = str(datetime.fromisoformat(start) - uplink_end_dt)
+                delta = parse_iso(start) - uplink_end_dt
+                if delta.total_seconds() >= 0:
+                    wait_str = str(delta)
 
         with dpg.table_row(parent="obs_table"):
 
@@ -260,15 +252,14 @@ def generate_agenda() -> None:
 
     # Parse uplink window
     try:
-        dt_uplink = datetime.fromisoformat(uplink_start_str)
-        if dt_uplink.tzinfo is None:
+        uplink_start_dt = parse_iso(uplink_start_str)
+        if uplink_start_dt.tzinfo is None:
             set_status(
                 "✗ 'Start of Uplink Pass' must include a timezone "
                 "(e.g. 2024-05-01T12:00:00-07:00 or ...Z).",
                 (255, 100, 100, 255),
             )
             return
-        uplink_start_ms = int(dt_uplink.timestamp() * 1000)
     except Exception:
         set_status(
             "✗ Invalid 'Start of Uplink Pass'. "
@@ -277,7 +268,7 @@ def generate_agenda() -> None:
         )
         return
 
-    uplink_end_ms = uplink_start_ms + int(uplink_dur_min * 60 * 1000)
+    uplink_end_dt = uplink_start_dt + timedelta(minutes=uplink_dur_min)
 
     # ── Commands ──────────────────────────────────────────────
     loop_cmds_raw = get_str("loop_cmds_input").splitlines()
@@ -297,7 +288,7 @@ def generate_agenda() -> None:
         if obs.get("id") in state["selected_obs_ids"]
     ]
     # Keep only observations that start AFTER end of uplink pass
-    valid_obs = [obs for obs in selected if iso_to_ms(obs["start"]) > uplink_end_ms]
+    valid_obs = [obs for obs in selected if parse_iso(obs["start"]) > uplink_end_dt]
 
     if not valid_obs:
         set_status(
@@ -306,35 +297,37 @@ def generate_agenda() -> None:
         )
         return
 
+    def _fmt(dt: datetime) -> str:
+        return dt.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+
     # ── Build command list ─────────────────────────────────────
     output_lines = []
     output_lines.append("# CTS-SAT-1 Command Agenda")
     output_lines.append(f"# Generated: {datetime.now(tz=UTC).isoformat()}")
     output_lines.append(
-        f"# Uplink window: {ms_to_iso(uplink_start_ms)} → {ms_to_iso(uplink_end_ms)}"
+        f"# Uplink window: {_fmt(uplink_start_dt)} → {_fmt(uplink_end_dt)}"
     )
     output_lines.append(f"# Valid observations: {len(valid_obs)}")
     output_lines.append("")
 
-    tssent_ms = uplink_start_ms
+    tssent_dt = uplink_start_dt
     cmd_count = 0
-    interval_ms = int(cmd_interval_sec * 1000)
+    cmd_interval = timedelta(seconds=cmd_interval_sec)
 
-    # Track priority cmd tssent values (de-dup key = tssent of first send)
-    priority_tssent: dict[str, int] = {}
+    # Track priority cmd tssent datetimes (de-dup key = tssent of first send)
+    priority_tssent: dict[str, datetime] = {}
 
     for obs in valid_obs:
-        obs_start_ms = iso_to_ms(obs["start"])
-        obs_end_ms = iso_to_ms(obs["end"])
+        obs_start_dt = parse_iso(obs["start"])
+        obs_end_dt = parse_iso(obs["end"])
 
         output_lines.append(
             f"# ── Observation {obs['id']} | GS {obs.get('ground_station', '?')} "
-            f"| {ms_to_iso(obs_start_ms)} → {ms_to_iso(obs_end_ms)}"
+            f"| {_fmt(obs_start_dt)} → {_fmt(obs_end_dt)}"
         )
 
-        # Loop through commands until we've filled the observation window
-        tsexec_ms = obs_start_ms  # first exec at start of pass
-        while tsexec_ms < obs_end_ms:
+        tsexec_dt = obs_start_dt
+        while tsexec_dt < obs_end_dt:
             for cmd_raw in loop_cmds:
                 # Priority injection?
                 if (
@@ -356,22 +349,29 @@ def generate_agenda() -> None:
 
                         # Use same tssent every time (de-dup on satellite)
                         if pcmd not in priority_tssent:
-                            priority_tssent[pcmd] = tssent_ms
-                            tssent_ms += 100
+                            priority_tssent[pcmd] = tssent_dt
+                            tssent_dt += timedelta(milliseconds=100)
 
-                        p_tssent = priority_tssent[pcmd]
-                        line = format_command(p_name, p_tssent, p_tsexec)
+                        line = format_command(
+                            p_name,
+                            int(priority_tssent[pcmd].timestamp() * 1000),
+                            p_tsexec,
+                        )
                         output_lines.append(f"# PRIORITY [{cmd_count}]")
                         output_lines.append(line)
 
                 # Regular loop command
-                line = format_command(cmd_raw, tssent_ms, tsexec_ms)
+                line = format_command(
+                    cmd_raw,
+                    int(tssent_dt.timestamp() * 1000),
+                    int(tsexec_dt.timestamp() * 1000),
+                )
                 output_lines.append(line)
-                tssent_ms += 100  # +100 ms per sequential command
-                tsexec_ms += interval_ms
+                tssent_dt += timedelta(milliseconds=100)
+                tsexec_dt += cmd_interval
                 cmd_count += 1
 
-                if tsexec_ms >= obs_end_ms:
+                if tsexec_dt >= obs_end_dt:
                     break
 
         output_lines.append("")
@@ -390,10 +390,10 @@ def generate_agenda() -> None:
                 except ValueError:
                     p_tsexec = 0
 
-            priority_tssent[pcmd] = tssent_ms
-            line = format_command(p_name, tssent_ms, p_tsexec)
+            priority_tssent[pcmd] = tssent_dt
+            line = format_command(p_name, int(tssent_dt.timestamp() * 1000), p_tsexec)
             output_lines.append(line)
-            tssent_ms += 100
+            tssent_dt += timedelta(milliseconds=100)
 
     # ── Write file ─────────────────────────────────────────────
     try:
