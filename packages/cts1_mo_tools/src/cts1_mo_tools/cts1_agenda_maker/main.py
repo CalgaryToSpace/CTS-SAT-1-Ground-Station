@@ -75,7 +75,17 @@ def format_command(name_args: str, tssent_ms: int, tsexec_ms: int) -> str:
     if not out.endswith(COMMAND_SUFFIX):
         out = f"{out}{COMMAND_SUFFIX}"
 
-    return out
+    tssent_utc = datetime.fromtimestamp(tssent_ms / 1000, tz=UTC).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    tsexec_utc = (
+        "immediate"
+        if tsexec_ms == 0
+        else datetime.fromtimestamp(tsexec_ms / 1000, tz=UTC).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+    )
+    return f"{out}  # tssent={tssent_utc} tsexec={tsexec_utc}"
 
 
 def set_status(
