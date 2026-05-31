@@ -143,9 +143,10 @@ def fetch_observations() -> None:
 
 def _populate_obs_table(obs_list):
     """Rebuild the observations table rows."""
-    # Clear existing rows
+    # Clear existing rows only; slot=1 are rows, slot=0 are column defs (keep those)
     if dpg.does_item_exist("obs_table"):
-        dpg.delete_item("obs_table", children_only=True)
+        for row in dpg.get_item_children("obs_table", slot=1):
+            dpg.delete_item(row)
 
     for obs in obs_list:
         obs_id = obs.get("id", "?")
