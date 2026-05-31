@@ -232,7 +232,12 @@ def fetch_observations() -> None:
                 end_gt_filter=end_gt_filter,
             ):
                 all_obs.extend(page)
-                _append_obs_rows(page, uplink_end_dt)
+                all_obs.sort(key=lambda o: parse_iso(o["start"]))
+                if dpg.does_item_exist("obs_table"):
+                    for row in dpg.get_item_children("obs_table", slot=1) or []:
+                        dpg.delete_item(row)
+                state["selected_obs_ids"] = set()
+                _append_obs_rows(all_obs, uplink_end_dt)
                 set_status(
                     f"Fetching… {len(all_obs)} so far",
                     (180, 200, 255, 255),
@@ -240,14 +245,6 @@ def fetch_observations() -> None:
                 if _fetch_stop.is_set():
                     stopped = True
                     break
-
-            # Sort in place and re-render all rows in ascending order
-            all_obs.sort(key=lambda o: parse_iso(o["start"]))
-            if dpg.does_item_exist("obs_table"):
-                for row in dpg.get_item_children("obs_table", slot=1) or []:
-                    dpg.delete_item(row)
-            state["selected_obs_ids"] = set()
-            _append_obs_rows(all_obs, uplink_end_dt)
 
             if stopped:
                 set_status(
@@ -570,10 +567,9 @@ def build_gui() -> None:
                         dpg.add_loading_indicator(
                             tag="fetch_spinner",
                             show=False,
-                            radius=6.0,
+                            radius=1.5,
                             speed=1.5,
                             color=(100, 180, 255, 255),
-                            secondary_color=(50, 80, 120, 255),
                         )
                     dpg.add_spacer(height=6)
 
