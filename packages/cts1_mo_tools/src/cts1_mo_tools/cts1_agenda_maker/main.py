@@ -302,7 +302,8 @@ def _parse_priority_cmd(raw: str) -> tuple[str, int]:
     m = re.search(r"@tsexec=(\d+)", s)
     if m:
         p_tsexec = int(m.group(1))
-        s = s[: m.start()].strip()
+        # Remove @tsexec section, leaving the rest (including any other suffix tags).
+        s = (s[: m.start()] + s[m.end() :]).strip()
     return s, p_tsexec
 
 
