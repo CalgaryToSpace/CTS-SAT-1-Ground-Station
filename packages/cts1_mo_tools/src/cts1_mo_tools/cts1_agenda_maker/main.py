@@ -271,7 +271,6 @@ def generate_agenda() -> None:
     uplink_dur_min = get_float("uplink_dur", 10.0)
     cmd_interval_sec = get_float("cmd_interval", 5.0)
     priority_interval = get_int("priority_interval", 50)
-    output_path = get_str("output_path") or "command_agenda.txt"
 
     # Parse uplink window
     try:
@@ -418,25 +417,15 @@ def generate_agenda() -> None:
             output_lines.append(line)
             tssent_dt += timedelta(milliseconds=100)
 
-    # ── Write file ─────────────────────────────────────────────
-    try:
-        with open(output_path, "w") as f:
-            f.write("\n".join(output_lines))
-        state["generated_commands"] = output_lines
-
-        # Show preview
-        dpg.set_value("preview_text", "\n".join(output_lines[:80]))
-        set_status(
-            f"✓ Wrote {cmd_count} commands to '{output_path}'.",
-            (100, 255, 150, 255),
-        )
-    except Exception as exc:
-        set_status(f"✗ Write error: {exc}", (255, 100, 100, 255))
+    state["generated_commands"] = output_lines
+    dpg.set_value("preview_text", "\n".join(output_lines))
+    set_status(f"✓ Generated {cmd_count} commands.", (100, 255, 150, 255))
 
 
 # ─────────────────────────────────────────────────────────────
 # GUI
 # ─────────────────────────────────────────────────────────────
+
 
 
 def build_gui() -> None:
@@ -640,14 +629,6 @@ def build_gui() -> None:
                         color=(160, 170, 190, 255),
                     )
 
-                    dpg.add_spacer(height=6)
-                    with dpg.group(horizontal=True):
-                        dpg.add_text("Output File Path:                    ")
-                        dpg.add_input_text(
-                            tag="output_path",
-                            default_value="command_agenda.txt",
-                            width=360,
-                        )
 
             # ══════════════════════════════════════════════════
             # TAB 2 - COMMANDS
@@ -720,7 +701,7 @@ Each priority command keeps its first tssent so the satellite de-duplicates.""".
                 dpg.add_spacer(height=10)
                 dpg.add_separator()
                 dpg.add_spacer(height=6)
-                dpg.add_text("Preview (first 80 lines):", color=(160, 170, 190, 255))
+                dpg.add_text("Preview:", color=(160, 170, 190, 255))
                 dpg.add_spacer(height=4)
                 dpg.add_input_text(
                     tag="preview_text",
