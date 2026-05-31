@@ -2,7 +2,7 @@
 
 import re
 from collections.abc import Iterator
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import requests
@@ -22,6 +22,7 @@ def _next_url_from_headers(headers: Any) -> str | None:
 def iter_future_observation_pages(
     norad_cat_id: str,
     start_lt_filter: datetime | None = None,
+    end_gt_filter: datetime | None = None,
 ) -> Iterator[list[dict[str, Any]]]:
     """Yield pages of future observations one at a time, following cursor pagination.
 
@@ -31,6 +32,7 @@ def iter_future_observation_pages(
     Args:
         norad_cat_id: NORAD catalog ID of the satellite.
         start_lt_filter: Optional upper bound on observation start time.
+        end_gt_filter: Optional lower bound on observation end time (``end__gt``).
     """
     url: str | None = f"{SATNOGS_BASE}/observations/"
     params: dict[str, Any] = {
@@ -40,7 +42,11 @@ def iter_future_observation_pages(
         "page_size": 100,
     }
     if start_lt_filter is not None:
-        params["start__lt"] = start_lt_filter.strftime("%Y-%m-%dT%H:%M:%SZ")
+        params["start__lt"] = start_lt_filter.astimezone(UTC).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+    if end_gt_filter is not None:
+        params["end__gt"] = end_gt_filter.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     while url is not None:
         r = requests.get(url, params=params, timeout=15)
