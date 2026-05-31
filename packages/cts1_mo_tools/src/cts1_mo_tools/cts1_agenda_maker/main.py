@@ -204,23 +204,11 @@ def fetch_observations() -> None:
     _update_obs_count()
 
     # Parse uplink start. Used for API filters and the wait-time column.
-    uplink_start_dt: datetime | None = None
-    with contextlib.suppress(Exception):
-        dt = parse_iso(get_str("uplink_start"))
-        if dt.tzinfo is not None:
-            uplink_start_dt = dt
-
-    uplink_end_dt: datetime | None = None
-    if uplink_start_dt is not None:
-        uplink_end_dt = uplink_start_dt + timedelta(
-            minutes=get_float("uplink_dur", 10.0)
-        )
+    uplink_start_dt: datetime = parse_iso(get_str("uplink_start"))
+    uplink_end_dt = uplink_start_dt + timedelta(minutes=get_float("uplink_dur"))
 
     next_hours = get_int("next_hours_input", 6)
-    end_gt_filter: datetime | None = uplink_start_dt
-    start_lt_filter: datetime | None = None
-    if uplink_start_dt is not None and next_hours > 0:
-        start_lt_filter = uplink_start_dt + timedelta(hours=next_hours)
+    start_lt_filter = uplink_start_dt + timedelta(hours=next_hours)
 
     def _thread() -> None:
         try:
@@ -229,8 +217,8 @@ def fetch_observations() -> None:
             stopped = False
             for page in iter_future_observation_pages(
                 sat_id,
+                start_gt_filter=uplink_end_dt,
                 start_lt_filter=start_lt_filter,
-                end_gt_filter=end_gt_filter,
             ):
                 all_obs.extend(page)
                 all_obs.sort(key=lambda o: parse_iso(o["start"]))
@@ -523,12 +511,18 @@ def build_gui() -> None:
                         dpg.add_text("Uplink Pass Duration (minutes):     ")
                         dpg.add_input_float(
                             tag="uplink_dur",
-                            default_value=10.0,
+                            default_value=15.0,
                             min_value=0.1,
                             max_value=60.0,
                             width=120,
                             format="%.1f",
                         )
+
+                        dpg.add_tooltip("uplink_dur")
+                        with dpg.tooltip("uplink_dur"):
+                            dpg.add_text(
+                                "Fine to overestimate the duration by a few minutes."
+                            )
 
                 dpg.add_spacer(height=10)
 

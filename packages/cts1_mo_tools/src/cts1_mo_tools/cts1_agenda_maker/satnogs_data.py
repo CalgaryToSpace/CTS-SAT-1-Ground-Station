@@ -28,6 +28,7 @@ def _next_url_from_headers(headers: Any) -> str | None:
 
 def iter_future_observation_pages(
     norad_cat_id: str,
+    start_gt_filter: datetime | None = None,
     start_lt_filter: datetime | None = None,
     end_gt_filter: datetime | None = None,
 ) -> Iterator[list[dict[str, Any]]]:
@@ -41,6 +42,7 @@ def iter_future_observation_pages(
 
     Args:
         norad_cat_id: NORAD catalog ID of the satellite.
+        start_gt_filter: Optional lower bound on observation start time.
         start_lt_filter: Optional upper bound on observation start time.
         end_gt_filter: Optional lower bound on observation end time (``end__gt``).
     """
@@ -51,6 +53,10 @@ def iter_future_observation_pages(
         "format": "json",
         "page_size": 100,
     }
+    if start_gt_filter is not None:
+        params["start"] = start_gt_filter.astimezone(UTC).strftime(
+            _SATNOGS_API_DATETIME_REQUEST_FORMAT
+        )
     if start_lt_filter is not None:
         params["start__lt"] = start_lt_filter.astimezone(UTC).strftime(
             _SATNOGS_API_DATETIME_REQUEST_FORMAT
