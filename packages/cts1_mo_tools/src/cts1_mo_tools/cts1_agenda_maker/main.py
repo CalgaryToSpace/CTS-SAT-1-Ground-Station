@@ -12,6 +12,7 @@ import contextlib
 import re
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -293,63 +294,46 @@ def _select_all() -> None:
 # -------------------------------------------------------------
 
 
-def generate_agenda() -> None:  # noqa: C901, PLR0912, PLR0915
-    """Core generation logic."""
-    # -- Settings ----------------------------------------------
-    uplink_start_str = get_str("uplink_start")
-    uplink_dur_min = get_float("uplink_dur", 10.0)
-    block_interval_sec = get_float("block_interval", 20.0)
-    cmd_interval_sec = get_float("cmd_interval", 2.0)
-    priority_interval = get_int("priority_interval", 50)
-    sat_id = get_str("sat_id_input")
-    next_hours = get_int("next_hours_input", 6)
+def _parse_priority_cmd(raw: str) -> tuple[str, int]:
+    s = raw.strip()
+    s = s.removeprefix(COMMAND_PREFIX)
+    s = s.removesuffix(COMMAND_SUFFIX)
+    p_tsexec = 0
+    m = re.search(r"@tsexec=(\d+)", s)
+    if m:
+        p_tsexec = int(m.group(1))
+        s = s[: m.start()].strip()
+    return s, p_tsexec
 
-    # Parse uplink window
-    try:
-        uplink_start_dt = parse_iso(uplink_start_str)
-        if uplink_start_dt.tzinfo is None:
-            set_status(
-                "[x] 'Start of Uplink Pass' must include a timezone "
-                "(e.g. 2024-05-01T12:00:00-07:00 or ...Z).",
-                (255, 100, 100, 255),
-            )
-            return
-    except Exception:  # noqa: BLE001
-        set_status(
-            "[x] Invalid 'Start of Uplink Pass'. "
-            "Use ISO format with timezone: 2024-05-01T12:00:00-07:00",
-            (255, 100, 100, 255),
-        )
-        return
 
-    uplink_end_dt = uplink_start_dt + timedelta(minutes=uplink_dur_min)
+@dataclass
+class AgendaParams:
+    uplink_start_dt: datetime
+    uplink_dur_min: float
+    block_interval_sec: float
+    cmd_interval_sec: float
+    priority_interval: int
+    sat_id: str
+    next_hours: int
+    loop_cmds: list[str]
+    priority_cmds: list[str] = field(default_factory=list)
+    observations: list[dict[str, Any]] = field(default_factory=list)
 
-    # -- Commands ----------------------------------------------
-    loop_cmds_raw = get_str("loop_cmds_input").splitlines()
-    loop_cmds = [c.strip() for c in loop_cmds_raw if c.strip()]
 
-    priority_cmds_raw = get_str("priority_cmds_input").splitlines()
-    priority_cmds = [c.strip() for c in priority_cmds_raw if c.strip()]
+def build_agenda(params: AgendaParams) -> list[str]:  # noqa: C901, PLR0912, PLR0915
+    """Pure agenda generation. Raises ValueError for invalid inputs."""
+    if not params.loop_cmds:
+        msg = "No loop commands entered."
+        raise ValueError(msg)
 
-    if not loop_cmds:
-        set_status("[x] No loop commands entered.", (255, 100, 100, 255))
-        return
+    uplink_end_dt = params.uplink_start_dt + timedelta(minutes=params.uplink_dur_min)
 
-    # -- Filter observations ------------------------------------
-    selected = [
-        obs
-        for obs in state["observations"]
-        if obs.get("id") in state["selected_obs_ids"]
+    valid_obs = [
+        obs for obs in params.observations if parse_iso(obs["start"]) > uplink_end_dt
     ]
-    # Keep only observations that start AFTER end of uplink pass.
-    valid_obs = [obs for obs in selected if parse_iso(obs["start"]) > uplink_end_dt]
-
     if not valid_obs:
-        set_status(
-            "[x] No valid observations (all are before end of uplink window).",
-            (255, 100, 100, 255),
-        )
-        return
+        msg_0 = "No valid observations (all are before end of uplink window)."
+        raise ValueError(msg_0)
 
     def _fmt(dt: datetime) -> str:
         return dt.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -359,61 +343,48 @@ def generate_agenda() -> None:  # noqa: C901, PLR0912, PLR0915
     # event_type is "AOS" or "LOS"
     events: list[tuple[datetime, str, dict]] = []
     for obs in valid_obs:
-        obs_start_dt = parse_iso(obs["start"])
-        obs_end_dt = parse_iso(obs["end"])
-        events.append((obs_start_dt, "AOS", obs))
-        events.append((obs_end_dt, "LOS", obs))
+        events.append((parse_iso(obs["start"]), "AOS", obs))
+        events.append((parse_iso(obs["end"]), "LOS", obs))
     events.sort(key=lambda e: e[0])
 
-    # -- Assign priority command tssent upfront -----------------
+    # -- Header -------------------------------------------------
     output_lines: list[str] = []
     output_lines.append("# CTS-SAT-1 Command Agenda")
     output_lines.append(f"# Generated: {datetime.now(tz=UTC).isoformat()}")
-    output_lines.append(f"# Satellite NORAD ID: {sat_id}")
+    output_lines.append(f"# Satellite NORAD ID: {params.sat_id}")
     output_lines.append(
-        f"# Uplink window: {_fmt(uplink_start_dt)} -> {_fmt(uplink_end_dt)}"
-        f" ({uplink_dur_min:.1f} min)"
+        f"# Uplink window: {_fmt(params.uplink_start_dt)} -> {_fmt(uplink_end_dt)}"
+        f" ({params.uplink_dur_min:.1f} min)"
     )
     output_lines.append(
-        f"# Observation fetch window end: {next_hours} hrs after uplink"
+        f"# Observation fetch window end: {params.next_hours} hrs after uplink"
     )
     output_lines.append(f"# Valid observations: {len(valid_obs)}")
     output_lines.append(
-        f"# Time between loop command blocks: {block_interval_sec:.1f} s"
+        f"# Time between loop command blocks: {params.block_interval_sec:.1f} s"
     )
     output_lines.append(
-        f"# Time between commands in a loop block: {cmd_interval_sec:.1f} s"
+        f"# Time between commands in a loop block: {params.cmd_interval_sec:.1f} s"
     )
     output_lines.append(
-        f"# Priority command injection interval: every {priority_interval} loop commands"  # noqa: E501
+        f"# Priority command injection interval: every {params.priority_interval} loop commands"  # noqa: E501
     )
-    output_lines.append(f"# Loop commands ({len(loop_cmds)}):")
-    output_lines.extend([f"#   {loop_command}" for loop_command in loop_cmds])
-    output_lines.append(f"# Priority commands ({len(priority_cmds)}):")
-    output_lines.extend([f"#   {priority_cmd}" for priority_cmd in priority_cmds])
+    output_lines.append(f"# Loop commands ({len(params.loop_cmds)}):")
+    output_lines.extend([f"#   {cmd}" for cmd in params.loop_cmds])
+    output_lines.append(f"# Priority commands ({len(params.priority_cmds)}):")
+    output_lines.extend([f"#   {cmd}" for cmd in params.priority_cmds])
     output_lines.append("")
 
-    def _parse_priority_cmd(raw: str) -> tuple[str, int]:
-        s = raw.strip()
-        s = s.removeprefix(COMMAND_PREFIX)
-        s = s.removesuffix(COMMAND_SUFFIX)
-        p_tsexec = 0
-        m = re.search(r"@tsexec=(\d+)", s)
-        if m:
-            p_tsexec = int(m.group(1))
-            s = s[: m.start()].strip()
-        return s, p_tsexec
-
-    tssent_dt = uplink_start_dt
+    tssent_dt = params.uplink_start_dt
     cmd_count = 0
-    block_interval = timedelta(seconds=block_interval_sec)
-    cmd_interval = timedelta(seconds=cmd_interval_sec)
+    block_interval = timedelta(seconds=params.block_interval_sec)
+    cmd_interval = timedelta(seconds=params.cmd_interval_sec)
 
     # Assign each priority command a fixed tssent and emit them upfront
     priority_tssent: dict[str, datetime] = {}
-    if priority_cmds:
+    if params.priority_cmds:
         output_lines.append("# PRIORITY COMMANDS")
-        for priority_cmd in priority_cmds:
+        for priority_cmd in params.priority_cmds:
             p_name, p_tsexec = _parse_priority_cmd(priority_cmd)
             priority_tssent[priority_cmd] = tssent_dt
             output_lines.append(
@@ -427,10 +398,8 @@ def generate_agenda() -> None:  # noqa: C901, PLR0912, PLR0915
     first_aos = parse_iso(valid_obs[0]["start"])
     last_los = max(parse_iso(obs["end"]) for obs in valid_obs)
 
-    # Convert event list to a lookup: time -> list of comment strings to inject.
-    # We'll consume these as tsexec_dt advances.
     event_idx = 0
-    active_passes: set[int] = set()  # obs IDs currently in-view
+    active_passes: set[int] = set()
 
     tsexec_dt = first_aos
     output_lines.append(f"# Timeline start: {_fmt(first_aos)}")
@@ -463,15 +432,14 @@ def generate_agenda() -> None:  # noqa: C901, PLR0912, PLR0915
         # Only emit commands while at least one pass is active.
         if active_passes:
             cmd_tsexec_dt = tsexec_dt
-            for cmd_raw in loop_cmds:
-                # Priority injection
+            for cmd_raw in params.loop_cmds:
                 if (
-                    priority_cmds
+                    params.priority_cmds
                     and cmd_count > 0
-                    and (cmd_count % priority_interval) == 0
+                    and (cmd_count % params.priority_interval) == 0
                 ):
                     output_lines.append(f"# PRIORITY [{cmd_count}]")
-                    for priority_cmd in priority_cmds:
+                    for priority_cmd in params.priority_cmds:
                         p_name, p_tsexec = _parse_priority_cmd(priority_cmd)
                         output_lines.append(
                             format_command(
@@ -506,6 +474,52 @@ def generate_agenda() -> None:  # noqa: C901, PLR0912, PLR0915
             active_passes.discard(obs_id)
             output_lines.append(f"# LOS Observation {obs_id} | GS {gs} | {_fmt(ev_dt)}")
         event_idx += 1
+
+    return output_lines
+
+
+def generate_agenda() -> None:
+    uplink_start_str = get_str("uplink_start")
+    try:
+        uplink_start_dt = parse_iso(uplink_start_str)
+    except Exception:  # noqa: BLE001
+        set_status(
+            "[x] Invalid 'Start of Uplink Pass'. "
+            "Use ISO format with timezone: 2024-05-01T12:00:00-07:00",
+            (255, 100, 100, 255),
+        )
+        return
+
+    loop_cmds = [
+        c.strip() for c in get_str("loop_cmds_input").splitlines() if c.strip()
+    ]
+    priority_cmds = [
+        c.strip() for c in get_str("priority_cmds_input").splitlines() if c.strip()
+    ]
+    selected_obs = [
+        obs
+        for obs in state["observations"]
+        if obs.get("id") in state["selected_obs_ids"]
+    ]
+
+    params = AgendaParams(
+        uplink_start_dt=uplink_start_dt,
+        uplink_dur_min=get_float("uplink_dur", 10.0),
+        block_interval_sec=get_float("block_interval", 20.0),
+        cmd_interval_sec=get_float("cmd_interval", 2.0),
+        priority_interval=get_int("priority_interval", 50),
+        sat_id=get_str("sat_id_input"),
+        next_hours=get_int("next_hours_input", 6),
+        loop_cmds=loop_cmds,
+        priority_cmds=priority_cmds,
+        observations=selected_obs,
+    )
+
+    try:
+        output_lines = build_agenda(params)
+    except ValueError as exc:
+        set_status(f"[x] {exc}", (255, 100, 100, 255))
+        return
 
     state["generated_commands"] = output_lines
     dpg.set_value("preview_text", "\n".join(output_lines))
@@ -812,7 +826,7 @@ Each priority command keeps its first tssent so the satellite de-duplicates.""".
         # ==================================================
         # TAB 3 - GENERATE / PREVIEW
         # ==================================================
-        with dpg.tab(label="  Generate"):  # pyright: ignore[reportGeneralTypeIssues]
+        with dpg.tab(label="Generate"):  # pyright: ignore[reportGeneralTypeIssues]
             dpg.add_spacer(height=8)
 
             with dpg.group(horizontal=True):  # pyright: ignore[reportGeneralTypeIssues]
