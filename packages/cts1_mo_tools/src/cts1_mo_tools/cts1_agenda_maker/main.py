@@ -22,24 +22,24 @@ from .satnogs_data import iter_future_observation_pages
 
 _fetch_stop = threading.Event()
 
-# ─────────────────────────────────────────────────────────────
+# -------------------------------------------------------------
 # CONSTANTS
-# ─────────────────────────────────────────────────────────────
+# -------------------------------------------------------------
 COMMAND_PREFIX = "CTS1+"
 COMMAND_SUFFIX = "!"
 
-# ─────────────────────────────────────────────────────────────
+# -------------------------------------------------------------
 # STATE
-# ─────────────────────────────────────────────────────────────
+# -------------------------------------------------------------
 state = {
     "observations": [],  # raw SatNOGS observation dicts
     "selected_obs_ids": set(),  # user-selected observation IDs
     "generated_commands": [],  # list of formatted command strings
 }
 
-# ─────────────────────────────────────────────────────────────
+# -------------------------------------------------------------
 # HELPERS
-# ─────────────────────────────────────────────────────────────
+# -------------------------------------------------------------
 
 
 def parse_iso(s: str) -> datetime:
@@ -121,9 +121,9 @@ def format_timedelta(delta: timedelta) -> str:
     return str(delta)
 
 
-# ─────────────────────────────────────────────────────────────
+# -------------------------------------------------------------
 # SATNOGS
-# ─────────────────────────────────────────────────────────────
+# -------------------------------------------------------------
 
 
 def _append_obs_rows(
@@ -187,11 +187,11 @@ def _append_obs_rows(
 def fetch_observations() -> None:
     sat_id = get_str("sat_id_input")
     if not sat_id:
-        set_status("⚠ Enter a SatNOGS satellite ID first.", (255, 200, 0, 255))
+        set_status("[!] Enter a SatNOGS satellite ID first.", (255, 200, 0, 255))
         return
 
     _fetch_stop.clear()
-    set_status("Fetching observations from SatNOGS…", (180, 200, 255, 255))
+    set_status("Fetching observations from SatNOGS...", (180, 200, 255, 255))
     dpg.configure_item("fetch_btn", enabled=False)
     dpg.configure_item("stop_fetch_btn", show=True)
     dpg.configure_item("fetch_spinner", show=True)
@@ -229,7 +229,7 @@ def fetch_observations() -> None:
                 state["selected_obs_ids"] = set()
                 _append_obs_rows(all_obs, uplink_end_dt)
                 set_status(
-                    f"Fetching… {len(all_obs)} so far",
+                    f"Fetching... {len(all_obs)} so far",
                     (180, 200, 255, 255),
                 )
                 if _fetch_stop.is_set():
@@ -238,16 +238,16 @@ def fetch_observations() -> None:
 
             if stopped:
                 set_status(
-                    f"⊘ Stopped. {len(all_obs)} observations loaded.",
+                    f"[stop] Stopped. {len(all_obs)} observations loaded.",
                     (255, 200, 0, 255),
                 )
             else:
                 set_status(
-                    f"✓ Loaded {len(all_obs)} future observations.",
+                    f"[ok] Loaded {len(all_obs)} future observations.",
                     (100, 255, 150, 255),
                 )
         except Exception as exc:
-            set_status(f"✗ Fetch error: {exc}", (255, 100, 100, 255))
+            set_status(f"[x] Fetch error: {exc}", (255, 100, 100, 255))
         finally:
             dpg.configure_item("fetch_btn", enabled=True)
             dpg.configure_item("stop_fetch_btn", show=False)
@@ -260,14 +260,14 @@ def _stop_fetch() -> None:
     _fetch_stop.set()
 
 
-# ─────────────────────────────────────────────────────────────
+# -------------------------------------------------------------
 # COMMAND GENERATION
-# ─────────────────────────────────────────────────────────────
+# -------------------------------------------------------------
 
 
 def generate_agenda() -> None:
     """Core generation logic."""
-    # ── Settings ──────────────────────────────────────────────
+    # -- Settings ----------------------------------------------
     uplink_start_str = get_str("uplink_start")
     uplink_dur_min = get_float("uplink_dur", 10.0)
     cmd_interval_sec = get_float("cmd_interval", 5.0)
@@ -278,14 +278,14 @@ def generate_agenda() -> None:
         uplink_start_dt = parse_iso(uplink_start_str)
         if uplink_start_dt.tzinfo is None:
             set_status(
-                "✗ 'Start of Uplink Pass' must include a timezone "
+                "[x] 'Start of Uplink Pass' must include a timezone "
                 "(e.g. 2024-05-01T12:00:00-07:00 or ...Z).",
                 (255, 100, 100, 255),
             )
             return
     except Exception:
         set_status(
-            "✗ Invalid 'Start of Uplink Pass'. "
+            "[x] Invalid 'Start of Uplink Pass'. "
             "Use ISO format with timezone: 2024-05-01T12:00:00-07:00",
             (255, 100, 100, 255),
         )
@@ -293,7 +293,7 @@ def generate_agenda() -> None:
 
     uplink_end_dt = uplink_start_dt + timedelta(minutes=uplink_dur_min)
 
-    # ── Commands ──────────────────────────────────────────────
+    # -- Commands ----------------------------------------------
     loop_cmds_raw = get_str("loop_cmds_input").splitlines()
     loop_cmds = [c.strip() for c in loop_cmds_raw if c.strip()]
 
@@ -301,10 +301,10 @@ def generate_agenda() -> None:
     priority_cmds = [c.strip() for c in priority_cmds_raw if c.strip()]
 
     if not loop_cmds:
-        set_status("✗ No loop commands entered.", (255, 100, 100, 255))
+        set_status("[x] No loop commands entered.", (255, 100, 100, 255))
         return
 
-    # ── Filter observations ────────────────────────────────────
+    # -- Filter observations ------------------------------------
     selected = [
         obs
         for obs in state["observations"]
@@ -315,7 +315,7 @@ def generate_agenda() -> None:
 
     if not valid_obs:
         set_status(
-            "✗ No valid observations (all are before end of uplink window).",
+            "[x] No valid observations (all are before end of uplink window).",
             (255, 100, 100, 255),
         )
         return
@@ -323,12 +323,12 @@ def generate_agenda() -> None:
     def _fmt(dt: datetime) -> str:
         return dt.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
 
-    # ── Build command list ─────────────────────────────────────
+    # -- Build command list -------------------------------------
     output_lines = []
     output_lines.append("# CTS-SAT-1 Command Agenda")
     output_lines.append(f"# Generated: {datetime.now(tz=UTC).isoformat()}")
     output_lines.append(
-        f"# Uplink window: {_fmt(uplink_start_dt)} → {_fmt(uplink_end_dt)}"
+        f"# Uplink window: {_fmt(uplink_start_dt)} -> {_fmt(uplink_end_dt)}"
     )
     output_lines.append(f"# Valid observations: {len(valid_obs)}")
     output_lines.append("")
@@ -373,8 +373,8 @@ def generate_agenda() -> None:
         obs_end_dt = parse_iso(obs["end"])
 
         output_lines.append(
-            f"# ── Observation {obs['id']} | GS {obs.get('ground_station', '?')} "
-            f"| {_fmt(obs_start_dt)} → {_fmt(obs_end_dt)}"
+            f"# -- Observation {obs['id']} | GS {obs.get('ground_station', '?')} "
+            f"| {_fmt(obs_start_dt)} -> {_fmt(obs_end_dt)}"
         )
 
         tsexec_dt = obs_start_dt
@@ -414,12 +414,12 @@ def generate_agenda() -> None:
 
     state["generated_commands"] = output_lines
     dpg.set_value("preview_text", "\n".join(output_lines))
-    set_status(f"✓ Generated {cmd_count} commands.", (100, 255, 150, 255))
+    set_status(f"[ok] Generated {cmd_count} commands.", (100, 255, 150, 255))
 
 
-# ─────────────────────────────────────────────────────────────
+# -------------------------------------------------------------
 # GUI
-# ─────────────────────────────────────────────────────────────
+# -------------------------------------------------------------
 
 
 def build_gui() -> None:
@@ -461,13 +461,13 @@ def build_gui() -> None:
         no_close=True,
     ):
         with dpg.tab_bar():
-            # ══════════════════════════════════════════════════
+            # ==================================================
             # TAB 1 - SETTINGS
-            # ══════════════════════════════════════════════════
-            with dpg.tab(label="⚙  Settings"):
+            # ==================================================
+            with dpg.tab(label="  Settings"):
                 dpg.add_spacer(height=8)
 
-                # ── Uplink window ──────────────────────────────
+                # -- Uplink window ------------------------------
                 with dpg.collapsing_header(
                     label="Uplink Pass Window", default_open=True
                 ):
@@ -509,7 +509,7 @@ def build_gui() -> None:
 
                 dpg.add_spacer(height=10)
 
-                # ── SatNOGS fetch ──────────────────────────────
+                # -- SatNOGS fetch ------------------------------
                 with dpg.collapsing_header(
                     label="SatNOGS Observations", default_open=True
                 ):
@@ -564,7 +564,7 @@ def build_gui() -> None:
                         resizable=True,
                     ):
                         dpg.add_table_column(
-                            label="✓", width_fixed=True, init_width_or_weight=30
+                            label="[ok]", width_fixed=True, init_width_or_weight=30
                         )
                         dpg.add_table_column(
                             label="Obs ID", width_fixed=True, init_width_or_weight=80
@@ -590,7 +590,7 @@ def build_gui() -> None:
 
                 dpg.add_spacer(height=10)
 
-                # ── Timing settings ────────────────────────────
+                # -- Timing settings ----------------------------
                 with dpg.collapsing_header(label="Timing & Output", default_open=True):
                     dpg.add_spacer(height=4)
                     with dpg.group(horizontal=True):
@@ -623,10 +623,10 @@ def build_gui() -> None:
                         color=(160, 170, 190, 255),
                     )
 
-            # ══════════════════════════════════════════════════
+            # ==================================================
             # TAB 2 - COMMANDS
-            # ══════════════════════════════════════════════════
-            with dpg.tab(label="📋  Commands"):
+            # ==================================================
+            with dpg.tab(label="  Commands"):
                 dpg.add_spacer(height=8)
 
                 with dpg.collapsing_header(
@@ -676,10 +676,10 @@ Each priority command keeps its first tssent so the satellite de-duplicates.""".
                         ),
                     )
 
-            # ══════════════════════════════════════════════════
+            # ==================================================
             # TAB 3 - GENERATE / PREVIEW
-            # ══════════════════════════════════════════════════
-            with dpg.tab(label="🚀  Generate"):
+            # ==================================================
+            with dpg.tab(label="  Generate"):
                 dpg.add_spacer(height=8)
 
                 with dpg.group(horizontal=True):
