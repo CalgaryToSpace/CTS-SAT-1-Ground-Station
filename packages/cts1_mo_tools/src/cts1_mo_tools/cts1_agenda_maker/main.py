@@ -272,6 +272,8 @@ def generate_agenda() -> None:
     uplink_dur_min = get_float("uplink_dur", 10.0)
     cmd_interval_sec = get_float("cmd_interval", 5.0)
     priority_interval = get_int("priority_interval", 50)
+    sat_id = get_str("sat_id_input")
+    next_hours = get_int("next_hours_input", 6)
 
     # Parse uplink window
     try:
@@ -338,10 +340,23 @@ def generate_agenda() -> None:
     output_lines: list[str] = []
     output_lines.append("# CTS-SAT-1 Command Agenda")
     output_lines.append(f"# Generated: {datetime.now(tz=UTC).isoformat()}")
+    output_lines.append(f"# Satellite NORAD ID: {sat_id}")
     output_lines.append(
         f"# Uplink window: {_fmt(uplink_start_dt)} -> {_fmt(uplink_end_dt)}"
+        f" ({uplink_dur_min:.1f} min)"
+    )
+    output_lines.append(
+        f"# Observation fetch window end: {next_hours} hrs after uplink"
     )
     output_lines.append(f"# Valid observations: {len(valid_obs)}")
+    output_lines.append(f"# Command execution interval: {cmd_interval_sec:.1f} s")
+    output_lines.append(
+        f"# Priority command injection interval: every {priority_interval} loop commands"  # noqa: E501
+    )
+    output_lines.append(f"# Loop commands ({len(loop_cmds)}):")
+    output_lines.extend([f"#   {loop_command}" for loop_command in loop_cmds])
+    output_lines.append(f"# Priority commands ({len(priority_cmds)}):")
+    output_lines.extend([f"#   {priority_cmd}" for priority_cmd in priority_cmds])
     output_lines.append("")
 
     def _parse_priority_cmd(raw: str) -> tuple[str, int]:
@@ -457,7 +472,11 @@ def generate_agenda() -> None:
 
     state["generated_commands"] = output_lines
     dpg.set_value("preview_text", "\n".join(output_lines))
-    set_status(f"[ok] Generated {cmd_count} commands.", (100, 255, 150, 255))
+    total_cmd_count = sum(
+        1 for line in output_lines if line.strip() and not line.startswith("#")
+    )
+    output_lines.append(f"\n# Total commands: {total_cmd_count}\n")
+    set_status(f"[ok] Generated {total_cmd_count} commands.", (100, 255, 150, 255))
 
 
 # -------------------------------------------------------------
