@@ -14,9 +14,11 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Literal, assert_never
 
 import dearpygui.dearpygui as dpg
+import pycountry
+import reverse_geocoder
 from dotenv import load_dotenv
 
 from .satnogs_data import iter_future_observation_pages
@@ -327,6 +329,33 @@ class AgendaParams:
     observations: list[dict[str, Any]] = field(default_factory=list)
 
 
+def _lat_lon_to_country(latitude: float, longitude: float) -> str | None:
+    gs_geocode = reverse_geocoder.search((latitude, longitude))
+    gs_country_obj = pycountry.countries.get(alpha_2=gs_geocode[0].get("cc"))
+    return gs_country_obj.name if gs_country_obj else None
+
+
+def _format_satnogs_observation_info(satnogs_observation: dict[str, Any]) -> str:
+    obs_id = satnogs_observation.get("id", "?")
+    gs = satnogs_observation.get("ground_station", "?")
+    gs_lat_lon = (
+        str(satnogs_observation.get("station_lat", "?"))
+        + ", "
+        + str(satnogs_observation.get("station_lng", "?"))
+    )
+    gs_country_name = _lat_lon_to_country(
+        satnogs_observation["station_lat"], satnogs_observation["station_lng"]
+    )
+
+    return " | ".join(
+        [
+            f"Observation {obs_id}",
+            f"GS {gs} @ {gs_lat_lon} (in {gs_country_name})",
+            f"Observer: {satnogs_observation.get('observer', '?')}",
+        ]
+    )
+
+
 def build_agenda(params: AgendaParams) -> list[str]:  # noqa: C901, PLR0912, PLR0915
     """Pure agenda generation. Raises ValueError for invalid inputs."""
     if not params.loop_cmds:
@@ -348,7 +377,7 @@ def build_agenda(params: AgendaParams) -> list[str]:  # noqa: C901, PLR0912, PLR
     # -- Build AOS/LOS event list -------------------------------
     # Each entry: (datetime, event_type, obs)
     # event_type is "AOS" or "LOS"
-    events: list[tuple[datetime, str, dict]] = []
+    events: list[tuple[datetime, Literal["AOS", "LOS"], dict]] = []
     for obs in valid_obs:
         events.append((parse_iso(obs["start"]), "AOS", obs))
         events.append((parse_iso(obs["end"]), "LOS", obs))
@@ -415,21 +444,22 @@ def build_agenda(params: AgendaParams) -> list[str]:  # noqa: C901, PLR0912, PLR
     while tsexec_dt < last_los:
         # Inject any AOS/LOS events that fall before (or at) the current tsexec.
         while event_idx < len(events) and events[event_idx][0] <= tsexec_dt:
-            ev_dt, ev_type, ev_obs = events[event_idx]
-            obs_id = ev_obs.get("id", "?")
-            gs = ev_obs.get("ground_station", "?")
+            ev_dt, ev_type, satnogs_observation = events[event_idx]
+            obs_id = satnogs_observation.get("id", "?")
+
             if ev_type == "AOS":
                 active_passes.add(obs_id)
-
-            else:
+            elif ev_type == "LOS":
                 active_passes.discard(obs_id)
+            else:
+                assert_never(ev_type)
 
             output_lines.append(
                 " | ".join(
                     [
-                        f"# {ev_type} Observation {obs_id}",
-                        f"GS {gs}",
+                        f"# {ev_type}",
                         _fmt(ev_dt),
+                        _format_satnogs_observation_info(satnogs_observation),
                         f"{len(active_passes)} station(s) in sight",
                     ]
                 )
@@ -471,15 +501,26 @@ def build_agenda(params: AgendaParams) -> list[str]:  # noqa: C901, PLR0912, PLR
 
     # Flush any remaining LOS events after the last command tick.
     while event_idx < len(events):
-        ev_dt, ev_type, ev_obs = events[event_idx]
-        obs_id = ev_obs.get("id", "?")
-        gs = ev_obs.get("ground_station", "?")
+        ev_dt, ev_type, satnogs_observation = events[event_idx]
+        obs_id = satnogs_observation.get("id", "?")
+
         if ev_type == "AOS":
             active_passes.add(obs_id)
-            output_lines.append(f"# AOS Observation {obs_id} | GS {gs} | {_fmt(ev_dt)}")
-        else:
+        elif ev_type == "LOS":
             active_passes.discard(obs_id)
-            output_lines.append(f"# LOS Observation {obs_id} | GS {gs} | {_fmt(ev_dt)}")
+        else:
+            assert_never(ev_type)
+
+        output_lines.append(
+            " | ".join(
+                [
+                    f"# {ev_type}",
+                    _fmt(ev_dt),
+                    _format_satnogs_observation_info(satnogs_observation),
+                    f"{len(active_passes)} station(s) in sight",
+                ]
+            )
+        )
         event_idx += 1
 
     # Validate bad error case:
