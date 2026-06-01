@@ -12,6 +12,8 @@ dependencies = [
     "cts1_mo_tools",
     "loguru>=0.7.3",
     "numpy",
+    "reverse-geocoder>=1.5.1",
+    "pycountry>=26.2.16",
 ]
 
 [dependency-groups]
