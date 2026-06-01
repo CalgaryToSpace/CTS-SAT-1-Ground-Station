@@ -28,6 +28,7 @@ _fetch_stop = threading.Event()
 # -------------------------------------------------------------
 COMMAND_PREFIX = "CTS1+"
 COMMAND_SUFFIX = "!"
+VERY_EVIL_COMMAND_SUBSTRING = ")!@"  # Causes suffix tags to be ignored.
 
 # -------------------------------------------------------------
 # STATE
@@ -67,14 +68,19 @@ def format_command(name_args: str, tssent_ms: int, tsexec_ms: int) -> str:
     tssent_ms: unix ms when command is sent
     tsexec_ms: unix ms for scheduled execution (0 = immediate)
     """
-    name_args = name_args.strip()
+    name_args = (
+        name_args.strip().removeprefix(COMMAND_PREFIX).removesuffix(COMMAND_SUFFIX)
+    )
 
-    out = f"{name_args}@tssent={tssent_ms}@tsexec={tsexec_ms}"
-
-    if not out.startswith(COMMAND_PREFIX):
-        out = f"{COMMAND_PREFIX}{out}"
-    if not out.endswith(COMMAND_SUFFIX):
-        out = f"{out}{COMMAND_SUFFIX}"
+    out = "".join(
+        [
+            COMMAND_PREFIX,
+            name_args,
+            f"@tssent={tssent_ms}",
+            f"@tsexec={tsexec_ms}",
+            COMMAND_SUFFIX,
+        ]
+    )
 
     tssent_utc = datetime.fromtimestamp(tssent_ms / 1000, tz=UTC).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
@@ -475,6 +481,13 @@ def build_agenda(params: AgendaParams) -> list[str]:  # noqa: C901, PLR0912, PLR
             active_passes.discard(obs_id)
             output_lines.append(f"# LOS Observation {obs_id} | GS {gs} | {_fmt(ev_dt)}")
         event_idx += 1
+
+    # Validate bad error case:
+    for line in output_lines:
+        if VERY_EVIL_COMMAND_SUBSTRING in line:
+            raise ValueError(
+                "Internal error: Command line contains bad error case: " + line
+            )
 
     return output_lines
 
