@@ -172,6 +172,12 @@ def _append_obs_rows(
         start_local = dt_to_local_str(start_dt) if start_dt else "?"
         end_local = dt_to_local_str(end_dt) if end_dt else "?"
 
+        country_str = "?"
+        with contextlib.suppress(Exception):
+            lat = obs["station_lat"]
+            lng = obs["station_lng"]
+            country_str = _lat_lon_to_country(lat, lng) or "?"
+
         wait_str = "N/A"
         if uplink_end_dt is not None and start_dt is not None:
             delta = start_dt - uplink_end_dt
@@ -194,6 +200,7 @@ def _append_obs_rows(
 
             dpg.add_text(str(obs_id))
             dpg.add_text(str(gs))
+            dpg.add_text(country_str)
             dpg.add_text(start_utc)
             dpg.add_text(end_utc)
             dpg.add_text(start_local)
@@ -737,11 +744,12 @@ def build_gui() -> None:  # noqa: PLR0915
                         label="Use", width_fixed=True, init_width_or_weight=30
                     )
                     dpg.add_table_column(
-                        label="Obs ID", width_fixed=True, init_width_or_weight=80
+                        label="Obs ID", width_fixed=True, init_width_or_weight=50
                     )
                     dpg.add_table_column(
-                        label="GS ID", width_fixed=True, init_width_or_weight=80
+                        label="GS ID", width_fixed=True, init_width_or_weight=50
                     )
+                    dpg.add_table_column(label="Country")
                     dpg.add_table_column(label="Start (UTC)")
                     dpg.add_table_column(label="End (UTC)")
                     dpg.add_table_column(label="Start (Local)")
