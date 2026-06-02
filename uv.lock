@@ -253,6 +253,7 @@ source = { editable = "packages/cts1_mo_tools" }
 dependencies = [
     { name = "dearpygui" },
     { name = "dotenv" },
+    { name = "loguru" },
     { name = "ordered-set" },
     { name = "polars" },
     { name = "requests" },
@@ -269,6 +270,7 @@ dev = [
 requires-dist = [
     { name = "dearpygui" },
     { name = "dotenv" },
+    { name = "loguru" },
     { name = "ordered-set" },
     { name = "polars" },
     { name = "requests" },
