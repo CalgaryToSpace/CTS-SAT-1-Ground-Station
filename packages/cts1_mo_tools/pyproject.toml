@@ -12,7 +12,7 @@ dependencies = [
     "loguru",
     "dearpygui",
     "requests",
-    "dotenv",
+    "python-dotenv",
 ]
 
 [project.scripts]
