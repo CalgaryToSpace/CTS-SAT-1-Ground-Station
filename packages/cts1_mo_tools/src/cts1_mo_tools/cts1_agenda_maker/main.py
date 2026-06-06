@@ -234,7 +234,7 @@ def fetch_observations() -> None:  # noqa: C901
     uplink_start_dt: datetime = parse_iso(get_str("uplink_start"))
     uplink_end_dt = uplink_start_dt + timedelta(minutes=get_float("uplink_dur"))
 
-    next_hours = get_int("next_hours_input", 6)
+    next_hours = get_float("next_hours_input", 6.0)
     start_lt_filter = uplink_start_dt + timedelta(hours=next_hours)
 
     def _thread() -> None:
@@ -330,7 +330,7 @@ class AgendaParams:
     cmd_interval_sec: float
     priority_interval: int
     sat_id: str
-    next_hours: int
+    next_hours: float
     loop_cmds: list[str]
     priority_cmds: list[str] = field(default_factory=list)
     observations: list[dict[str, Any]] = field(default_factory=list)
@@ -571,7 +571,7 @@ def generate_agenda() -> None:
         cmd_interval_sec=get_float("cmd_interval", 2.0),
         priority_interval=get_int("priority_interval", 50),
         sat_id=get_str("sat_id_input"),
-        next_hours=get_int("next_hours_input", 6),
+        next_hours=get_float("next_hours_input", 6.0),
         loop_cmds=loop_cmds,
         priority_cmds=priority_cmds,
         observations=selected_obs,
@@ -695,12 +695,13 @@ def build_gui() -> None:  # noqa: PLR0915
                         hint="e.g. 69015",
                     )
                     dpg.add_text("Fetch next")
-                    dpg.add_input_int(
+                    dpg.add_input_float(
                         tag="next_hours_input",
-                        default_value=3,
-                        min_value=1,
-                        max_value=720,
-                        width=70,
+                        default_value=3.0,
+                        min_value=0.1,
+                        max_value=720.0,
+                        width=80,
+                        format="%.1f",
                     )
                     dpg.add_text("hrs after uplink")
                     dpg.add_button(
