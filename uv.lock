@@ -188,8 +188,6 @@ dependencies = [
     { name = "cts1-mo-tools" },
     { name = "loguru" },
     { name = "numpy" },
-    { name = "pycountry" },
-    { name = "reverse-geocoder" },
 ]
 
 [package.dev-dependencies]
@@ -208,8 +206,6 @@ requires-dist = [
     { name = "cts1-mo-tools", editable = "packages/cts1_mo_tools" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "numpy" },
-    { name = "pycountry", specifier = ">=26.2.16" },
-    { name = "reverse-geocoder", specifier = ">=1.5.1" },
 ]
 
 [package.metadata.requires-dev]
@@ -255,8 +251,10 @@ dependencies = [
     { name = "loguru" },
     { name = "ordered-set" },
     { name = "polars" },
+    { name = "pycountry" },
     { name = "python-dotenv" },
     { name = "requests" },
+    { name = "reverse-geocoder" },
     { name = "tyro" },
 ]
 
@@ -272,8 +270,10 @@ requires-dist = [
     { name = "loguru" },
     { name = "ordered-set" },
     { name = "polars" },
+    { name = "pycountry", specifier = ">=26.2.16" },
     { name = "python-dotenv" },
     { name = "requests" },
+    { name = "reverse-geocoder", specifier = ">=1.5.1" },
     { name = "tyro" },
 ]
 
