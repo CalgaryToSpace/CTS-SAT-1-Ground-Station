@@ -3,18 +3,36 @@
 import base64
 import hashlib
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import tyro
 from loguru import logger
 
 
-def send_file_to_tcmd_file(
+def _parse_datetime_argument(dt_arg: int | str) -> datetime:
+    if isinstance(dt_arg, int):
+        return datetime.fromtimestamp(dt_arg, tz=UTC)
+
+    # Else, it's a string.
+    val = datetime.fromisoformat(dt_arg)
+    if val.tzinfo is None:
+        msg = f"Please specify a timezone offset in the timestamp string: {dt_arg}"
+        raise ValueError(msg)
+
+    return val
+
+
+def send_file_to_tcmd_file(  # noqa: PLR0913
     input_file: Path,
     *,
     satellite_file: str,
     telecommand_output_file: Path,
     chunk_size: int = 168,
+    tssent_start_val: int | str | None = None,
+    tssent_interval_ms: int = 1000,
+    tsexec_start_val: int | str | None = None,
+    tsexec_interval_ms: int = 30_000,
 ) -> None:
     """Send a file by writing CTS1 telecommands to an output file.
 
@@ -24,6 +42,14 @@ def send_file_to_tcmd_file(
         telecommand_output_file: Path to write the telecommand sequence to.
         chunk_size: Chunk size in bytes before base64 encoding. Best if
             divisible by 3 (and by a power of 2). Defaults to 168.
+        tssent_start_val: Timestamp to use for the first tssent telecommand.
+            If not provided, no tssent suffix tags will be added.
+            E.g., "2027-01-01T00:00:00-06:00"
+        tssent_interval_ms: Interval in milliseconds between tssent telecommands.
+        tsexec_start_val: Timestamp to use for the first tsexec telecommand.
+            If not provided, no tsexec suffix tags will be added.
+            E.g., "2027-01-01T00:00:00-06:00"
+        tsexec_interval_ms: Interval in milliseconds between tsexec telecommands.
     """
     if not input_file.exists():
         logger.error(f"File not found: {input_file}")
@@ -31,9 +57,38 @@ def send_file_to_tcmd_file(
 
     lines: list[str] = []
 
+    current_tssent: datetime | None = (
+        _parse_datetime_argument(tssent_start_val)
+        if tssent_start_val is not None
+        else None
+    )
+    current_tsexec: datetime | None = (
+        _parse_datetime_argument(tsexec_start_val) if tsexec_start_val else None
+    )
+
     def emit(command: str) -> None:
-        lines.append(command)
-        logger.debug(f"Emitting: {command}")
+        nonlocal current_tssent, current_tsexec
+
+        command_out = command.rstrip("!")
+
+        if current_tssent is not None:
+            tssent_int = int(current_tssent.timestamp() * 1000)
+            command_out += f"@tssent={tssent_int}"
+
+        if current_tsexec is not None:
+            tsexec_int = int(current_tsexec.timestamp() * 1000)
+            command_out += f"@tsexec={tsexec_int}"
+
+        command_out += "!"
+
+        lines.append(command_out)
+        logger.debug(f"Emitting: {command_out}")
+
+        if current_tssent is not None:
+            current_tssent += timedelta(milliseconds=tssent_interval_ms)
+
+        if current_tsexec is not None:
+            current_tsexec += timedelta(milliseconds=tsexec_interval_ms)
 
     emit("CTS1+comms_bulk_uplink_close_file()")  # Safety measure.
     emit("CTS1+config_set_int_var(TCMD_require_unique_tssent,1)")
