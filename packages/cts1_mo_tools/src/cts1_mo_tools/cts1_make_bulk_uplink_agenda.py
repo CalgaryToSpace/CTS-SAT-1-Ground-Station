@@ -66,7 +66,7 @@ def send_file_to_tcmd_file(  # noqa: PLR0913
         _parse_datetime_argument(tsexec_start_val) if tsexec_start_val else None
     )
 
-    def emit(command: str) -> None:
+    def emit(command: str, *, immediate: bool = False) -> None:
         nonlocal current_tssent, current_tsexec
 
         command_out = command.rstrip("!")
@@ -75,7 +75,7 @@ def send_file_to_tcmd_file(  # noqa: PLR0913
             tssent_int = int(current_tssent.timestamp() * 1000)
             command_out += f"@tssent={tssent_int}"
 
-        if current_tsexec is not None:
+        if current_tsexec is not None and (immediate is False):
             tsexec_int = int(current_tsexec.timestamp() * 1000)
             command_out += f"@tsexec={tsexec_int}"
 
@@ -87,11 +87,11 @@ def send_file_to_tcmd_file(  # noqa: PLR0913
         if current_tssent is not None:
             current_tssent += timedelta(milliseconds=tssent_interval_ms)
 
-        if current_tsexec is not None:
+        if current_tsexec is not None and (immediate is False):
             current_tsexec += timedelta(milliseconds=tsexec_interval_ms)
 
     emit("CTS1+comms_bulk_uplink_close_file()")  # Safety measure.
-    emit("CTS1+config_set_int_var(TCMD_require_unique_tssent,1)")
+    emit("CTS1+config_set_int_var(TCMD_require_unique_tssent,1)", immediate=True)
     emit(f"CTS1+comms_bulk_uplink_open_file({satellite_file},truncate)")
 
     file_bytes = input_file.read_bytes()
