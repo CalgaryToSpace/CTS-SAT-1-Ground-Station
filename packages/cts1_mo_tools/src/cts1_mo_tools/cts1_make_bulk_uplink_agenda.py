@@ -28,7 +28,7 @@ def send_file_to_tcmd_file(  # noqa: PLR0913
     *,
     satellite_file: str,
     telecommand_output_file: Path,
-    chunk_size: int = 168,
+    chunk_size: int = 96,
     tssent_start_val: int | str | None = None,
     tssent_interval_ms: int = 1000,
     tsexec_start_val: int | str | None = None,
@@ -41,7 +41,7 @@ def send_file_to_tcmd_file(  # noqa: PLR0913
         satellite_file: Destination filename/path on the satellite filesystem.
         telecommand_output_file: Path to write the telecommand sequence to.
         chunk_size: Chunk size in bytes before base64 encoding. Best if
-            divisible by 3 (and by a power of 2). Defaults to 168.
+            divisible by 3 (and by a power of 2).
         tssent_start_val: Timestamp to use for the first tssent telecommand.
             If not provided, no tssent suffix tags will be added.
             E.g., "2027-01-01T00:00:00-06:00"
