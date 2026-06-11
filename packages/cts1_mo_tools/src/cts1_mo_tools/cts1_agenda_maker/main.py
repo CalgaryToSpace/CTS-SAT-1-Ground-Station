@@ -9,6 +9,7 @@ telecommands, and produces a time-stamped command agenda file.
 # dearpygui has typing issues.
 
 import contextlib
+import functools
 import re
 import threading
 from collections.abc import Callable
@@ -336,6 +337,7 @@ class AgendaParams:
     observations: list[dict[str, Any]] = field(default_factory=list)
 
 
+@functools.lru_cache(maxsize=2500)  # Important for GUI performance.
 def _lat_lon_to_country(latitude: float, longitude: float) -> str | None:
     gs_geocode = reverse_geocoder.search((latitude, longitude))
     gs_country_obj = pycountry.countries.get(alpha_2=gs_geocode[0].get("cc"))
