@@ -146,10 +146,17 @@ def format_timedelta(delta: timedelta) -> str:
 # -------------------------------------------------------------
 
 
+def _obs_row_tag(obs_id: Any) -> str:
+    return f"obs_row_{obs_id}"
+
+
 def _append_obs_rows(
-    obs_list: list[dict[str, Any]], uplink_end_dt: datetime | None
+    obs_list: list[dict[str, Any]],
+    all_obs_sorted: list[dict[str, Any]],
+    uplink_end_dt: datetime | None,
 ) -> None:
-    for obs in obs_list:
+    # Process new rows in sorted order so earlier-inserted rows don't shift later ones.
+    for obs in sorted(obs_list, key=lambda o: parse_iso(o["start"])):
         obs_id = obs.get("id", "?")
         gs = obs.get("ground_station", "?")
 
@@ -184,7 +191,26 @@ def _append_obs_rows(
             delta = start_dt - uplink_end_dt
             wait_str = format_timedelta(delta)
 
-        with dpg.table_row(parent="obs_table"):  # pyright: ignore[reportGeneralTypeIssues]
+        # Find the first already-rendered row that should come after this one.
+        obs_pos = next(
+            (i for i, o in enumerate(all_obs_sorted) if o.get("id") == obs_id), None
+        )
+        before_tag: str | None = None
+        if obs_pos is not None:
+            for subsequent in all_obs_sorted[obs_pos + 1 :]:
+                tag = _obs_row_tag(subsequent.get("id"))
+                if dpg.does_item_exist(tag):
+                    before_tag = tag
+                    break
+
+        row_kwargs: dict[str, Any] = {
+            "parent": "obs_table",
+            "tag": _obs_row_tag(obs_id),
+        }
+        if before_tag:
+            row_kwargs["before"] = before_tag
+
+        with dpg.table_row(**row_kwargs):  # pyright: ignore[reportGeneralTypeIssues]
 
             def make_cb(oid: int) -> Callable[[Any, bool], None]:
                 def cb(_: Any, v: bool) -> None:  # noqa: FBT001
@@ -211,7 +237,7 @@ def _append_obs_rows(
     _update_obs_count()
 
 
-def fetch_observations() -> None:  # noqa: C901
+def fetch_observations() -> None:
     sat_id = get_str("sat_id_input")
     if not sat_id:
         set_status("[!] Enter a SatNOGS satellite ID first.", (255, 200, 0, 255))
@@ -250,11 +276,7 @@ def fetch_observations() -> None:  # noqa: C901
             ):
                 all_obs.extend(page)
                 all_obs.sort(key=lambda o: parse_iso(o["start"]))
-                if dpg.does_item_exist("obs_table"):
-                    for row in dpg.get_item_children("obs_table", slot=1) or []:
-                        dpg.delete_item(row)
-                state["selected_obs_ids"] = set()
-                _append_obs_rows(all_obs, uplink_end_dt)
+                _append_obs_rows(page, all_obs, uplink_end_dt)
                 set_status(
                     f"Fetching... {len(all_obs)} so far",
                     (180, 200, 255, 255),
