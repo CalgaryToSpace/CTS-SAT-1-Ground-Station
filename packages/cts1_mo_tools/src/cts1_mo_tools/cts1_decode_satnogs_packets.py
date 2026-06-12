@@ -492,7 +492,7 @@ def decode_packet_safe(hex_str: str) -> dict[str, Any] | None:
 # -- Main ---------------------------------------------------------------------
 
 
-def run(input_csv: Path, output_csv: Path) -> None:
+def decode_to_csv(input_csv: Path, output_csv: Path) -> None:
     """Decode CTS-SAT-1 packets from a SatNOGS-style pipe-delimited CSV."""
     logger.info(f"Reading: {input_csv}")
 
@@ -553,17 +553,14 @@ def run(input_csv: Path, output_csv: Path) -> None:
     )
 
     # Hard-code the column order here.
-    force_start_col_names = OrderedSet(
-        [
-            "received_timestamp",
-            "observation_id",
-            "packet_type",
-            "general_message",
-        ]
-    )
-    end_cols = OrderedSet(
-        ["log_message", "tcmd_response_text", "bulk_data_hex", "hex_payload"]
-    )
+    force_start_col_names = [
+        "received_timestamp",
+        "observation_id",
+        "packet_type",
+        "general_message",
+    ]
+
+    end_cols = ["log_message", "tcmd_response_text", "bulk_data_hex", "hex_payload"]
     tcmd_col_names = [
         col for col in df.columns if col.startswith("tcmd_") and (col not in end_cols)
     ]
@@ -578,10 +575,10 @@ def run(input_csv: Path, output_csv: Path) -> None:
         *(
             # All the general columns (includes the beacons).
             OrderedSet(df.columns)
-            - force_start_col_names
+            - set(force_start_col_names)
             - set(tcmd_col_names)
             - set(bulk_col_names)
-            - end_cols
+            - set(end_cols)
         ),
         *end_cols,
     )
@@ -607,6 +604,21 @@ def run(input_csv: Path, output_csv: Path) -> None:
         .sort("count", descending=True)
     )
     logger.info(f"Packet type summary: {df_summary}")
+
+
+def run(input_csv: Path, output_csv: Path | None = None) -> None:
+    """Decode CTS-SAT-1 packets from a SatNOGS-style pipe-delimited CSV.
+
+    If ``output_csv`` is not given, the decoded packets will be written to a new
+    file with the same stem as ``input_csv`` but with "-decoded" appended.
+    """
+
+    if output_csv is not None:
+        output_csv_path = output_csv
+    else:
+        output_csv_path = input_csv.with_stem(input_csv.stem + "-decoded")
+
+    decode_to_csv(input_csv, output_csv=output_csv_path)
 
 
 def main() -> None:
