@@ -235,7 +235,7 @@ def decode_beacon_basic_packet(payload: bytes) -> dict[str, Any]:
         else None
     )
 
-    return {
+    data = {
         "packet_type": e(PACKET_TYPE_MAP, rf["packet_type"]),
         # Identity
         "satellite_name": sat_name,
@@ -306,6 +306,8 @@ def decode_beacon_basic_packet(payload: bytes) -> dict[str, Any]:
         "end_sentinel_ok": end_ok,
     }
 
+    return data  # noqa: RET504
+
 
 def decode_beacon_peripheral_packet(payload: bytes) -> dict[str, Any]:
     """Decode a COMMS_PACKET_TYPE_BEACON_PERIPHERAL payload.
@@ -336,22 +338,19 @@ def decode_log_message_packet(payload: bytes) -> dict[str, Any]:
         raise ValueError(msg)
 
     data_bytes = payload[1 : 1 + LOG_MESSAGE_MAX_DATA]
+
     # Treat as null-terminated string; preserve anything after the first null
     # as a hex dump for forensic purposes.
     null_pos = data_bytes.find(b"\x00")
     if null_pos >= 0:
         message = data_bytes[:null_pos].decode("utf-8", errors="replace")
-        trailing = data_bytes[null_pos + 1 :]
-        trailing_nonzero = trailing.rstrip(b"\x00")
-        trailing_hex = trailing_nonzero.hex() if trailing_nonzero else None
     else:
         message = data_bytes.decode("utf-8", errors="replace")
-        trailing_hex = None
 
     return {
         "packet_type": "LOG_MESSAGE",
         "log_message": message,
-        "log_trailing_data_hex": trailing_hex,
+        # Not actually useful - "log_trailing_data_hex": trailing_hex,
     }
 
 
@@ -538,10 +537,53 @@ def run(input_csv: Path, output_csv: Path) -> None:
     )
     del df_decoded
 
-    # Move the "hex_payload" column to the end.
+    # Add a general "as decoded message" column for logs, telecommand responses, and
+    # bulk file transfers.
+    df = df.with_columns(
+        general_message=pl.coalesce(
+            pl.col("log_message"),
+            pl.col("tcmd_response_text"),
+            pl.col("bulk_data_hex").map_elements(
+                lambda hex_str: bytes.fromhex(hex_str).decode(
+                    "utf-8", errors="replace"
+                ),
+                return_dtype=pl.String,
+            ),
+        )
+    )
+
+    # Hard-code the column order here.
+    force_start_col_names = OrderedSet(
+        [
+            "received_timestamp",
+            "observation_id",
+            "packet_type",
+            "general_message",
+        ]
+    )
+    end_cols = OrderedSet(
+        ["log_message", "tcmd_response_text", "bulk_data_hex", "hex_payload"]
+    )
+    tcmd_col_names = [
+        col for col in df.columns if col.startswith("tcmd_") and (col not in end_cols)
+    ]
+    bulk_col_names = [
+        col for col in df.columns if col.startswith("bulk_") and (col not in end_cols)
+    ]
+
     df = df.select(
-        *(OrderedSet(df.columns) - {"hex_payload"}),
-        "hex_payload",
+        *force_start_col_names,
+        *tcmd_col_names,
+        *bulk_col_names,
+        *(
+            # All the general columns (includes the beacons).
+            OrderedSet(df.columns)
+            - force_start_col_names
+            - set(tcmd_col_names)
+            - set(bulk_col_names)
+            - end_cols
+        ),
+        *end_cols,
     )
 
     if output_csv:
