@@ -591,10 +591,12 @@ def run(input_csv: Path, output_csv: Path) -> None:
         logger.info(f"  CSV  → {output_csv}")
 
     # Pretty-print the most recent BEACON_BASIC packet.
-    df_beacons = df.filter(pl.col("packet_type") == pl.lit("BEACON_BASIC"))
+    df_beacons = df.filter(pl.col("packet_type") == pl.lit("BEACON_BASIC")).drop(
+        col for col in df.columns if col.startswith(("tcmd_", "bulk_", "log_"))
+    )
     if len(df_beacons) > 0:
         print("\n\n-- Last BEACON_BASIC packet -------------------------------------")  # noqa: T201
-        for k, v in df_beacons.tail(1).to_dicts()[0].items():
+        for k, v in df_beacons.sort("received_timestamp").tail(1).to_dicts()[0].items():
             print(f"  {k:<44} {v}")  # noqa: T201
 
     # Summary counts by packet type.
