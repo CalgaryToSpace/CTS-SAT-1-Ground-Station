@@ -329,24 +329,9 @@ class TestDecodeBeaconPeripheral:
 
 class TestDecodeLogMessage:
     def test_basic_message(self) -> None:
-        result = decode_log_message_packet(b"\x03Hello, satellite!\x00")
+        result = decode_log_message_packet(b"\x03Hello, satellite!\n")
         assert result["packet_type"] == "LOG_MESSAGE"
         assert result["log_message"] == "Hello, satellite!"
-
-    def test_no_trailing_data(self) -> None:
-        result = decode_log_message_packet(b"\x03Booted\x00")
-        assert result["log_trailing_data_hex"] is None
-
-    def test_trailing_nonzero_data_preserved(self) -> None:
-        payload = b"\x03msg\x00\xff\xfe"
-        result = decode_log_message_packet(payload)
-        assert result["log_trailing_data_hex"] == "fffe"
-
-    def test_trailing_all_zeros_not_preserved(self) -> None:
-        # Padding zeros should be stripped.
-        payload = b"\x03msg\x00\x00\x00\x00"
-        result = decode_log_message_packet(payload)
-        assert result["log_trailing_data_hex"] is None
 
     def test_no_null_terminator(self) -> None:
         # Should still decode without crashing.
@@ -355,7 +340,7 @@ class TestDecodeLogMessage:
         assert result["log_message"] == "A" * 10
 
     def test_empty_message(self) -> None:
-        result = decode_log_message_packet(b"\x03\x00")
+        result = decode_log_message_packet(b"\x03\n")
         assert result["log_message"] == ""
 
     def test_too_short_raises(self) -> None:
@@ -364,7 +349,7 @@ class TestDecodeLogMessage:
 
     def test_wrong_packet_type_raises(self) -> None:
         with pytest.raises(ValueError, match="Unexpected packet_type"):
-            decode_log_message_packet(b"\x01Hello\x00")
+            decode_log_message_packet(b"\x01Hello\n")
 
     def test_utf8_replacement_on_bad_bytes(self) -> None:
         payload = b"\x03\xff\xfe\x00"
@@ -499,14 +484,14 @@ class TestDecodePacketSafe:
         assert result["packet_type"] == "BEACON_PERIPHERAL"
 
     def test_log_message_dispatch(self) -> None:
-        hex_str = self._wrap(_make_log_payload(message=b"test log"))
+        hex_str = self._wrap(_make_log_payload(message=b"test log\n"))
         result = decode_packet_safe(hex_str)
         assert result is not None
         assert result["packet_type"] == "LOG_MESSAGE"
         assert result["log_message"] == "test log"
 
     def test_tcmd_response_dispatch(self) -> None:
-        hex_str = self._wrap(_make_tcmd_payload(data=b"ok\x00"))
+        hex_str = self._wrap(_make_tcmd_payload(data=b"ok\n"))
         result = decode_packet_safe(hex_str)
         assert result is not None
         assert result["packet_type"] == "TCMD_RESPONSE"
