@@ -8,6 +8,7 @@ dependencies = [
     "tyro",
     "polars",
     "ordered-set",
+    "loguru",
 ]
 
 [project.scripts]
