@@ -341,9 +341,11 @@ def decode_log_message_packet(payload: bytes) -> dict[str, Any]:
 
     # Treat as null-terminated string; preserve anything after the first null
     # as a hex dump for forensic purposes.
-    null_pos = data_bytes.find(b"\x00")
-    if null_pos >= 0:
-        message = data_bytes[:null_pos].decode("utf-8", errors="replace")
+    last_newline_pos = data_bytes.rfind(b"\n")
+
+    # Slice off the trailing bytes, if present.
+    if last_newline_pos >= 0:
+        message = data_bytes[:last_newline_pos].decode("utf-8", errors="replace")
     else:
         message = data_bytes.decode("utf-8", errors="replace")
 
