@@ -235,7 +235,7 @@ def decode_beacon_basic_packet(payload: bytes) -> dict[str, Any]:
         else None
     )
 
-    return {
+    data = {
         "packet_type": e(PACKET_TYPE_MAP, rf["packet_type"]),
         # Identity
         "satellite_name": sat_name,
@@ -306,6 +306,8 @@ def decode_beacon_basic_packet(payload: bytes) -> dict[str, Any]:
         "end_sentinel_ok": end_ok,
     }
 
+    return data  # noqa: RET504
+
 
 def decode_beacon_peripheral_packet(payload: bytes) -> dict[str, Any]:
     """Decode a COMMS_PACKET_TYPE_BEACON_PERIPHERAL payload.
@@ -336,22 +338,21 @@ def decode_log_message_packet(payload: bytes) -> dict[str, Any]:
         raise ValueError(msg)
 
     data_bytes = payload[1 : 1 + LOG_MESSAGE_MAX_DATA]
+
     # Treat as null-terminated string; preserve anything after the first null
     # as a hex dump for forensic purposes.
-    null_pos = data_bytes.find(b"\x00")
-    if null_pos >= 0:
-        message = data_bytes[:null_pos].decode("utf-8", errors="replace")
-        trailing = data_bytes[null_pos + 1 :]
-        trailing_nonzero = trailing.rstrip(b"\x00")
-        trailing_hex = trailing_nonzero.hex() if trailing_nonzero else None
+    last_newline_pos = data_bytes.rfind(b"\n")
+
+    # Slice off the trailing bytes, if present.
+    if last_newline_pos >= 0:
+        message = data_bytes[:last_newline_pos].decode("utf-8", errors="replace")
     else:
         message = data_bytes.decode("utf-8", errors="replace")
-        trailing_hex = None
 
     return {
         "packet_type": "LOG_MESSAGE",
         "log_message": message,
-        "log_trailing_data_hex": trailing_hex,
+        # Not actually useful - "log_trailing_data_hex": trailing_hex,
     }
 
 
@@ -493,7 +494,7 @@ def decode_packet_safe(hex_str: str) -> dict[str, Any] | None:
 # -- Main ---------------------------------------------------------------------
 
 
-def run(input_csv: Path, output_csv: Path) -> None:
+def decode_to_csv(input_csv: Path, output_csv: Path) -> None:
     """Decode CTS-SAT-1 packets from a SatNOGS-style pipe-delimited CSV."""
     logger.info(f"Reading: {input_csv}")
 
@@ -538,10 +539,50 @@ def run(input_csv: Path, output_csv: Path) -> None:
     )
     del df_decoded
 
-    # Move the "hex_payload" column to the end.
+    # Add a general "as decoded message" column for logs, telecommand responses, and
+    # bulk file transfers.
+    df = df.with_columns(
+        general_message=pl.coalesce(
+            pl.col("log_message"),
+            pl.col("tcmd_response_text"),
+            pl.col("bulk_data_hex").map_elements(
+                lambda hex_str: bytes.fromhex(hex_str).decode(
+                    "utf-8", errors="replace"
+                ),
+                return_dtype=pl.String,
+            ),
+        )
+    )
+
+    # Hard-code the column order here.
+    force_start_col_names = [
+        "received_timestamp",
+        "observation_id",
+        "packet_type",
+        "general_message",
+    ]
+
+    end_cols = ["log_message", "tcmd_response_text", "bulk_data_hex", "hex_payload"]
+    tcmd_col_names = [
+        col for col in df.columns if col.startswith("tcmd_") and (col not in end_cols)
+    ]
+    bulk_col_names = [
+        col for col in df.columns if col.startswith("bulk_") and (col not in end_cols)
+    ]
+
     df = df.select(
-        *(OrderedSet(df.columns) - {"hex_payload"}),
-        "hex_payload",
+        *force_start_col_names,
+        *tcmd_col_names,
+        *bulk_col_names,
+        *(
+            # All the general columns (includes the beacons).
+            OrderedSet(df.columns)
+            - set(force_start_col_names)
+            - set(tcmd_col_names)
+            - set(bulk_col_names)
+            - set(end_cols)
+        ),
+        *end_cols,
     )
 
     if output_csv:
@@ -549,10 +590,12 @@ def run(input_csv: Path, output_csv: Path) -> None:
         logger.info(f"  CSV  → {output_csv}")
 
     # Pretty-print the most recent BEACON_BASIC packet.
-    df_beacons = df.filter(pl.col("packet_type") == pl.lit("BEACON_BASIC"))
+    df_beacons = df.filter(pl.col("packet_type") == pl.lit("BEACON_BASIC")).drop(
+        col for col in df.columns if col.startswith(("tcmd_", "bulk_", "log_"))
+    )
     if len(df_beacons) > 0:
         print("\n\n-- Last BEACON_BASIC packet -------------------------------------")  # noqa: T201
-        for k, v in df_beacons.tail(1).to_dicts()[0].items():
+        for k, v in df_beacons.sort("received_timestamp").tail(1).to_dicts()[0].items():
             print(f"  {k:<44} {v}")  # noqa: T201
 
     # Summary counts by packet type.
@@ -563,6 +606,21 @@ def run(input_csv: Path, output_csv: Path) -> None:
         .sort("count", descending=True)
     )
     logger.info(f"Packet type summary: {df_summary}")
+
+
+def run(input_csv: Path, output_csv: Path | None = None) -> None:
+    """Decode CTS-SAT-1 packets from a SatNOGS-style pipe-delimited CSV.
+
+    If ``output_csv`` is not given, the decoded packets will be written to a new
+    file with the same stem as ``input_csv`` but with "-decoded" appended.
+    """
+
+    if output_csv is not None:
+        output_csv_path = output_csv
+    else:
+        output_csv_path = input_csv.with_stem(input_csv.stem + "-decoded")
+
+    decode_to_csv(input_csv, output_csv=output_csv_path)
 
 
 def main() -> None:

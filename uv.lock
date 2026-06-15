@@ -149,6 +149,7 @@ name = "cts1-mo-tools"
 version = "0.1.0"
 source = { editable = "packages/cts1_mo_tools" }
 dependencies = [
+    { name = "loguru" },
     { name = "ordered-set" },
     { name = "polars" },
     { name = "tyro" },
@@ -162,6 +163,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "loguru" },
     { name = "ordered-set" },
     { name = "polars" },
     { name = "tyro" },
