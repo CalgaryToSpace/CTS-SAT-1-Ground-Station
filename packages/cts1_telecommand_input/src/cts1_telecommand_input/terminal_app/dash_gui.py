@@ -1,21 +1,23 @@
 """The main screen GUI, which allows sending commands, and viewing the RX/TX log.
 
-Tabs:
-  1. Connect & Config  – serial port, display options
-  2. SatNOGS Passes   – fetch / review upcoming observation windows
+Tabs (left pane):
+  1. Telecommand Input – single-command sender; serial port + display options live here
+  2. SatNOGS Passes    – fetch / review upcoming observation windows
   3. Command Groups    – loop + priority commands with per-group timing controls
-  4. Telecommand Input – single-command sender (existing)
-  5. Generate          – build and preview the command agenda
-  6. Tools             – quick utility buttons
+  4. Generate Agenda   – build, preview, and save the command agenda
+
+Right pane: live RX/TX log; after agenda generation the clean timed commands are
+also streamed here so they can be copy-pasted directly.
 """
 
 import argparse
 import functools
 import json
+import re
 import tempfile
 import threading
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import dash
@@ -95,53 +97,6 @@ def get_telecommand_by_name(name: str) -> TelecommandDefinition:
 
 def _now_local_iso() -> str:
     return datetime.now().astimezone().replace(microsecond=0).isoformat()
-
-
-# ── Tab: Connect & Config ────────────────────────────────────────────────────
-
-
-def _tab_connect_config() -> dbc.Tab:
-    return dbc.Tab(
-        label="Connect & Config",
-        children=[
-            html.Hr(),
-            dbc.Row(
-                [
-                    dbc.Label("Select a Serial Port:", html_for="uart-port-dropdown"),
-                    dcc.Dropdown(
-                        id="uart-port-dropdown",
-                        options=(
-                            [
-                                {
-                                    "label": UART_PORT_OPTION_LABEL_DISCONNECTED,
-                                    "value": UART_PORT_NAME_DISCONNECTED,
-                                }
-                            ]
-                            + [{"label": p, "value": p} for p in list_serial_ports()]
-                        ),
-                        value=UART_PORT_NAME_DISCONNECTED,
-                        className="mb-3",
-                    ),
-                    dcc.Interval(
-                        id="uart-port-dropdown-interval-component",
-                        interval=2500,
-                        n_intervals=0,
-                    ),
-                ]
-            ),
-            html.Hr(),
-            html.H4("Display Options", className="text-center"),
-            dbc.Checklist(
-                options={
-                    "show_end_of_line_chars": "Show End-of-Line Characters?",
-                    "show_timestamp": "Show Timestamps?",
-                    "auto_format_json": "Auto Format JSON?",
-                },
-                id="display-options-checklist",
-                value=["auto_format_json"],
-            ),
-        ],
-    )
 
 
 # ── Tab: SatNOGS Passes ──────────────────────────────────────────────────────
@@ -676,8 +631,40 @@ def _tab_generate() -> dbc.Tab:
                 align="center",
                 className="mb-3",
             ),
+            dbc.Row(
+                [
+                    dbc.Col(
+                        dbc.Button(
+                            "💾 Save Agenda (with comments)",
+                            id="save-agenda-btn",
+                            color="secondary",
+                            disabled=True,
+                        ),
+                        width="auto",
+                    ),
+                    dbc.Col(
+                        dbc.Button(
+                            "🧹 Save Clean Agenda (no comments)",
+                            id="save-clean-agenda-btn",
+                            color="secondary",
+                            outline=True,
+                            disabled=True,
+                        ),
+                        width="auto",
+                    ),
+                    dbc.Col(
+                        html.Span(
+                            id="save-agenda-status",
+                            className="text-info ms-2",
+                            style={"fontFamily": "monospace"},
+                        )
+                    ),
+                ],
+                align="center",
+                className="mb-3",
+            ),
             html.Hr(),
-            html.H6("Preview:", className="text-muted"),
+            html.H6("Preview (with comments):", className="text-muted"),
             dbc.Textarea(
                 id="agenda-preview",
                 value="(generate agenda to see preview)",
@@ -690,35 +677,15 @@ def _tab_generate() -> dbc.Tab:
                     "color": "#c9d1d9",
                 },
             ),
+            # Store the generated lines for use by save callbacks
+            dcc.Store(id="agenda-lines-store", data=[]),
+            # Store the uplink start string for filename generation
+            dcc.Store(id="agenda-uplink-start-store", data=""),
         ],
     )
 
 
 # ── Tab: Tools ────────────────────────────────────────────────────────────────
-
-
-def _tab_tools() -> dbc.Tab:
-    return dbc.Tab(
-        label="Tools",
-        children=[
-            html.Hr(),
-            dbc.Button(
-                "Configure for Immediate Execution",
-                id="send-immediate-execution-tool-button",
-                n_clicks=0,
-                className="m-1 px-3",
-                color="info",
-            ),
-            dbc.Button(
-                "Send Time Sync Command",
-                id="send-time-sync-command-tool-button",
-                n_clicks=0,
-                className="m-1 px-3",
-                color="info",
-            ),
-        ],
-    )
-
 
 # ---------------------------------------------------------------------------
 # Full layout
@@ -731,15 +698,13 @@ def generate_left_pane(*, selected_command_name: str, enable_advanced: bool) -> 
         dbc.Tabs(
             id="left-pane-tabs",
             children=[
-                _tab_connect_config(),
-                _tab_satnogs(),
-                _tab_command_groups(),
                 _tab_telecommand_input(
                     selected_command_name=selected_command_name,
                     enable_advanced=enable_advanced,
                 ),
+                _tab_satnogs(),
+                _tab_command_groups(),
                 _tab_generate(),
-                _tab_tools(),
             ],
         ),
     ]
@@ -1268,6 +1233,86 @@ def save_button_callback(n_clicks, command_preview, filename):
 
 
 # ---------------------------------------------------------------------------
+# Agenda file helpers
+# ---------------------------------------------------------------------------
+
+_TSSENT_RE = re.compile(r"@tssent=(\d+)")
+_TSEXEC_RE = re.compile(r"@tsexec=(\d+)")
+
+
+def _agenda_filename(uplink_start_str: str, suffix: str = "") -> str:
+    """Generate a filename like 2026-06-16T1142_agenda.txt from an ISO uplink-start string."""
+    try:
+        dt = parse_iso(uplink_start_str)
+        compact = dt.strftime("%Y-%m-%dT%H%M")
+    except Exception:
+        compact = datetime.now().strftime("%Y-%m-%dT%H%M")
+    name = f"{compact}_agenda{suffix}.txt"
+    return name
+
+
+def _make_clean_lines(raw_lines: list[str]) -> list[str]:
+    """Strip comment lines and inline comments, keeping only real commands."""
+    out = []
+    for line in raw_lines:
+        stripped = line.lstrip()
+        if stripped.startswith("#"):
+            continue
+        line = line.split(" #", 1)[0].rstrip()
+        if line:
+            out.append(line)
+    return out
+
+
+def _make_timed_lines(raw_lines: list[str]) -> list[str]:
+    """
+    Clean version with tssent/tsexec times prepended as a human-readable prefix.
+    Format: tssent: YYYY-MM-DD HH:MM:SS UTC | tsexec: ... | <command>
+    """
+    out = []
+    for line in raw_lines:
+        stripped = line.lstrip()
+        if stripped.startswith("#"):
+            continue
+        # Strip inline comment
+        cmd = line.split(" #", 1)[0].rstrip()
+        if not cmd:
+            continue
+
+        tssent_m = _TSSENT_RE.search(cmd)
+        tsexec_m = _TSEXEC_RE.search(cmd)
+
+        if not tssent_m and not tsexec_m:
+            out.append(cmd)
+            continue
+
+        parts = []
+        if tssent_m:
+            ms = int(tssent_m.group(1))
+            utc_str = datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+            parts.append(f"tssent: {utc_str} UTC")
+        if tsexec_m:
+            ms = int(tsexec_m.group(1))
+            utc_str = datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+            parts.append(f"tsexec: {utc_str} UTC")
+
+        out.append(" | ".join(parts) + " | " + cmd)
+
+    return out
+
+
+def _write_agenda_file(lines: list[str], filename: str) -> Path:
+    """Write lines to a file in the current working directory and return the path."""
+    path = Path(filename)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+# ---------------------------------------------------------------------------
 # Callbacks – Generate Agenda
 # ---------------------------------------------------------------------------
 
@@ -1275,6 +1320,10 @@ def save_button_callback(n_clicks, command_preview, filename):
 @callback(
     Output("agenda-preview", "value"),
     Output("generate-status", "children"),
+    Output("agenda-lines-store", "data"),
+    Output("agenda-uplink-start-store", "data"),
+    Output("save-agenda-btn", "disabled"),
+    Output("save-clean-agenda-btn", "disabled"),
     Input("generate-agenda-btn", "n_clicks"),
     State("observations-store", "data"),
     State("selected-obs-store", "data"),
@@ -1302,20 +1351,13 @@ def generate_agenda(
     try:
         uplink_start_dt = parse_iso(uplink_start_str)
     except Exception:
-        return dash.no_update, "❌ Invalid uplink start datetime."
+        return dash.no_update, "❌ Invalid uplink start datetime.", [], "", True, True
 
     selected_obs = [o for o in (observations or []) if o.get("id") in (selected_ids or [])]
     if not selected_obs:
-        return dash.no_update, "❌ No observations selected."
+        return dash.no_update, "❌ No observations selected.", [], "", True, True
 
     priority_cmds = [c.strip() for c in (priority_cmds_raw or "").splitlines() if c.strip()]
-
-    # Flatten all command groups into the single loop_cmds list used by build_agenda.
-    # Each group contributes its commands; groups with their own timing are interleaved
-    # by building their own AgendaParams and merging the output.
-    #
-    # For groups that share the same block_interval we use build_agenda directly;
-    # for mixed intervals we generate per-group agendas and merge them.
 
     all_output_lines: list[str] = []
     total_cmd_count = 0
@@ -1330,9 +1372,7 @@ def generate_agenda(
         repeat_mode = group.get("repeat_mode", "interval")
         block_interval_sec = float(group.get("block_interval") or 20.0)
         cmd_interval_sec = float(group.get("cmd_interval") or 2.0)
-        repeat_count = int(group.get("repeat_count") or 10)
 
-        # Adjust observations start time by start_offset per group
         adjusted_obs = []
         for obs in selected_obs:
             import copy
@@ -1345,13 +1385,8 @@ def generate_agenda(
                 pass
             adjusted_obs.append(o)
 
-        # For "count" mode, cap the window to repeat_count * block_interval
-        if repeat_mode == "count":
-            # Trim observations: only include up to repeat_count blocks per pass
-            pass  # build_agenda naturally handles this via the timeline
-
         if repeat_mode == "once":
-            block_interval_sec = 1e9  # effectively run just one block
+            block_interval_sec = 1e9
 
         params = AgendaParams(
             uplink_start_dt=uplink_start_dt,
@@ -1381,7 +1416,7 @@ def generate_agenda(
 
     if not all_output_lines:
         errors_str = "; ".join(group_errors) if group_errors else "No valid command groups."
-        return dash.no_update, f"❌ {errors_str}"
+        return dash.no_update, f"❌ {errors_str}", [], "", True, True
 
     all_output_lines.append(f"\n# Total commands across all groups: {total_cmd_count}")
 
@@ -1396,7 +1431,60 @@ def generate_agenda(
     if group_errors:
         status += f" ⚠️ {len(group_errors)} group error(s)."
 
-    return "\n".join(all_output_lines), status
+    preview_text = "\n".join(all_output_lines)
+
+    # Push the clean timed version to the RX/TX log on the right pane
+    timed_lines = _make_timed_lines(all_output_lines)
+    app_store.append_to_rxtx_log(
+        RxTxLogEntry(b"=== Generated Agenda (clean, with times) ===", "notice")
+    )
+    for tl in timed_lines:
+        app_store.append_to_rxtx_log(RxTxLogEntry(tl.encode("ascii", errors="replace"), "input"))
+
+    return preview_text, status, all_output_lines, uplink_start_str or "", False, False
+
+
+@callback(
+    Output("save-agenda-status", "children"),
+    Input("save-agenda-btn", "n_clicks"),
+    State("agenda-lines-store", "data"),
+    State("agenda-uplink-start-store", "data"),
+    prevent_initial_call=True,
+)
+def save_agenda_with_comments(n_clicks, lines, uplink_start_str):
+    if not lines:
+        return "❌ No agenda generated yet."
+    try:
+        filename = _agenda_filename(uplink_start_str)
+        path = _write_agenda_file(lines, filename)
+        msg = f"💾 Saved: {path.resolve()}"
+        logger.info(msg)
+        return msg
+    except Exception as exc:
+        logger.error(f"Failed to save agenda: {exc}")
+        return f"❌ Save failed: {exc}"
+
+
+@callback(
+    Output("save-agenda-status", "children", allow_duplicate=True),
+    Input("save-clean-agenda-btn", "n_clicks"),
+    State("agenda-lines-store", "data"),
+    State("agenda-uplink-start-store", "data"),
+    prevent_initial_call=True,
+)
+def save_clean_agenda(n_clicks, lines, uplink_start_str):
+    if not lines:
+        return "❌ No agenda generated yet."
+    try:
+        clean_lines = _make_timed_lines(lines)
+        filename = _agenda_filename(uplink_start_str, suffix="_clean")
+        path = _write_agenda_file(clean_lines, filename)
+        msg = f"🧹 Saved clean: {path.resolve()}"
+        logger.info(msg)
+        return msg
+    except Exception as exc:
+        logger.error(f"Failed to save clean agenda: {exc}")
+        return f"❌ Save failed: {exc}"
 
 
 # ---------------------------------------------------------------------------
@@ -1475,35 +1563,6 @@ def update_uart_log_interval(
 
 
 # ---------------------------------------------------------------------------
-# Callbacks – Tools (unchanged from original)
-# ---------------------------------------------------------------------------
-
-
-@callback(
-    Input("send-time-sync-command-tool-button", "n_clicks"),
-    prevent_initial_call=True,
-)
-def send_time_sync_command_callback(n_clicks: int):
-    current_time_ms = int(time.time() * 1000)
-    send_command_to_device(f"CTS1+set_system_time({current_time_ms})!")
-
-
-@callback(
-    Input("send-immediate-execution-tool-button", "n_clicks"),
-    prevent_initial_call=True,
-)
-def send_immediate_execution_command_callback(n_clicks: int):
-    send_command_to_device("CTS1+config_set_int_var(EPS_monitor_interval_ms,1000000000)!")
-    time.sleep(1)
-    send_command_to_device("CTS1+config_set_int_var(EPS_time_sync_period_sec,1000000000)!")
-    time.sleep(1)
-    send_command_to_device("CTS1+config_set_int_var(COMMS_beacon_interval_ms,1000000000)!")
-    time.sleep(1)
-    send_command_to_device("CTS1+config_set_int_var(TCMD_handle_umbilical_tcmds_interval_ms,1)!")
-    time.sleep(1)
-
-
-# ---------------------------------------------------------------------------
 # Left-pane send-commands helper (for _tab_telecommand_input)
 # ---------------------------------------------------------------------------
 
@@ -1512,7 +1571,56 @@ def _generate_left_pane_send_commands(
     *, selected_command_name: str, enable_advanced: bool
 ) -> list:
     return [
+        # ── Serial port + display options (moved from removed Connect & Config tab) ──
         html.Hr(),
+        dbc.Row(
+            [
+                dbc.Col(
+                    [
+                        dbc.Label("Serial Port:", html_for="uart-port-dropdown"),
+                        dcc.Dropdown(
+                            id="uart-port-dropdown",
+                            options=(
+                                [
+                                    {
+                                        "label": UART_PORT_OPTION_LABEL_DISCONNECTED,
+                                        "value": UART_PORT_NAME_DISCONNECTED,
+                                    }
+                                ]
+                                + [{"label": p, "value": p} for p in list_serial_ports()]
+                            ),
+                            value=UART_PORT_NAME_DISCONNECTED,
+                            className="mb-2",
+                        ),
+                        dcc.Interval(
+                            id="uart-port-dropdown-interval-component",
+                            interval=2500,
+                            n_intervals=0,
+                        ),
+                    ],
+                    md=6,
+                ),
+                dbc.Col(
+                    [
+                        dbc.Label("Display Options:"),
+                        dbc.Checklist(
+                            options={
+                                "show_end_of_line_chars": "Show EOL chars",
+                                "show_timestamp": "Timestamps",
+                                "auto_format_json": "Auto-format JSON",
+                            },
+                            id="display-options-checklist",
+                            value=["auto_format_json"],
+                            inline=True,
+                        ),
+                    ],
+                    md=6,
+                ),
+            ],
+            className="mb-2",
+        ),
+        html.Hr(),
+        # ── Telecommand selector ──
         dbc.Row(
             [
                 dbc.Label("Select a Telecommand:", html_for="telecommand-dropdown"),
