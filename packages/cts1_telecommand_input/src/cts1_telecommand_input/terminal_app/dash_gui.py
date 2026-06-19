@@ -6,13 +6,15 @@ Tabs (left pane):
   3. Command Groups    – loop + priority commands with per-group timing controls
   4. Generate Agenda   – build, preview, and save the command agenda
 
-Right pane: live RX/TX log; after agenda generation the clean timed commands are
-also streamed here so they can be copy-pasted directly.
+Right pane: live RX/TX log; after agenda generation the clean commands (stripped of
+comments, with human-readable UTC times appended) are streamed here for easy copy-paste.
 """
 
 import argparse
+import copy
 import functools
 import json
+import random
 import re
 import tempfile
 import threading
@@ -23,7 +25,7 @@ from pathlib import Path
 import dash
 import dash_bootstrap_components as dbc
 import dash_split_pane
-from dash import MATCH, ALL, callback, dcc, html
+from dash import ALL, callback, dcc, html
 from dash.dependencies import Input, Output, State
 from loguru import logger
 from sortedcontainers import SortedDict
@@ -42,7 +44,6 @@ from cts1_telecommand_input.terminal_app.app_types import (
 )
 from cts1_telecommand_input.terminal_app.serial_thread import start_uart_listener
 
-# Import agenda-building utilities from the existing agenda generator module.
 from cts1_mo_tools.cts1_agenda_maker.main import (
     AgendaParams,
     build_agenda,
@@ -54,16 +55,24 @@ from cts1_mo_tools.cts1_agenda_maker.main import (
 from cts1_mo_tools.cts1_agenda_maker.satnogs_data import iter_future_observation_pages
 
 UART_PORT_OPTION_LABEL_DISCONNECTED = "⛔ Disconnected ⛔"
+AGENDA_DIR = Path("agenda")
 
 # ---------------------------------------------------------------------------
-# SatNOGS fetch state (module-level, shared across callbacks via dcc.Store)
+# SatNOGS fetch state
 # ---------------------------------------------------------------------------
-_fetch_thread: threading.Thread | None = None
 _fetch_stop = threading.Event()
-
+_fetch_results: list[dict] = []
+_fetch_done = threading.Event()
+_fetch_status_msg = ""
 
 # ---------------------------------------------------------------------------
-# Telecommand helpers (unchanged from original)
+# Regex helpers
+# ---------------------------------------------------------------------------
+_TSSENT_RE = re.compile(r"@tssent=(\d+)")
+_TSEXEC_RE = re.compile(r"@tsexec=(\d+)")
+
+# ---------------------------------------------------------------------------
+# Telecommand helpers
 # ---------------------------------------------------------------------------
 
 
@@ -99,7 +108,32 @@ def _now_local_iso() -> str:
     return datetime.now().astimezone().replace(microsecond=0).isoformat()
 
 
-# ── Tab: SatNOGS Passes ──────────────────────────────────────────────────────
+def _parse_dt_flexible(s: str) -> datetime | None:
+    """Parse an ISO datetime string or HH:MM UTC/HH:MM MST style. Returns None on failure."""
+    if not s:
+        return None
+    s = s.strip()
+    try:
+        return parse_iso(s)
+    except Exception:
+        pass
+    # Try bare HH:MM (assume UTC today)
+    try:
+        t = datetime.strptime(s, "%H:%M").replace(
+            tzinfo=timezone.utc,
+            year=datetime.now().year,
+            month=datetime.now().month,
+            day=datetime.now().day,
+        )
+        return t
+    except Exception:
+        pass
+    return None
+
+
+# ---------------------------------------------------------------------------
+# ── Tab: SatNOGS Passes
+# ---------------------------------------------------------------------------
 
 
 def _tab_satnogs() -> dbc.Tab:
@@ -135,7 +169,7 @@ def _tab_satnogs() -> dbc.Tab:
                     ),
                     dbc.Col(
                         [
-                            dbc.Label("Uplink Duration (minutes)"),
+                            dbc.Label("Uplink Duration (min)"),
                             dbc.Input(
                                 id="uplink-dur-input",
                                 type="number",
@@ -149,7 +183,7 @@ def _tab_satnogs() -> dbc.Tab:
                     ),
                     dbc.Col(
                         [
-                            dbc.Label("Fetch next N hours after uplink"),
+                            dbc.Label("Fetch next N hours"),
                             dbc.Input(
                                 id="next-hours-input",
                                 type="number",
@@ -181,13 +215,6 @@ def _tab_satnogs() -> dbc.Tab:
                                 className="me-2",
                                 style={"display": "none"},
                             ),
-                            dbc.Spinner(
-                                html.Span(id="fetch-spinner-placeholder"),
-                                id="fetch-spinner",
-                                spinner_style={"display": "none"},
-                                size="sm",
-                                color="info",
-                            ),
                         ],
                         width="auto",
                     ),
@@ -202,13 +229,12 @@ def _tab_satnogs() -> dbc.Tab:
                 align="center",
                 className="mb-3",
             ),
-            # Hidden interval for polling fetch progress
             dcc.Interval(id="fetch-poll-interval", interval=500, n_intervals=0, disabled=True),
-            # Store for raw observations list
             dcc.Store(id="observations-store", data=[]),
-            # Store for selected obs IDs
             dcc.Store(id="selected-obs-store", data=[]),
             html.Div(id="obs-table-container", children=_empty_obs_table()),
+            # ── Observation summary below table
+            html.Div(id="obs-summary-container", className="mt-2 mb-1"),
             html.Hr(),
             dbc.Row(
                 [
@@ -252,8 +278,8 @@ def _empty_obs_table() -> html.Div:
                             html.Th("Country"),
                             html.Th("Start (UTC)"),
                             html.Th("End (UTC)"),
+                            html.Th("Duration"),
                             html.Th("Start (Local)"),
-                            html.Th("End (Local)"),
                             html.Th("Wait (uplink LOS → AOS)"),
                         ]
                     )
@@ -286,19 +312,16 @@ def _obs_table_rows(
     selected_ids: list,
     uplink_end_dt: datetime | None,
 ) -> list:
-    """Build table rows for the observation list."""
     if not observations:
         return [
             html.Tr(
                 html.Td("No observations found.", colSpan=9, className="text-center text-muted")
             )
         ]
-
     rows = []
     for obs in sorted(observations, key=lambda o: o.get("start", "")):
         obs_id = obs.get("id", "?")
         gs = obs.get("ground_station", "?")
-
         start_dt = end_dt = None
         try:
             start_dt = parse_iso(obs["start"])
@@ -312,7 +335,11 @@ def _obs_table_rows(
         start_utc = start_dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ") if start_dt else "?"
         end_utc = end_dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ") if end_dt else "?"
         start_local = dt_to_local_str(start_dt) if start_dt else "?"
-        end_local = dt_to_local_str(end_dt) if end_dt else "?"
+
+        dur_str = "?"
+        if start_dt and end_dt:
+            dur_sec = int((end_dt - start_dt).total_seconds())
+            dur_str = f"{dur_sec // 60}m {dur_sec % 60}s"
 
         country = "?"
         try:
@@ -326,14 +353,12 @@ def _obs_table_rows(
             wait_str = f"{-delta} ago" if delta.total_seconds() < 0 else str(delta)
 
         is_checked = obs_id in selected_ids
-
         rows.append(
             html.Tr(
                 [
                     html.Td(
                         dbc.Checkbox(
-                            id={"type": "obs-checkbox", "index": obs_id},
-                            value=is_checked,
+                            id={"type": "obs-checkbox", "index": obs_id}, value=is_checked
                         ),
                         style={"width": "40px"},
                     ),
@@ -342,22 +367,74 @@ def _obs_table_rows(
                     html.Td(country),
                     html.Td(start_utc),
                     html.Td(end_utc),
+                    html.Td(dur_str),
                     html.Td(start_local),
-                    html.Td(end_local),
                     html.Td(wait_str),
                 ]
             )
         )
-
     return rows
 
 
-# ── Tab: Command Groups ───────────────────────────────────────────────────────
+def _obs_summary(observations: list[dict], selected_ids: list) -> html.Div:
+    """Produce a compact summary of selected observation time ranges."""
+    sel = [o for o in observations if o.get("id") in selected_ids]
+    if not sel:
+        return html.Div()
+
+    items = []
+    for obs in sorted(sel, key=lambda o: o.get("start", "")):
+        obs_id = obs.get("id", "?")
+        gs = obs.get("ground_station", "?")
+        try:
+            s = parse_iso(obs["start"]).astimezone(UTC)
+            e = parse_iso(obs["end"]).astimezone(UTC)
+            dur_sec = int((e - s).total_seconds())
+            s_str = s.strftime("%Y-%m-%dT%H:%M:%SZ")
+            e_str = e.strftime("%H:%M:%SZ")
+            dur_str = f"{dur_sec // 60}m {dur_sec % 60}s"
+            items.append(
+                html.Span(
+                    f"Obs {obs_id} (GS {gs}): {s_str} → {e_str}  [{dur_str}]",
+                    className="badge bg-secondary me-1 mb-1",
+                    style={"fontFamily": "monospace", "fontSize": "0.8rem"},
+                )
+            )
+        except Exception:
+            items.append(html.Span(f"Obs {obs_id}", className="badge bg-secondary me-1"))
+
+    return html.Div(
+        [
+            html.Small("Selected pass time ranges (UTC):", className="text-muted d-block mb-1"),
+            html.Div(items),
+        ]
+    )
 
 
-def _command_group_card(group_idx: int, group_data: dict | None = None) -> dbc.Card:
-    """Render one command group card."""
-    gd = group_data or {}
+# ---------------------------------------------------------------------------
+# ── Tab: Command Groups
+# ---------------------------------------------------------------------------
+
+
+def _command_group_card(group_idx: int, gd: dict | None = None) -> dbc.Card:
+    """Render one command group card with full timing + random injection controls."""
+    gd = gd or {}
+
+    # ── Timing mode selector options
+    timing_options = [
+        {"label": "Interval (every N sec during window)", "value": "interval"},
+        {"label": "Fixed repeat count", "value": "count"},
+        {"label": "Once only", "value": "once"},
+        {"label": "Duration window (start–end times)", "value": "duration"},
+    ]
+
+    # ── Start-time mode
+    start_mode_options = [
+        {"label": "Offset after AOS (s)", "value": "offset"},
+        {"label": "Absolute UTC time (HH:MM)", "value": "absolute"},
+        {"label": "Fixed tssent", "value": "fixed_tssent"},
+    ]
+
     return dbc.Card(
         [
             dbc.CardHeader(
@@ -370,7 +447,7 @@ def _command_group_card(group_idx: int, group_data: dict | None = None) -> dbc.C
                                 placeholder="Group name…",
                                 style={"fontFamily": "monospace", "fontWeight": "bold"},
                             ),
-                            width=8,
+                            width=9,
                         ),
                         dbc.Col(
                             dbc.Button(
@@ -389,7 +466,8 @@ def _command_group_card(group_idx: int, group_data: dict | None = None) -> dbc.C
             ),
             dbc.CardBody(
                 [
-                    dbc.Label("Commands (one per line, e.g. core_system_stats() or CTS1+cmd()!)"),
+                    # ── Commands textarea
+                    dbc.Label("Commands (one per line — bare name or full CTS1+…! form)"),
                     dbc.Textarea(
                         id={"type": "cg-cmds", "index": group_idx},
                         value=gd.get("cmds", ""),
@@ -398,31 +476,147 @@ def _command_group_card(group_idx: int, group_data: dict | None = None) -> dbc.C
                         style={"fontFamily": "monospace", "fontSize": "0.85rem"},
                         className="mb-3",
                     ),
+                    # ── Optional resp_fname tag
                     dbc.Row(
                         [
                             dbc.Col(
                                 [
-                                    dbc.Label("Start offset after AOS (seconds)"),
+                                    dbc.Label("@resp_fname (optional)"),
                                     dbc.Input(
-                                        id={"type": "cg-start-offset", "index": group_idx},
-                                        type="number",
-                                        value=gd.get("start_offset", 0),
-                                        min=0,
-                                        style={"fontFamily": "monospace"},
+                                        id={"type": "cg-resp-fname", "index": group_idx},
+                                        value=gd.get("resp_fname", ""),
+                                        placeholder="e.g. adcs_data/2026-06-15_control.run",
+                                        style={"fontFamily": "monospace", "fontSize": "0.85rem"},
                                     ),
-                                    dbc.FormText(
-                                        "Seconds after each pass AOS before this group begins."
+                                    dbc.FormText("Appended to every command in this group."),
+                                ]
+                            ),
+                        ],
+                        className="mb-3",
+                    ),
+                    html.Hr(style={"borderColor": "#555"}),
+                    # ── Start-time controls
+                    dbc.Row(
+                        [
+                            dbc.Col(
+                                [
+                                    dbc.Label("Start time mode"),
+                                    dcc.Dropdown(
+                                        id={"type": "cg-start-mode", "index": group_idx},
+                                        options=start_mode_options,
+                                        value=gd.get("start_mode", "offset"),
+                                        clearable=False,
+                                        style={"fontFamily": "monospace"},
                                     ),
                                 ],
                                 md=4,
                             ),
                             dbc.Col(
                                 [
-                                    dbc.Label("Command spacing within block (seconds)"),
+                                    dbc.Label(
+                                        "Offset after AOS (s)  or  Absolute start (HH:MM UTC / ISO)"
+                                    ),
+                                    dbc.Input(
+                                        id={"type": "cg-start-value", "index": group_idx},
+                                        value=str(gd.get("start_value", "0")),
+                                        placeholder="0  or  21:31:00  or  2026-06-15T21:31:00Z",
+                                        style={"fontFamily": "monospace"},
+                                    ),
+                                    dbc.FormText(
+                                        "For 'fixed tssent' mode enter a past ISO timestamp "
+                                        "(e.g. 2026-01-01T00:00:00Z) — all commands share this tssent."
+                                    ),
+                                ],
+                                md=8,
+                            ),
+                        ],
+                        className="mb-2",
+                    ),
+                    # ── Repeat / timing controls
+                    dbc.Row(
+                        [
+                            dbc.Col(
+                                [
+                                    dbc.Label("Block repeat mode"),
+                                    dcc.Dropdown(
+                                        id={"type": "cg-repeat-mode", "index": group_idx},
+                                        options=timing_options,
+                                        value=gd.get("repeat_mode", "interval"),
+                                        clearable=False,
+                                        style={"fontFamily": "monospace"},
+                                    ),
+                                ],
+                                md=4,
+                            ),
+                            dbc.Col(
+                                [
+                                    dbc.Label("Block interval (s)  [interval mode]"),
+                                    dbc.Input(
+                                        id={"type": "cg-block-interval", "index": group_idx},
+                                        type="number",
+                                        value=gd.get("block_interval", 20.0),
+                                        min=1,
+                                        style={"fontFamily": "monospace"},
+                                    ),
+                                ],
+                                md=4,
+                            ),
+                            dbc.Col(
+                                [
+                                    dbc.Label("Repeat count  [count mode]"),
+                                    dbc.Input(
+                                        id={"type": "cg-repeat-count", "index": group_idx},
+                                        type="number",
+                                        value=gd.get("repeat_count", 5),
+                                        min=1,
+                                        style={"fontFamily": "monospace"},
+                                    ),
+                                ],
+                                md=4,
+                            ),
+                        ],
+                        className="mb-2",
+                    ),
+                    # ── Duration window (for "duration" repeat mode)
+                    dbc.Row(
+                        [
+                            dbc.Col(
+                                [
+                                    dbc.Label("Window start (HH:MM UTC / ISO)  [duration mode]"),
+                                    dbc.Input(
+                                        id={"type": "cg-window-start", "index": group_idx},
+                                        value=gd.get("window_start", ""),
+                                        placeholder="21:32:30  or  2026-06-15T21:32:30Z",
+                                        style={"fontFamily": "monospace"},
+                                    ),
+                                ],
+                                md=6,
+                            ),
+                            dbc.Col(
+                                [
+                                    dbc.Label("Window end (HH:MM UTC / ISO)  [duration mode]"),
+                                    dbc.Input(
+                                        id={"type": "cg-window-end", "index": group_idx},
+                                        value=gd.get("window_end", ""),
+                                        placeholder="21:42:30",
+                                        style={"fontFamily": "monospace"},
+                                    ),
+                                ],
+                                md=6,
+                            ),
+                        ],
+                        className="mb-2",
+                    ),
+                    # ── Command spacing
+                    dbc.Row(
+                        [
+                            dbc.Col(
+                                [
+                                    dbc.Label("Command spacing within block (s)"),
                                     dbc.Input(
                                         id={"type": "cg-cmd-interval", "index": group_idx},
                                         type="number",
-                                        value=gd.get("cmd_interval", 2.0),
+                                        value=gd.get("cmd_interval", 1.0),
                                         min=0.1,
                                         style={"fontFamily": "monospace"},
                                     ),
@@ -434,58 +628,72 @@ def _command_group_card(group_idx: int, group_data: dict | None = None) -> dbc.C
                             ),
                             dbc.Col(
                                 [
-                                    dbc.Label("Block repeat mode"),
-                                    dcc.Dropdown(
-                                        id={"type": "cg-repeat-mode", "index": group_idx},
-                                        options=[
-                                            {
-                                                "label": "Every N seconds until LOS",
-                                                "value": "interval",
-                                            },
-                                            {"label": "Fixed number of repeats", "value": "count"},
-                                            {"label": "Once (no repeat)", "value": "once"},
-                                        ],
-                                        value=gd.get("repeat_mode", "interval"),
-                                        clearable=False,
+                                    dbc.Label("tssent spacing between blocks (s)"),
+                                    dbc.Input(
+                                        id={"type": "cg-tssent-spacing", "index": group_idx},
+                                        type="number",
+                                        value=gd.get("tssent_spacing", 1.0),
+                                        min=0.1,
                                         style={"fontFamily": "monospace"},
+                                    ),
+                                    dbc.FormText(
+                                        "How much tssent advances between successive block repeats."
                                     ),
                                 ],
                                 md=4,
                             ),
                         ],
-                        className="mb-2",
+                        className="mb-3",
                     ),
+                    html.Hr(style={"borderColor": "#555"}),
+                    # ── Random injection
                     dbc.Row(
                         [
                             dbc.Col(
                                 [
                                     dbc.Label(
-                                        "Block interval (seconds) — used when mode is 'Every N seconds'"
+                                        "Scheduled repeat count (sent at start / fixed times)"
                                     ),
                                     dbc.Input(
-                                        id={"type": "cg-block-interval", "index": group_idx},
+                                        id={"type": "cg-sched-count", "index": group_idx},
                                         type="number",
-                                        value=gd.get("block_interval", 20.0),
-                                        min=1,
+                                        value=gd.get("sched_count", 5),
+                                        min=0,
                                         style={"fontFamily": "monospace"},
                                     ),
+                                    dbc.FormText(
+                                        "# of regularly-spaced blocks at start of window."
+                                    ),
                                 ],
-                                md=6,
+                                md=4,
                             ),
                             dbc.Col(
                                 [
-                                    dbc.Label(
-                                        "Repeat count — used when mode is 'Fixed number of repeats'"
-                                    ),
+                                    dbc.Label("Random injection count"),
                                     dbc.Input(
-                                        id={"type": "cg-repeat-count", "index": group_idx},
+                                        id={"type": "cg-random-count", "index": group_idx},
                                         type="number",
-                                        value=gd.get("repeat_count", 10),
-                                        min=1,
+                                        value=gd.get("random_count", 0),
+                                        min=0,
+                                        style={"fontFamily": "monospace"},
+                                    ),
+                                    dbc.FormText(
+                                        "# of extra blocks inserted at random times in the window."
+                                    ),
+                                ],
+                                md=4,
+                            ),
+                            dbc.Col(
+                                [
+                                    dbc.Label("Random seed (blank = different each run)"),
+                                    dbc.Input(
+                                        id={"type": "cg-random-seed", "index": group_idx},
+                                        value=str(gd.get("random_seed", "")),
+                                        placeholder="e.g. 42",
                                         style={"fontFamily": "monospace"},
                                     ),
                                 ],
-                                md=6,
+                                md=4,
                             ),
                         ]
                     ),
@@ -493,7 +701,7 @@ def _command_group_card(group_idx: int, group_data: dict | None = None) -> dbc.C
             ),
         ],
         className="mb-3",
-        style={"border": "1px solid #444"},
+        style={"border": "1px solid #555"},
     )
 
 
@@ -502,26 +710,35 @@ def _tab_command_groups() -> dbc.Tab:
         {
             "name": "Telemetry Loop",
             "cmds": "CTS1+core_system_stats()!\nCTS1+get_all_system_thermal_info()!",
-            "start_offset": 0,
-            "cmd_interval": 2.0,
+            "resp_fname": "",
+            "start_mode": "offset",
+            "start_value": "0",
+            "cmd_interval": 1.0,
+            "tssent_spacing": 1.0,
             "block_interval": 20.0,
             "repeat_mode": "interval",
-            "repeat_count": 10,
+            "repeat_count": 5,
+            "window_start": "",
+            "window_end": "",
+            "sched_count": 5,
+            "random_count": 0,
+            "random_seed": "",
         }
     ]
     return dbc.Tab(
         label="Command Groups",
         children=[
             html.Hr(),
-            # Priority commands (static, not grouped)
+            # Priority commands card
             dbc.Card(
                 [
                     dbc.CardHeader(html.Strong("⭐ Priority Commands")),
                     dbc.CardBody(
                         [
                             dbc.Label(
-                                "Injected repeatedly with a fixed tssent so the satellite de-duplicates. "
-                                "Optionally append @tsexec=<ms> for a fixed execution time."
+                                "Injected with a fixed tssent (past timestamp) so the satellite "
+                                "de-duplicates. Appended @tsexec=<ms> for fixed execution time, or 0 "
+                                "for immediate."
                             ),
                             dbc.Textarea(
                                 id="priority-cmds-input",
@@ -538,8 +755,23 @@ def _tab_command_groups() -> dbc.Tab:
                                     dbc.Col(
                                         [
                                             dbc.Label(
-                                                "Injection interval (every N loop commands)"
+                                                "Fixed tssent for priority cmds (past ISO timestamp)"
                                             ),
+                                            dbc.Input(
+                                                id="priority-fixed-tssent",
+                                                value="2026-01-01T00:00:00Z",
+                                                placeholder="2026-01-01T00:00:00Z",
+                                                style={"fontFamily": "monospace"},
+                                            ),
+                                            dbc.FormText(
+                                                "Use a past date so the satellite de-duplicates on tssent."
+                                            ),
+                                        ],
+                                        md=5,
+                                    ),
+                                    dbc.Col(
+                                        [
+                                            dbc.Label("Inject every N loop commands"),
                                             dbc.Input(
                                                 id="priority-interval-input",
                                                 type="number",
@@ -548,7 +780,33 @@ def _tab_command_groups() -> dbc.Tab:
                                                 style={"fontFamily": "monospace"},
                                             ),
                                         ],
-                                        md=4,
+                                        md=3,
+                                    ),
+                                    dbc.Col(
+                                        [
+                                            dbc.Label("Scheduled count (at start)"),
+                                            dbc.Input(
+                                                id="priority-sched-count",
+                                                type="number",
+                                                value=5,
+                                                min=0,
+                                                style={"fontFamily": "monospace"},
+                                            ),
+                                        ],
+                                        md=2,
+                                    ),
+                                    dbc.Col(
+                                        [
+                                            dbc.Label("Random count"),
+                                            dbc.Input(
+                                                id="priority-random-count",
+                                                type="number",
+                                                value=10,
+                                                min=0,
+                                                style={"fontFamily": "monospace"},
+                                            ),
+                                        ],
+                                        md=2,
                                     ),
                                 ]
                             ),
@@ -561,11 +819,10 @@ def _tab_command_groups() -> dbc.Tab:
             ),
             html.H5("Loop Command Groups", className="mb-1"),
             html.P(
-                "Each group runs its commands in a block, repeated according to its own schedule "
-                "while a satellite pass is active.",
+                "Each group runs its commands as a block. Use the timing controls to set when "
+                "and how often the block repeats within each satellite pass.",
                 className="text-muted mb-3",
             ),
-            # Container for dynamic command group cards
             html.Div(
                 id="command-groups-container",
                 children=[_command_group_card(i, g) for i, g in enumerate(default_groups)],
@@ -577,13 +834,14 @@ def _tab_command_groups() -> dbc.Tab:
                 outline=True,
                 className="mb-3",
             ),
-            # Store holds the list of group dicts (serialized as JSON)
             dcc.Store(id="command-groups-store", data=default_groups),
         ],
     )
 
 
-# ── Tab: Telecommand Input ────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# ── Tab: Telecommand Input
+# ---------------------------------------------------------------------------
 
 
 def _tab_telecommand_input(*, selected_command_name: str, enable_advanced: bool) -> dbc.Tab:
@@ -596,7 +854,9 @@ def _tab_telecommand_input(*, selected_command_name: str, enable_advanced: bool)
     )
 
 
-# ── Tab: Generate ─────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# ── Tab: Generate Agenda
+# ---------------------------------------------------------------------------
 
 
 def _tab_generate() -> dbc.Tab:
@@ -605,8 +865,8 @@ def _tab_generate() -> dbc.Tab:
         children=[
             html.Hr(),
             html.P(
-                "Uses the SatNOGS passes selected in the 'SatNOGS Passes' tab and the command "
-                "groups defined in 'Command Groups' to produce a time-stamped command agenda.",
+                "Uses the SatNOGS passes selected in 'SatNOGS Passes' and the groups defined "
+                "in 'Command Groups' to produce a time-stamped command agenda.",
                 className="text-muted",
             ),
             dbc.Row(
@@ -644,7 +904,7 @@ def _tab_generate() -> dbc.Tab:
                     ),
                     dbc.Col(
                         dbc.Button(
-                            "🧹 Save Clean Agenda (no comments)",
+                            "🧹 Save Clean Agenda (commands only)",
                             id="save-clean-agenda-btn",
                             color="secondary",
                             outline=True,
@@ -677,15 +937,11 @@ def _tab_generate() -> dbc.Tab:
                     "color": "#c9d1d9",
                 },
             ),
-            # Store the generated lines for use by save callbacks
             dcc.Store(id="agenda-lines-store", data=[]),
-            # Store the uplink start string for filename generation
             dcc.Store(id="agenda-uplink-start-store", data=""),
         ],
     )
 
-
-# ── Tab: Tools ────────────────────────────────────────────────────────────────
 
 # ---------------------------------------------------------------------------
 # Full layout
@@ -711,7 +967,7 @@ def generate_left_pane(*, selected_command_name: str, enable_advanced: bool) -> 
 
 
 # ---------------------------------------------------------------------------
-# Callbacks – Connect & Config (unchanged from original)
+# Callbacks – serial port
 # ---------------------------------------------------------------------------
 
 
@@ -753,11 +1009,6 @@ def update_uart_port_dropdown_options(uart_port_name, _n_intervals):
 # Callbacks – SatNOGS Passes
 # ---------------------------------------------------------------------------
 
-# Module-level store for in-progress fetch results (shared with background thread)
-_fetch_results: list[dict] = []
-_fetch_done = threading.Event()
-_fetch_status_msg = ""
-
 
 @callback(
     Output("observations-store", "data"),
@@ -773,9 +1024,7 @@ _fetch_status_msg = ""
     prevent_initial_call=True,
 )
 def start_fetch_observations(n_clicks, sat_id, uplink_start_str, uplink_dur, next_hours):
-    """Start the background fetch thread and enable the polling interval."""
     global _fetch_results, _fetch_status_msg
-
     if not sat_id:
         return (
             dash.no_update,
@@ -784,16 +1033,13 @@ def start_fetch_observations(n_clicks, sat_id, uplink_start_str, uplink_dur, nex
             False,
             {"display": "none"},
         )
-
     try:
         uplink_start_dt = parse_iso(uplink_start_str)
     except Exception:
         return dash.no_update, "⚠️ Invalid uplink start datetime.", True, False, {"display": "none"}
 
-    uplink_dur = float(uplink_dur or 15)
-    next_hours = float(next_hours or 6)
-    uplink_end_dt = uplink_start_dt + timedelta(minutes=uplink_dur)
-    start_lt_filter = uplink_start_dt + timedelta(hours=next_hours)
+    uplink_end_dt = uplink_start_dt + timedelta(minutes=float(uplink_dur or 15))
+    start_lt_filter = uplink_start_dt + timedelta(hours=float(next_hours or 6))
 
     _fetch_results = []
     _fetch_stop.clear()
@@ -834,13 +1080,12 @@ def start_fetch_observations(n_clicks, sat_id, uplink_start_str, uplink_dur, nex
     prevent_initial_call=True,
 )
 def poll_fetch_progress(_n):
-    """Called every 500 ms while fetch is running. Updates store and status."""
     done = _fetch_done.is_set()
     return (
         list(_fetch_results),
         _fetch_status_msg,
-        done,  # disable interval when done
-        not done,  # re-enable fetch button when done
+        done,
+        not done,
         {"display": "none"} if done else {"display": "inline-block"},
     )
 
@@ -857,6 +1102,7 @@ def stop_fetch(_n_clicks):
     Output("obs-table-body", "children"),
     Output("selected-obs-store", "data"),
     Output("obs-count-text", "children"),
+    Output("obs-summary-container", "children"),
     Input("observations-store", "data"),
     Input("select-all-btn", "n_clicks"),
     Input("deselect-all-btn", "n_clicks"),
@@ -872,15 +1118,14 @@ def update_obs_table(
 
     triggered = ctx.triggered_id if ctx.triggered_id else ""
 
+    obs_list = observations or []
     if triggered == "select-all-btn":
-        selected_ids = [o.get("id") for o in (observations or [])]
+        selected_ids = [o.get("id") for o in obs_list]
     elif triggered == "deselect-all-btn":
         selected_ids = []
     else:
-        # Default: select all newly fetched observations
-        all_ids = [o.get("id") for o in (observations or [])]
+        all_ids = [o.get("id") for o in obs_list]
         existing = set(current_selected or [])
-        # Keep existing selection state, add new ones as selected
         selected_ids = list(existing | set(all_ids))
 
     uplink_end_dt = None
@@ -890,16 +1135,18 @@ def update_obs_table(
     except Exception:
         pass
 
-    rows = _obs_table_rows(observations or [], selected_ids, uplink_end_dt)
-    total = len(observations or [])
-    sel = len([i for i in selected_ids if i in [o.get("id") for o in (observations or [])]])
-    count_text = f"{total} fetched, {sel} selected"
-    return rows, selected_ids, count_text
+    rows = _obs_table_rows(obs_list, selected_ids, uplink_end_dt)
+    total = len(obs_list)
+    valid_sel = [i for i in selected_ids if i in [o.get("id") for o in obs_list]]
+    count_text = f"{total} fetched, {len(valid_sel)} selected"
+    summary = _obs_summary(obs_list, selected_ids)
+    return rows, selected_ids, count_text, summary
 
 
 @callback(
     Output("selected-obs-store", "data", allow_duplicate=True),
     Output("obs-count-text", "children", allow_duplicate=True),
+    Output("obs-summary-container", "children", allow_duplicate=True),
     Input({"type": "obs-checkbox", "index": ALL}, "value"),
     State({"type": "obs-checkbox", "index": ALL}, "id"),
     State("observations-store", "data"),
@@ -909,12 +1156,50 @@ def obs_checkbox_changed(values, ids, observations):
     selected_ids = [id_dict["index"] for id_dict, val in zip(ids, values) if val]
     total = len(observations or [])
     count_text = f"{total} fetched, {len(selected_ids)} selected"
-    return selected_ids, count_text
+    summary = _obs_summary(observations or [], selected_ids)
+    return selected_ids, count_text, summary
 
 
 # ---------------------------------------------------------------------------
 # Callbacks – Command Groups
 # ---------------------------------------------------------------------------
+
+_CG_STATE_KEYS = [
+    "cg-name",
+    "cg-cmds",
+    "cg-resp-fname",
+    "cg-start-mode",
+    "cg-start-value",
+    "cg-repeat-mode",
+    "cg-block-interval",
+    "cg-repeat-count",
+    "cg-window-start",
+    "cg-window-end",
+    "cg-cmd-interval",
+    "cg-tssent-spacing",
+    "cg-sched-count",
+    "cg-random-count",
+    "cg-random-seed",
+]
+_CG_DEFAULTS = {
+    "cg-name": "Group",
+    "cg-cmds": "",
+    "cg-resp-fname": "",
+    "cg-start-mode": "offset",
+    "cg-start-value": "0",
+    "cg-repeat-mode": "interval",
+    "cg-block-interval": 20.0,
+    "cg-repeat-count": 5,
+    "cg-window-start": "",
+    "cg-window-end": "",
+    "cg-cmd-interval": 1.0,
+    "cg-tssent-spacing": 1.0,
+    "cg-sched-count": 5,
+    "cg-random-count": 0,
+    "cg-random-seed": "",
+}
+# Map UI key → store dict key
+_UI_TO_STORE = {k: k.replace("cg-", "").replace("-", "_") for k in _CG_STATE_KEYS}
 
 
 @callback(
@@ -923,62 +1208,31 @@ def obs_checkbox_changed(values, ids, observations):
     Input("add-group-btn", "n_clicks"),
     Input({"type": "cg-remove-btn", "index": ALL}, "n_clicks"),
     State("command-groups-store", "data"),
-    State({"type": "cg-name", "index": ALL}, "value"),
-    State({"type": "cg-cmds", "index": ALL}, "value"),
-    State({"type": "cg-start-offset", "index": ALL}, "value"),
-    State({"type": "cg-cmd-interval", "index": ALL}, "value"),
-    State({"type": "cg-block-interval", "index": ALL}, "value"),
-    State({"type": "cg-repeat-mode", "index": ALL}, "value"),
-    State({"type": "cg-repeat-count", "index": ALL}, "value"),
+    *[State({"type": k, "index": ALL}, "value") for k in _CG_STATE_KEYS],
     prevent_initial_call=True,
 )
-def manage_command_groups(
-    add_clicks,
-    remove_clicks,
-    stored_groups,
-    names,
-    cmds,
-    start_offsets,
-    cmd_intervals,
-    block_intervals,
-    repeat_modes,
-    repeat_counts,
-):
+def manage_command_groups(add_clicks, remove_clicks, stored_groups, *all_field_values):
     from dash import ctx
 
-    # Snapshot current UI state back into group list
+    # Snapshot current UI → list of group dicts
     n = len(stored_groups)
+    field_lists = list(all_field_values)  # one list per _CG_STATE_KEYS entry
     current_groups = []
     for i in range(n):
-        current_groups.append(
-            {
-                "name": names[i] if i < len(names) else f"Group {i + 1}",
-                "cmds": cmds[i] if i < len(cmds) else "",
-                "start_offset": start_offsets[i] if i < len(start_offsets) else 0,
-                "cmd_interval": cmd_intervals[i] if i < len(cmd_intervals) else 2.0,
-                "block_interval": block_intervals[i] if i < len(block_intervals) else 20.0,
-                "repeat_mode": repeat_modes[i] if i < len(repeat_modes) else "interval",
-                "repeat_count": repeat_counts[i] if i < len(repeat_counts) else 10,
-            }
-        )
+        g = {}
+        for fi, key in enumerate(_CG_STATE_KEYS):
+            store_key = _UI_TO_STORE[key]
+            vals = field_lists[fi]
+            g[store_key] = vals[i] if i < len(vals) else _CG_DEFAULTS[key]
+        current_groups.append(g)
 
     triggered = ctx.triggered_id
     if triggered == "add-group-btn":
-        current_groups.append(
-            {
-                "name": f"Group {len(current_groups) + 1}",
-                "cmds": "",
-                "start_offset": 0,
-                "cmd_interval": 2.0,
-                "block_interval": 20.0,
-                "repeat_mode": "interval",
-                "repeat_count": 10,
-            }
-        )
+        new_g = {_UI_TO_STORE[k]: _CG_DEFAULTS[k] for k in _CG_STATE_KEYS}
+        new_g["name"] = f"Group {len(current_groups) + 1}"
+        current_groups.append(new_g)
     elif isinstance(triggered, dict) and triggered.get("type") == "cg-remove-btn":
         idx = triggered["index"]
-        # Find position in current_groups by matching original index
-        # After re-indexing we remove the one at position idx
         if 0 <= idx < len(current_groups):
             current_groups.pop(idx)
 
@@ -987,7 +1241,7 @@ def manage_command_groups(
 
 
 # ---------------------------------------------------------------------------
-# Callbacks – Telecommand Input (unchanged from original)
+# Callbacks – Telecommand Input
 # ---------------------------------------------------------------------------
 
 
@@ -1117,10 +1371,8 @@ def send_command_to_device(command_text: str) -> None:
     prevent_initial_call=True,
 )
 def send_button_callback(n_clicks, selected_command_name, command_preview, *every_arg_value):
-    logger.info(f"Send button clicked ({n_clicks=})!")
     if selected_command_name is None:
         msg = "No command selected."
-        logger.error(msg)
         app_store.append_to_rxtx_log(RxTxLogEntry(msg.encode(), "error"))
         return
     args = [
@@ -1129,21 +1381,16 @@ def send_button_callback(n_clicks, selected_command_name, command_preview, *ever
     ]
     if any(a is None or a == "" for a in args):
         msg = f"Not all arguments filled in for {selected_command_name}."
-        logger.error(msg)
         app_store.append_to_rxtx_log(RxTxLogEntry(msg.encode(), "error"))
         return
     if app_store.uart_port_name == UART_PORT_NAME_DISCONNECTED:
         msg = "Can't send command when disconnected."
-        logger.error(msg)
         app_store.append_to_rxtx_log(RxTxLogEntry(msg.encode(), "error"))
         return
     send_command_to_device(command_preview)
 
 
-@callback(
-    Input("clear-log-button", "n_clicks"),
-    prevent_initial_call=True,
-)
+@callback(Input("clear-log-button", "n_clicks"), prevent_initial_call=True)
 def clear_log_button_callback(n_clicks: int):
     max_idx = app_store.rxtx_log.keys()[-1]
     app_store.rxtx_log = SortedDict({max_idx + 1: RxTxLogEntry(b"Log Reset", "notice")}).copy()
@@ -1218,45 +1465,39 @@ def disable_checkbox_when_datetime_present(dt_value, checklist_values):
 )
 def save_button_callback(n_clicks, command_preview, filename):
     if not command_preview:
-        msg = "No command to save."
-        logger.error(msg)
-        app_store.append_to_rxtx_log(RxTxLogEntry(msg.encode(), "error"))
+        app_store.append_to_rxtx_log(RxTxLogEntry(b"No command to save.", "error"))
         return
     try:
         filepath = save_command(command_preview, filename)
-        msg1 = f"Saved → {filepath.name}"
-        msg2 = f"Telecommand → {command_preview}"
-        app_store.append_to_rxtx_log(RxTxLogEntry(msg1.encode(), "input"))
-        app_store.append_to_rxtx_log(RxTxLogEntry(msg2.encode(), "input"))
+        app_store.append_to_rxtx_log(RxTxLogEntry(f"Saved → {filepath.name}".encode(), "input"))
+        app_store.append_to_rxtx_log(
+            RxTxLogEntry(f"Telecommand → {command_preview}".encode(), "input")
+        )
     except OSError as e:
         app_store.append_to_rxtx_log(RxTxLogEntry(str(e).encode(), "error"))
 
 
 # ---------------------------------------------------------------------------
-# Agenda file helpers
+# Agenda generation helpers
 # ---------------------------------------------------------------------------
 
-_TSSENT_RE = re.compile(r"@tssent=(\d+)")
-_TSEXEC_RE = re.compile(r"@tsexec=(\d+)")
 
-
-def _agenda_filename(uplink_start_str: str, suffix: str = "") -> str:
-    """Generate a filename like 2026-06-16T1142_agenda.txt from an ISO uplink-start string."""
+def _agenda_filename(uplink_start_str: str, suffix: str = "") -> Path:
+    """Return Path like agenda/2026-06-16T1142_agenda<suffix>.txt"""
     try:
         dt = parse_iso(uplink_start_str)
         compact = dt.strftime("%Y-%m-%dT%H%M")
     except Exception:
         compact = datetime.now().strftime("%Y-%m-%dT%H%M")
-    name = f"{compact}_agenda{suffix}.txt"
-    return name
+    AGENDA_DIR.mkdir(parents=True, exist_ok=True)
+    return AGENDA_DIR / f"{compact}_agenda{suffix}.txt"
 
 
 def _make_clean_lines(raw_lines: list[str]) -> list[str]:
-    """Strip comment lines and inline comments, keeping only real commands."""
+    """Strip all comment lines and inline comments — pure commands only."""
     out = []
     for line in raw_lines:
-        stripped = line.lstrip()
-        if stripped.startswith("#"):
+        if line.lstrip().startswith("#"):
             continue
         line = line.split(" #", 1)[0].rstrip()
         if line:
@@ -1264,52 +1505,221 @@ def _make_clean_lines(raw_lines: list[str]) -> list[str]:
     return out
 
 
-def _make_timed_lines(raw_lines: list[str]) -> list[str]:
+def _make_timed_display_lines(raw_lines: list[str]) -> list[str]:
     """
-    Clean version with tssent/tsexec times prepended as a human-readable prefix.
-    Format: tssent: YYYY-MM-DD HH:MM:SS UTC | tsexec: ... | <command>
+    For the right-pane display: strip comments, then prepend human-readable UTC times.
+    Format:  tssent: YYYY-MM-DD HH:MM:SS UTC | tsexec: YYYY-MM-DD HH:MM:SS UTC | <command>
     """
     out = []
     for line in raw_lines:
-        stripped = line.lstrip()
-        if stripped.startswith("#"):
+        if line.lstrip().startswith("#"):
             continue
-        # Strip inline comment
         cmd = line.split(" #", 1)[0].rstrip()
         if not cmd:
             continue
-
         tssent_m = _TSSENT_RE.search(cmd)
         tsexec_m = _TSEXEC_RE.search(cmd)
-
         if not tssent_m and not tsexec_m:
             out.append(cmd)
             continue
-
         parts = []
         if tssent_m:
             ms = int(tssent_m.group(1))
-            utc_str = datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime(
-                "%Y-%m-%d %H:%M:%S"
+            parts.append(
+                "tssent: "
+                + datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                + " UTC"
             )
-            parts.append(f"tssent: {utc_str} UTC")
         if tsexec_m:
             ms = int(tsexec_m.group(1))
-            utc_str = datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime(
-                "%Y-%m-%d %H:%M:%S"
+            parts.append(
+                "tsexec: "
+                + datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                + " UTC"
             )
-            parts.append(f"tsexec: {utc_str} UTC")
-
         out.append(" | ".join(parts) + " | " + cmd)
-
     return out
 
 
-def _write_agenda_file(lines: list[str], filename: str) -> Path:
-    """Write lines to a file in the current working directory and return the path."""
-    path = Path(filename)
+def _write_agenda_file(lines: list[str], path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
+
+
+def _resolve_group_window(
+    group: dict,
+    pass_start: datetime,
+    pass_end: datetime,
+    uplink_start_dt: datetime,
+) -> tuple[datetime, datetime]:
+    """
+    Return (window_start_dt, window_end_dt) for this group within one pass.
+    Handles offset/absolute/fixed_tssent start modes and duration window mode.
+    """
+    start_mode = group.get("start_mode", "offset")
+    start_value = str(group.get("start_value", "0")).strip()
+
+    # Determine window start
+    if start_mode == "offset":
+        try:
+            offset_sec = float(start_value)
+        except ValueError:
+            offset_sec = 0.0
+        win_start = pass_start + timedelta(seconds=offset_sec)
+    elif start_mode == "absolute":
+        dt = _parse_dt_flexible(start_value)
+        if dt is None:
+            win_start = pass_start
+        else:
+            # If time-only was parsed (today's date), align to pass date
+            win_start = dt
+    elif start_mode == "fixed_tssent":
+        # Start time for tsexec is the pass AOS; tssent override handled separately
+        win_start = pass_start
+    else:
+        win_start = pass_start
+
+    # Determine window end
+    repeat_mode = group.get("repeat_mode", "interval")
+    if repeat_mode == "duration":
+        ws = str(group.get("window_start", "")).strip()
+        we = str(group.get("window_end", "")).strip()
+        wsd = _parse_dt_flexible(ws)
+        wed = _parse_dt_flexible(we)
+        win_start = wsd if wsd else win_start
+        win_end = wed if wed else pass_end
+    elif repeat_mode == "once":
+        win_end = win_start + timedelta(seconds=0.1)
+    elif repeat_mode == "count":
+        block_interval = float(group.get("block_interval", 20.0))
+        repeat_count = int(group.get("repeat_count", 5))
+        cmd_count = len([c for c in (group.get("cmds") or "").splitlines() if c.strip()])
+        cmd_interval = float(group.get("cmd_interval", 1.0))
+        block_dur = max(cmd_count * cmd_interval, 1.0)
+        win_end = win_start + timedelta(seconds=repeat_count * block_interval + block_dur)
+    else:  # interval — runs until pass end
+        win_end = pass_end
+
+    # Clamp to pass bounds
+    win_start = max(win_start, pass_start)
+    win_end = min(win_end, pass_end)
+    return win_start, win_end
+
+
+def _build_group_lines(
+    group: dict,
+    pass_start: datetime,
+    pass_end: datetime,
+    uplink_start_dt: datetime,
+    base_tssent: datetime,
+) -> tuple[list[str], datetime]:
+    """
+    Generate the command lines for one group within one pass.
+    Returns (lines, updated_base_tssent).
+
+    Key behaviours implemented here:
+    - fixed_tssent mode: all tssent values are pinned to a past timestamp
+    - tssent advances by tssent_spacing between blocks (default 1 s)
+    - random injection inserts extra blocks at random tsexec slots
+    - resp_fname tag appended if set
+    - scheduled (regular) blocks emitted first, random ones shuffled in
+    """
+    COMMAND_PREFIX = "CTS1+"
+    COMMAND_SUFFIX = "!"
+
+    raw_cmds = [c.strip() for c in (group.get("cmds") or "").splitlines() if c.strip()]
+    if not raw_cmds:
+        return [], base_tssent
+
+    # Normalise command strings
+    cmds = []
+    resp_fname = (group.get("resp_fname") or "").strip()
+    for c in raw_cmds:
+        c = c.removeprefix(COMMAND_PREFIX).removesuffix(COMMAND_SUFFIX)
+        if resp_fname and f"@resp_fname=" not in c:
+            c = c + f"@resp_fname={resp_fname}"
+        cmds.append(c)
+
+    start_mode = group.get("start_mode", "offset")
+    repeat_mode = group.get("repeat_mode", "interval")
+    block_interval_sec = float(group.get("block_interval", 20.0))
+    cmd_interval_sec = float(group.get("cmd_interval", 1.0))
+    tssent_spacing_sec = float(group.get("tssent_spacing", 1.0))
+    sched_count = int(group.get("sched_count", 5))
+    random_count = int(group.get("random_count", 0))
+    random_seed_raw = str(group.get("random_seed", "")).strip()
+
+    # Fixed tssent override
+    fixed_tssent_dt: datetime | None = None
+    if start_mode == "fixed_tssent":
+        sv = str(group.get("start_value", "")).strip()
+        try:
+            fixed_tssent_dt = parse_iso(sv)
+        except Exception:
+            pass
+
+    win_start, win_end = _resolve_group_window(group, pass_start, pass_end, uplink_start_dt)
+    if win_end <= win_start:
+        return [], base_tssent
+
+    # Build list of tsexec slots for scheduled blocks
+    if repeat_mode == "once":
+        tsexec_slots = [win_start]
+    elif repeat_mode == "count":
+        n = int(group.get("repeat_count", 5))
+        tsexec_slots = [win_start + timedelta(seconds=i * block_interval_sec) for i in range(n)]
+    elif repeat_mode in ("interval", "duration"):
+        tsexec_slots = []
+        t = win_start
+        while t < win_end:
+            tsexec_slots.append(t)
+            t += timedelta(seconds=block_interval_sec)
+    else:
+        tsexec_slots = [win_start]
+
+    # Limit scheduled slots to sched_count if set and repeat_mode != "interval"/"duration"
+    if repeat_mode in ("count", "once"):
+        tsexec_slots = tsexec_slots[:sched_count] if sched_count > 0 else tsexec_slots
+    else:
+        # For interval/duration, sched_count caps number of blocks if set > 0
+        if sched_count > 0:
+            tsexec_slots = tsexec_slots[:sched_count]
+
+    # Build random injection slots
+    random_slots: list[datetime] = []
+    if random_count > 0 and win_end > win_start:
+        rng = random.Random(int(random_seed_raw) if random_seed_raw.isdigit() else None)
+        total_sec = (win_end - win_start).total_seconds()
+        for _ in range(random_count):
+            offset = rng.uniform(0, max(total_sec - 1, 1))
+            random_slots.append(win_start + timedelta(seconds=offset))
+
+    # Merge and sort all slots
+    all_slots = sorted(tsexec_slots + random_slots)
+
+    lines: list[str] = []
+    current_tssent = base_tssent
+
+    for slot_dt in all_slots:
+        for cmd in cmds:
+            tssent_dt = fixed_tssent_dt if fixed_tssent_dt else current_tssent
+            tssent_ms = int(tssent_dt.timestamp() * 1000)
+            tsexec_ms = int(slot_dt.timestamp() * 1000)
+
+            # Build the command string manually (matching format_command convention)
+            out = f"{COMMAND_PREFIX}{cmd}@tssent={tssent_ms}@tsexec={tsexec_ms}{COMMAND_SUFFIX}"
+            tssent_utc = tssent_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+            tsexec_utc = slot_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+            lines.append(f"{out}  # tssent={tssent_utc} tsexec={tsexec_utc}")
+
+            slot_dt += timedelta(seconds=cmd_interval_sec)
+
+        # Advance tssent by spacing
+        if fixed_tssent_dt is None:
+            current_tssent += timedelta(seconds=tssent_spacing_sec)
+
+    return lines, current_tssent
 
 
 # ---------------------------------------------------------------------------
@@ -1332,7 +1742,10 @@ def _write_agenda_file(lines: list[str], filename: str) -> Path:
     State("next-hours-input", "value"),
     State("sat-id-input", "value"),
     State("priority-cmds-input", "value"),
+    State("priority-fixed-tssent", "value"),
     State("priority-interval-input", "value"),
+    State("priority-sched-count", "value"),
+    State("priority-random-count", "value"),
     State("command-groups-store", "data"),
     prevent_initial_call=True,
 )
@@ -1345,7 +1758,10 @@ def generate_agenda(
     next_hours,
     sat_id,
     priority_cmds_raw,
+    priority_fixed_tssent_str,
     priority_interval,
+    priority_sched_count,
+    priority_random_count,
     command_groups,
 ):
     try:
@@ -1357,91 +1773,138 @@ def generate_agenda(
     if not selected_obs:
         return dash.no_update, "❌ No observations selected.", [], "", True, True
 
+    selected_obs_sorted = sorted(selected_obs, key=lambda o: o.get("start", ""))
+
     priority_cmds = [c.strip() for c in (priority_cmds_raw or "").splitlines() if c.strip()]
 
-    all_output_lines: list[str] = []
+    # Parse priority fixed tssent
+    priority_fixed_tssent_dt: datetime | None = None
+    try:
+        priority_fixed_tssent_dt = parse_iso((priority_fixed_tssent_str or "").strip())
+    except Exception:
+        pass
+
+    all_output_lines: list[str] = [
+        "# CTS-SAT-1 Command Agenda",
+        f"# Generated: {datetime.now(tz=UTC).isoformat()}",
+        f"# Satellite NORAD ID: {sat_id}",
+        f"# Uplink start: {uplink_start_str}",
+        f"# Uplink duration: {uplink_dur} min",
+        "",
+    ]
+
     total_cmd_count = 0
     group_errors: list[str] = []
 
-    for group in command_groups or []:
-        loop_cmds = [c.strip() for c in (group.get("cmds") or "").splitlines() if c.strip()]
-        if not loop_cmds:
+    # tssent cursor — advances across all groups and passes
+    tssent_cursor = uplink_start_dt
+
+    # ── Priority commands (emitted once at the top with fixed tssent)
+    if priority_cmds and priority_fixed_tssent_dt:
+        all_output_lines.append("# ── Priority Commands (upfront)")
+        p_tssent_ms = int(priority_fixed_tssent_dt.timestamp() * 1000)
+        for pcmd in priority_cmds:
+            pcmd_clean = pcmd.removeprefix("CTS1+").removesuffix("!")
+            out = f"CTS1+{pcmd_clean}@tssent={p_tssent_ms}@tsexec=0!"
+            tssent_utc = priority_fixed_tssent_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+            all_output_lines.append(f"{out}  # tssent={tssent_utc} tsexec=immediate")
+            total_cmd_count += 1
+        all_output_lines.append("")
+
+    # ── Per-pass loop
+    for obs in selected_obs_sorted:
+        try:
+            pass_start = parse_iso(obs["start"])
+            pass_end = parse_iso(obs["end"])
+        except Exception:
             continue
 
-        start_offset_sec = float(group.get("start_offset") or 0)
-        repeat_mode = group.get("repeat_mode", "interval")
-        block_interval_sec = float(group.get("block_interval") or 20.0)
-        cmd_interval_sec = float(group.get("cmd_interval") or 2.0)
+        obs_id = obs.get("id", "?")
+        gs = obs.get("ground_station", "?")
+        dur_sec = int((pass_end - pass_start).total_seconds())
+        pass_start_utc = pass_start.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        pass_end_utc = pass_end.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        adjusted_obs = []
-        for obs in selected_obs:
-            import copy
-
-            o = copy.deepcopy(obs)
-            try:
-                s = parse_iso(o["start"]) + timedelta(seconds=start_offset_sec)
-                o["start"] = s.isoformat()
-            except Exception:
-                pass
-            adjusted_obs.append(o)
-
-        if repeat_mode == "once":
-            block_interval_sec = 1e9
-
-        params = AgendaParams(
-            uplink_start_dt=uplink_start_dt,
-            uplink_dur_min=float(uplink_dur or 15),
-            block_interval_sec=block_interval_sec,
-            cmd_interval_sec=cmd_interval_sec,
-            priority_interval=int(priority_interval or 50),
-            sat_id=sat_id or "",
-            next_hours=float(next_hours or 6),
-            loop_cmds=loop_cmds,
-            priority_cmds=priority_cmds,
-            observations=adjusted_obs,
+        all_output_lines.append(
+            f"# ══ Obs {obs_id} | GS {gs} | {pass_start_utc} → {pass_end_utc} "
+            f"({dur_sec // 60}m {dur_sec % 60}s)"
         )
 
-        try:
-            lines = build_agenda(params)
-        except ValueError as exc:
-            group_errors.append(f"Group '{group.get('name')}': {exc}")
-            continue
+        # ── Inject re-scheduled priority commands within each pass
+        if priority_cmds and priority_fixed_tssent_dt:
+            p_sched = int(priority_sched_count or 0)
+            p_rand = int(priority_random_count or 0)
+            p_tssent_ms = int(priority_fixed_tssent_dt.timestamp() * 1000)
+            p_slots: list[datetime] = []
+            if p_sched > 0:
+                interval_sec = dur_sec / max(p_sched, 1)
+                p_slots += [
+                    pass_start + timedelta(seconds=i * interval_sec) for i in range(p_sched)
+                ]
+            if p_rand > 0:
+                rng = random.Random()
+                for _ in range(p_rand):
+                    p_slots.append(pass_start + timedelta(seconds=rng.uniform(0, dur_sec)))
+            p_slots.sort()
+            if p_slots:
+                all_output_lines.append("# ── Priority injections")
+                for slot in p_slots:
+                    tsexec_ms = int(slot.timestamp() * 1000)
+                    tsexec_utc = slot.strftime("%Y-%m-%dT%H:%M:%SZ")
+                    tssent_utc = priority_fixed_tssent_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+                    for pcmd in priority_cmds:
+                        pcmd_clean = pcmd.removeprefix("CTS1+").removesuffix("!")
+                        out = f"CTS1+{pcmd_clean}@tssent={p_tssent_ms}@tsexec={tsexec_ms}!"
+                        all_output_lines.append(
+                            f"{out}  # tssent={tssent_utc} tsexec={tsexec_utc}"
+                        )
+                        total_cmd_count += 1
 
-        group_name = group.get("name", "Group")
-        all_output_lines.append(f"\n# ===== {group_name} =====")
-        all_output_lines.extend(lines)
+        # ── Per-group lines within this pass
+        for group in command_groups or []:
+            group_name = group.get("name", "Group")
+            try:
+                g_lines, tssent_cursor = _build_group_lines(
+                    group, pass_start, pass_end, uplink_start_dt, tssent_cursor
+                )
+            except Exception as exc:
+                group_errors.append(f"Obs {obs_id} / {group_name}: {exc}")
+                logger.exception(f"Error building group lines: {exc}")
+                continue
 
-        group_cmd_count = sum(1 for l in lines if l.strip() and not l.startswith("#"))
-        total_cmd_count += group_cmd_count
+            if g_lines:
+                all_output_lines.append(f"# ── {group_name}")
+                all_output_lines.extend(g_lines)
+                total_cmd_count += len(g_lines)
 
-    if not all_output_lines:
-        errors_str = "; ".join(group_errors) if group_errors else "No valid command groups."
-        return dash.no_update, f"❌ {errors_str}", [], "", True, True
+        all_output_lines.append("")
 
-    all_output_lines.append(f"\n# Total commands across all groups: {total_cmd_count}")
-
+    all_output_lines.append(f"# Total commands: {total_cmd_count}")
     if group_errors:
-        all_output_lines.append("\n# WARNINGS:")
+        all_output_lines.append("# WARNINGS:")
         for err in group_errors:
             all_output_lines.append(f"#   {err}")
 
-    status = (
-        f"✅ Generated {total_cmd_count} commands across {len(command_groups or [])} group(s)."
-    )
+    status = f"✅ {total_cmd_count} commands, {len(selected_obs_sorted)} pass(es)."
     if group_errors:
-        status += f" ⚠️ {len(group_errors)} group error(s)."
+        status += f" ⚠️ {len(group_errors)} error(s)."
 
-    preview_text = "\n".join(all_output_lines)
-
-    # Push the clean timed version to the RX/TX log on the right pane
-    timed_lines = _make_timed_lines(all_output_lines)
+    # Push clean timed version to RX/TX log (right pane) — no time prefix, just commands
+    clean_only = _make_clean_lines(all_output_lines)
     app_store.append_to_rxtx_log(
-        RxTxLogEntry(b"=== Generated Agenda (clean, with times) ===", "notice")
+        RxTxLogEntry(b"=== Generated Agenda (clean commands) ===", "notice")
     )
-    for tl in timed_lines:
-        app_store.append_to_rxtx_log(RxTxLogEntry(tl.encode("ascii", errors="replace"), "input"))
+    for cl in clean_only:
+        app_store.append_to_rxtx_log(RxTxLogEntry(cl.encode("ascii", errors="replace"), "input"))
 
-    return preview_text, status, all_output_lines, uplink_start_str or "", False, False
+    return (
+        "\n".join(all_output_lines),
+        status,
+        all_output_lines,
+        uplink_start_str or "",
+        False,
+        False,
+    )
 
 
 @callback(
@@ -1455,13 +1918,10 @@ def save_agenda_with_comments(n_clicks, lines, uplink_start_str):
     if not lines:
         return "❌ No agenda generated yet."
     try:
-        filename = _agenda_filename(uplink_start_str)
-        path = _write_agenda_file(lines, filename)
-        msg = f"💾 Saved: {path.resolve()}"
-        logger.info(msg)
-        return msg
+        path = _agenda_filename(uplink_start_str)
+        _write_agenda_file(lines, path)
+        return f"💾 Saved: {path.resolve()}"
     except Exception as exc:
-        logger.error(f"Failed to save agenda: {exc}")
         return f"❌ Save failed: {exc}"
 
 
@@ -1476,19 +1936,16 @@ def save_clean_agenda(n_clicks, lines, uplink_start_str):
     if not lines:
         return "❌ No agenda generated yet."
     try:
-        clean_lines = _make_timed_lines(lines)
-        filename = _agenda_filename(uplink_start_str, suffix="_clean")
-        path = _write_agenda_file(clean_lines, filename)
-        msg = f"🧹 Saved clean: {path.resolve()}"
-        logger.info(msg)
-        return msg
+        clean_lines = _make_clean_lines(lines)
+        path = _agenda_filename(uplink_start_str, suffix="_clean")
+        _write_agenda_file(clean_lines, path)
+        return f"🧹 Saved clean: {path.resolve()}"
     except Exception as exc:
-        logger.error(f"Failed to save clean agenda: {exc}")
         return f"❌ Save failed: {exc}"
 
 
 # ---------------------------------------------------------------------------
-# Callbacks – RX/TX log and UART refresh (unchanged from original)
+# Callbacks – RX/TX log
 # ---------------------------------------------------------------------------
 
 
@@ -1563,7 +2020,7 @@ def update_uart_log_interval(
 
 
 # ---------------------------------------------------------------------------
-# Left-pane send-commands helper (for _tab_telecommand_input)
+# Left-pane Telecommand Input helper
 # ---------------------------------------------------------------------------
 
 
@@ -1571,7 +2028,6 @@ def _generate_left_pane_send_commands(
     *, selected_command_name: str, enable_advanced: bool
 ) -> list:
     return [
-        # ── Serial port + display options (moved from removed Connect & Config tab) ──
         html.Hr(),
         dbc.Row(
             [
@@ -1620,7 +2076,6 @@ def _generate_left_pane_send_commands(
             className="mb-2",
         ),
         html.Hr(),
-        # ── Telecommand selector ──
         dbc.Row(
             [
                 dbc.Label("Select a Telecommand:", html_for="telecommand-dropdown"),
@@ -1803,8 +2258,8 @@ def run_dash_app(*, enable_debug: bool = False, enable_advanced: bool = False) -
                 ],
                 id="vertical-split-pane-1",
                 split="vertical",
-                size=550,
-                minSize=350,
+                size=580,
+                minSize=380,
                 pane2Style={"backgroundColor": "black", "overflowX": "auto"},
             ),
             dbc.Button(
@@ -1851,7 +2306,3 @@ def main() -> None:
         app_store.firmware_repo_path = firmware_repo_path
         logger.info(f"Loaded {len(get_telecommand_name_list())} telecommands.")
         run_dash_app(enable_debug=args.debug, enable_advanced=args.advanced)
-
-
-if __name__ == "__main__":
-    main()
