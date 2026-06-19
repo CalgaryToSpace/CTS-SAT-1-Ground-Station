@@ -6,8 +6,8 @@ Tabs (left pane):
   3. Command Groups    – loop + priority commands with per-group timing controls
   4. Generate Agenda   – build, preview, and save the command agenda
 
-Right pane: live RX/TX log; after agenda generation the clean commands (stripped of
-comments, with human-readable UTC times appended) are streamed here for easy copy-paste.
+Right pane: live RX/TX log; after agenda generation, lines are streamed here in the
+format `tssent: <UTC> | tsexec: <UTC> | <command>` for easy copy-paste with timing context.
 """
 
 import argparse
@@ -25,7 +25,7 @@ from pathlib import Path
 import dash
 import dash_bootstrap_components as dbc
 import dash_split_pane
-from dash import ALL, callback, dcc, html
+from dash import ALL, MATCH, callback, dcc, html
 from dash.dependencies import Input, Output, State
 from loguru import logger
 from sortedcontainers import SortedDict
@@ -376,36 +376,76 @@ def _obs_table_rows(
     return rows
 
 
-def _obs_summary(observations: list[dict], selected_ids: list) -> html.Div:
-    """Produce a compact summary of selected observation time ranges."""
-    sel = [o for o in observations if o.get("id") in selected_ids]
-    if not sel:
-        return html.Div()
+def _merge_obs_time_ranges(
+    observations: list[dict], selected_ids: list
+) -> list[tuple[datetime, datetime, list]]:
+    """Merge overlapping/touching selected observation windows into combined ranges.
 
-    items = []
-    for obs in sorted(sel, key=lambda o: o.get("start", "")):
-        obs_id = obs.get("id", "?")
-        gs = obs.get("ground_station", "?")
+    e.g. two passes that overlap in time (different ground stations seeing the same
+    satellite simultaneously) collapse into ONE combined coverage window, rather than
+    being listed as two separate entries.
+    """
+    sel = [o for o in observations if o.get("id") in selected_ids]
+    intervals: list[tuple[datetime, datetime, list]] = []
+    for obs in sel:
         try:
             s = parse_iso(obs["start"]).astimezone(UTC)
             e = parse_iso(obs["end"]).astimezone(UTC)
-            dur_sec = int((e - s).total_seconds())
-            s_str = s.strftime("%Y-%m-%dT%H:%M:%SZ")
-            e_str = e.strftime("%H:%M:%SZ")
-            dur_str = f"{dur_sec // 60}m {dur_sec % 60}s"
-            items.append(
-                html.Span(
-                    f"Obs {obs_id} (GS {gs}): {s_str} → {e_str}  [{dur_str}]",
-                    className="badge bg-secondary me-1 mb-1",
-                    style={"fontFamily": "monospace", "fontSize": "0.8rem"},
-                )
-            )
         except Exception:
-            items.append(html.Span(f"Obs {obs_id}", className="badge bg-secondary me-1"))
+            continue
+        intervals.append((s, e, [obs.get("id")]))
+
+    if not intervals:
+        return []
+
+    intervals.sort(key=lambda iv: iv[0])
+    merged: list[tuple[datetime, datetime, list]] = [intervals[0]]
+    for s, e, ids in intervals[1:]:
+        last_s, last_e, last_ids = merged[-1]
+        if s <= last_e:  # overlapping or touching → merge into the same window
+            merged[-1] = (last_s, max(last_e, e), last_ids + ids)
+        else:
+            merged.append((s, e, ids))
+    return merged
+
+
+def _format_merged_window(s: datetime, e: datetime) -> str:
+    """Format a merged time window, e.g. '2026-06-19T16:37:37Z → 16:48:49Z'.
+
+    The end time is shortened to just HH:MM:SSZ when it falls on the same UTC date
+    as the start; otherwise the full date is included for both.
+    """
+    s_str = s.strftime("%Y-%m-%dT%H:%M:%SZ")
+    e_str = e.strftime("%H:%M:%SZ") if s.date() == e.date() else e.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return f"{s_str} → {e_str}"
+
+
+def _obs_summary(observations: list[dict], selected_ids: list) -> html.Div:
+    """Show the COMBINED (overlap-merged) coverage windows for the selected passes."""
+    merged = _merge_obs_time_ranges(observations, selected_ids)
+    if not merged:
+        return html.Div()
+
+    items = []
+    for s, e, ids in merged:
+        dur_sec = int((e - s).total_seconds())
+        dur_str = f"{dur_sec // 60}m {dur_sec % 60}s"
+        window_str = _format_merged_window(s, e)
+        ids_str = ", ".join(str(i) for i in ids)
+        items.append(
+            html.Span(
+                f"{window_str}  [{dur_str}]  (Obs: {ids_str})",
+                className="badge bg-secondary me-1 mb-1",
+                style={"fontFamily": "monospace", "fontSize": "0.8rem"},
+            )
+        )
 
     return html.Div(
         [
-            html.Small("Selected pass time ranges (UTC):", className="text-muted d-block mb-1"),
+            html.Small(
+                "Combined uplink coverage windows (overlapping passes merged, UTC):",
+                className="text-muted d-block mb-1",
+            ),
             html.Div(items),
         ]
     )
@@ -416,9 +456,28 @@ def _obs_summary(observations: list[dict], selected_ids: list) -> html.Div:
 # ---------------------------------------------------------------------------
 
 
+def _repeat_mode_visibility(repeat_mode: str) -> dict[str, dict]:
+    """Return per-field visibility styles based on the selected timing/repeat mode.
+
+    Only the field(s) relevant to the selected mode are shown:
+      - interval → Block interval (s)
+      - count    → Repeat count
+      - duration → Window start / Window end
+      - once     → none of the above (no extra params needed)
+    """
+    show: dict = {}
+    hide: dict = {"display": "none"}
+    return {
+        "block_interval": show if repeat_mode == "interval" else hide,
+        "repeat_count": show if repeat_mode == "count" else hide,
+        "duration_window": show if repeat_mode == "duration" else hide,
+    }
+
+
 def _command_group_card(group_idx: int, gd: dict | None = None) -> dbc.Card:
     """Render one command group card with full timing + random injection controls."""
     gd = gd or {}
+    vis = _repeat_mode_visibility(gd.get("repeat_mode", "interval"))
 
     # ── Timing mode selector options
     timing_options = [
@@ -537,7 +596,7 @@ def _command_group_card(group_idx: int, gd: dict | None = None) -> dbc.Card:
                         [
                             dbc.Col(
                                 [
-                                    dbc.Label("Block repeat mode"),
+                                    dbc.Label("Timing mode (tsexec scheduling)"),
                                     dcc.Dropdown(
                                         id={"type": "cg-repeat-mode", "index": group_idx},
                                         options=timing_options,
@@ -550,7 +609,7 @@ def _command_group_card(group_idx: int, gd: dict | None = None) -> dbc.Card:
                             ),
                             dbc.Col(
                                 [
-                                    dbc.Label("Block interval (s)  [interval mode]"),
+                                    dbc.Label("Block interval (s)"),
                                     dbc.Input(
                                         id={"type": "cg-block-interval", "index": group_idx},
                                         type="number",
@@ -559,11 +618,13 @@ def _command_group_card(group_idx: int, gd: dict | None = None) -> dbc.Card:
                                         style={"fontFamily": "monospace"},
                                     ),
                                 ],
+                                id={"type": "cg-block-interval-col", "index": group_idx},
                                 md=4,
+                                style=vis["block_interval"],
                             ),
                             dbc.Col(
                                 [
-                                    dbc.Label("Repeat count  [count mode]"),
+                                    dbc.Label("Repeat count"),
                                     dbc.Input(
                                         id={"type": "cg-repeat-count", "index": group_idx},
                                         type="number",
@@ -572,17 +633,19 @@ def _command_group_card(group_idx: int, gd: dict | None = None) -> dbc.Card:
                                         style={"fontFamily": "monospace"},
                                     ),
                                 ],
+                                id={"type": "cg-repeat-count-col", "index": group_idx},
                                 md=4,
+                                style=vis["repeat_count"],
                             ),
                         ],
                         className="mb-2",
                     ),
-                    # ── Duration window (for "duration" repeat mode)
+                    # ── Duration window (only relevant + shown for "duration" timing mode)
                     dbc.Row(
                         [
                             dbc.Col(
                                 [
-                                    dbc.Label("Window start (HH:MM UTC / ISO)  [duration mode]"),
+                                    dbc.Label("Window start (HH:MM UTC / ISO)"),
                                     dbc.Input(
                                         id={"type": "cg-window-start", "index": group_idx},
                                         value=gd.get("window_start", ""),
@@ -594,7 +657,7 @@ def _command_group_card(group_idx: int, gd: dict | None = None) -> dbc.Card:
                             ),
                             dbc.Col(
                                 [
-                                    dbc.Label("Window end (HH:MM UTC / ISO)  [duration mode]"),
+                                    dbc.Label("Window end (HH:MM UTC / ISO)"),
                                     dbc.Input(
                                         id={"type": "cg-window-end", "index": group_idx},
                                         value=gd.get("window_end", ""),
@@ -605,7 +668,9 @@ def _command_group_card(group_idx: int, gd: dict | None = None) -> dbc.Card:
                                 md=6,
                             ),
                         ],
+                        id={"type": "cg-duration-window-row", "index": group_idx},
                         className="mb-2",
+                        style=vis["duration_window"],
                     ),
                     # ── Command spacing
                     dbc.Row(
@@ -628,7 +693,7 @@ def _command_group_card(group_idx: int, gd: dict | None = None) -> dbc.Card:
                             ),
                             dbc.Col(
                                 [
-                                    dbc.Label("tssent spacing between blocks (s)"),
+                                    dbc.Label("tssent spacing between commands (s)"),
                                     dbc.Input(
                                         id={"type": "cg-tssent-spacing", "index": group_idx},
                                         type="number",
@@ -636,9 +701,7 @@ def _command_group_card(group_idx: int, gd: dict | None = None) -> dbc.Card:
                                         min=0.1,
                                         style={"fontFamily": "monospace"},
                                     ),
-                                    dbc.FormText(
-                                        "How much tssent advances between successive block repeats."
-                                    ),
+                                    dbc.FormText("How much tssent advances for each command."),
                                 ],
                                 md=4,
                             ),
@@ -737,8 +800,7 @@ def _tab_command_groups() -> dbc.Tab:
                         [
                             dbc.Label(
                                 "Injected with a fixed tssent (past timestamp) so the satellite "
-                                "de-duplicates. Appended @tsexec=<ms> for fixed execution time, or 0 "
-                                "for immediate."
+                                "de-duplicates. @tsexec defaults to 0 (immediate)."
                             ),
                             dbc.Textarea(
                                 id="priority-cmds-input",
@@ -767,7 +829,19 @@ def _tab_command_groups() -> dbc.Tab:
                                                 "Use a past date so the satellite de-duplicates on tssent."
                                             ),
                                         ],
-                                        md=5,
+                                        md=4,
+                                    ),
+                                    dbc.Col(
+                                        [
+                                            dbc.Label("@tsexec (ms, 0 = immediate)"),
+                                            dbc.Input(
+                                                id="priority-tsexec-input",
+                                                value="0",
+                                                placeholder="0",
+                                                style={"fontFamily": "monospace"},
+                                            ),
+                                        ],
+                                        md=2,
                                     ),
                                     dbc.Col(
                                         [
@@ -780,7 +854,7 @@ def _tab_command_groups() -> dbc.Tab:
                                                 style={"fontFamily": "monospace"},
                                             ),
                                         ],
-                                        md=3,
+                                        md=2,
                                     ),
                                     dbc.Col(
                                         [
@@ -1240,6 +1314,18 @@ def manage_command_groups(add_clicks, remove_clicks, stored_groups, *all_field_v
     return current_groups, cards
 
 
+@callback(
+    Output({"type": "cg-block-interval-col", "index": MATCH}, "style"),
+    Output({"type": "cg-repeat-count-col", "index": MATCH}, "style"),
+    Output({"type": "cg-duration-window-row", "index": MATCH}, "style"),
+    Input({"type": "cg-repeat-mode", "index": MATCH}, "value"),
+)
+def toggle_group_repeat_mode_fields(repeat_mode):
+    """Show only the field(s) relevant to the selected timing mode for this group."""
+    vis = _repeat_mode_visibility(repeat_mode)
+    return vis["block_interval"], vis["repeat_count"], vis["duration_window"]
+
+
 # ---------------------------------------------------------------------------
 # Callbacks – Telecommand Input
 # ---------------------------------------------------------------------------
@@ -1620,7 +1706,10 @@ def _build_group_lines(
 
     Key behaviours implemented here:
     - fixed_tssent mode: all tssent values are pinned to a past timestamp
-    - tssent advances by tssent_spacing between blocks (default 1 s)
+    - tssent advances by tssent_spacing AFTER EVERY COMMAND (not just per block) —
+      tssent must be unique per command, since the satellite de-duplicates purely on
+      tssent regardless of which command it belongs to. If two different commands in
+      the same block shared a tssent, the second one would be silently dropped.
     - random injection inserts extra blocks at random tsexec slots
     - resp_fname tag appended if set
     - scheduled (regular) blocks emitted first, random ones shuffled in
@@ -1715,9 +1804,10 @@ def _build_group_lines(
 
             slot_dt += timedelta(seconds=cmd_interval_sec)
 
-        # Advance tssent by spacing
-        if fixed_tssent_dt is None:
-            current_tssent += timedelta(seconds=tssent_spacing_sec)
+            # Advance tssent after EVERY command (see docstring note above) — not once
+            # per block. tssent must be unique per command.
+            if fixed_tssent_dt is None:
+                current_tssent += timedelta(seconds=tssent_spacing_sec)
 
     return lines, current_tssent
 
@@ -1743,6 +1833,7 @@ def _build_group_lines(
     State("sat-id-input", "value"),
     State("priority-cmds-input", "value"),
     State("priority-fixed-tssent", "value"),
+    State("priority-tsexec-input", "value"),
     State("priority-interval-input", "value"),
     State("priority-sched-count", "value"),
     State("priority-random-count", "value"),
@@ -1759,6 +1850,7 @@ def generate_agenda(
     sat_id,
     priority_cmds_raw,
     priority_fixed_tssent_str,
+    priority_tsexec_input,
     priority_interval,
     priority_sched_count,
     priority_random_count,
@@ -1784,6 +1876,12 @@ def generate_agenda(
     except Exception:
         pass
 
+    # Parse priority @tsexec override (defaults to 0 / immediate).
+    try:
+        priority_tsexec_ms = int(str(priority_tsexec_input).strip() or "0")
+    except ValueError:
+        priority_tsexec_ms = 0
+
     all_output_lines: list[str] = [
         "# CTS-SAT-1 Command Agenda",
         f"# Generated: {datetime.now(tz=UTC).isoformat()}",
@@ -1803,11 +1901,18 @@ def generate_agenda(
     if priority_cmds and priority_fixed_tssent_dt:
         all_output_lines.append("# ── Priority Commands (upfront)")
         p_tssent_ms = int(priority_fixed_tssent_dt.timestamp() * 1000)
+        tssent_utc = priority_fixed_tssent_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        tsexec_display = (
+            "immediate"
+            if priority_tsexec_ms == 0
+            else datetime.fromtimestamp(priority_tsexec_ms / 1000, tz=UTC).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
+        )
         for pcmd in priority_cmds:
             pcmd_clean = pcmd.removeprefix("CTS1+").removesuffix("!")
-            out = f"CTS1+{pcmd_clean}@tssent={p_tssent_ms}@tsexec=0!"
-            tssent_utc = priority_fixed_tssent_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-            all_output_lines.append(f"{out}  # tssent={tssent_utc} tsexec=immediate")
+            out = f"CTS1+{pcmd_clean}@tssent={p_tssent_ms}@tsexec={priority_tsexec_ms}!"
+            all_output_lines.append(f"{out}  # tssent={tssent_utc} tsexec={tsexec_display}")
             total_cmd_count += 1
         all_output_lines.append("")
 
@@ -1851,12 +1956,12 @@ def generate_agenda(
                 for slot in p_slots:
                     tsexec_ms = int(slot.timestamp() * 1000)
                     tsexec_utc = slot.strftime("%Y-%m-%dT%H:%M:%SZ")
-                    tssent_utc = priority_fixed_tssent_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+                    tssent_utc_inner = priority_fixed_tssent_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
                     for pcmd in priority_cmds:
                         pcmd_clean = pcmd.removeprefix("CTS1+").removesuffix("!")
                         out = f"CTS1+{pcmd_clean}@tssent={p_tssent_ms}@tsexec={tsexec_ms}!"
                         all_output_lines.append(
-                            f"{out}  # tssent={tssent_utc} tsexec={tsexec_utc}"
+                            f"{out}  # tssent={tssent_utc_inner} tsexec={tsexec_utc}"
                         )
                         total_cmd_count += 1
 
@@ -1889,13 +1994,14 @@ def generate_agenda(
     if group_errors:
         status += f" ⚠️ {len(group_errors)} error(s)."
 
-    # Push clean timed version to RX/TX log (right pane) — no time prefix, just commands
-    clean_only = _make_clean_lines(all_output_lines)
+    # Push the timed display version to RX/TX log (right pane):
+    #   tssent: <UTC> | tsexec: <UTC> | <command>
+    timed_display_lines = _make_timed_display_lines(all_output_lines)
     app_store.append_to_rxtx_log(
-        RxTxLogEntry(b"=== Generated Agenda (clean commands) ===", "notice")
+        RxTxLogEntry(b"=== Generated Agenda (tssent/tsexec + command) ===", "notice")
     )
-    for cl in clean_only:
-        app_store.append_to_rxtx_log(RxTxLogEntry(cl.encode("ascii", errors="replace"), "input"))
+    for tl in timed_display_lines:
+        app_store.append_to_rxtx_log(RxTxLogEntry(tl.encode("ascii", errors="replace"), "input"))
 
     return (
         "\n".join(all_output_lines),
