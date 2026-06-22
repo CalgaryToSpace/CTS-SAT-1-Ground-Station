@@ -142,5 +142,9 @@ def send_file_to_tcmd_file(  # noqa: PLR0913
     )
 
 
-if __name__ == "__main__":
+def main() -> None:
     tyro.cli(send_file_to_tcmd_file)
+
+
+if __name__ == "__main__":
+    main()

@@ -12,6 +12,7 @@ dependencies = [
 
 [project.scripts]
 cts1_decode_satnogs_packets = "cts1_mo_tools.cts1_decode_satnogs_packets:main"
+cts1_make_bulk_uplink_agenda = "cts1_mo_tools.cts1_make_bulk_uplink_agenda:main"
 
 [dependency-groups]
 dev = [
