@@ -109,12 +109,27 @@ def send_file_to_tcmd_file(  # noqa: PLR0913
         chunk_index += 1
 
     emit("CTS1+comms_bulk_uplink_close_file()")
-    emit(f"CTS1+fs_read_file_sha256_hash_json({satellite_file},0,0)")
+
+    # Repeat this 5 times for a better chance of data transfer.
+    for _ in range(5):
+        emit(f"CTS1+fs_read_file_sha256_hash_json({satellite_file},0,0)")
 
     hash_on_disk = hashlib.sha256(file_bytes).hexdigest()
 
     # Add a comment with the hash of the input file.
     lines.append(f"# SHA256 of input file: {hash_on_disk} ({total_size:,} bytes)")
+    lines.extend(
+        [
+            "# Generated with arguments:",
+            f"#   input_file.name={input_file.name}",
+            f"#   satellite_file={satellite_file}",
+            f"#   chunk_size={chunk_size}",
+            f"#   tssent_start_val={tssent_start_val}",
+            f"#   tssent_interval_ms={tssent_interval_ms}",
+            f"#   tsexec_start_val={tsexec_start_val}",
+            f"#   tsexec_interval_ms={tsexec_interval_ms}",
+        ]
+    )
 
     telecommand_output_file.write_text("\n".join(lines) + "\n")
 
