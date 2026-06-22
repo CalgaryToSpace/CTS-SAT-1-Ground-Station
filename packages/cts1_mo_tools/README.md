@@ -5,3 +5,4 @@ Mission Operations tools that are mostly independent of the ground station (upli
 ## Tools
 
 * `cts1_decode_satnogs_packets`
+* `cts1_agenda_maker`
