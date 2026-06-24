@@ -9,7 +9,6 @@ dependencies = [
     "polars",
     "loguru",
     "ordered-set",
-    "loguru",
     "dearpygui",
     "requests",
     "python-dotenv",

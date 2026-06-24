@@ -32,6 +32,7 @@ _fetch_stop = threading.Event()
 COMMAND_PREFIX = "CTS1+"
 COMMAND_SUFFIX = "!"
 VERY_EVIL_COMMAND_SUBSTRING = ")!@"  # Causes suffix tags to be ignored.
+TSSENT_INCREMENT_MS = 1000
 
 # -------------------------------------------------------------
 # STATE
@@ -457,7 +458,7 @@ def build_agenda(params: AgendaParams) -> list[str]:  # noqa: C901, PLR0912, PLR
             output_lines.append(
                 format_command(p_name, int(tssent_dt.timestamp() * 1000), p_tsexec)
             )
-            tssent_dt += timedelta(milliseconds=100)
+            tssent_dt += timedelta(milliseconds=TSSENT_INCREMENT_MS)
         output_lines.append("")
 
     # -- Single unified timeline --------------------------------
@@ -524,7 +525,7 @@ def build_agenda(params: AgendaParams) -> list[str]:  # noqa: C901, PLR0912, PLR
                         int(cmd_tsexec_dt.timestamp() * 1000),
                     )
                 )
-                tssent_dt += timedelta(milliseconds=100)
+                tssent_dt += timedelta(milliseconds=TSSENT_INCREMENT_MS)
                 cmd_tsexec_dt += cmd_interval
                 cmd_count += 1
 
