@@ -7,12 +7,19 @@ requires-python = ">=3.11"
 dependencies = [
     "tyro",
     "polars",
+    "loguru",
     "ordered-set",
     "loguru",
+    "dearpygui",
+    "requests",
+    "python-dotenv",
+    "reverse-geocoder>=1.5.1",
+    "pycountry>=26.2.16",
 ]
 
 [project.scripts]
 cts1_decode_satnogs_packets = "cts1_mo_tools.cts1_decode_satnogs_packets:main"
+cts1_agenda_maker = "cts1_mo_tools.cts1_agenda_maker.main:main"
 cts1_make_bulk_uplink_agenda = "cts1_mo_tools.cts1_make_bulk_uplink_agenda:main"
 
 [dependency-groups]
