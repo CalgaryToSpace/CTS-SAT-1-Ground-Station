@@ -17,6 +17,10 @@ learn more about the tool.
 4. Run `uv run cts1_decode_satnogs_packets --input-csv "PATH" --output-csv "PATH"`
     * Replace the paths with your SatNOGS input data and desired output location.
 
+### Other Mission Ops Tools
+
+Refer to the `packages/cts1_mo_tools/README.md` file for a list of helpful local Mission Ops tools. For each tool, run `cts1_<tool_name> --help` to learn more about that tool.
+
 ## Development
 
 1. Complete the Getting Started section above.
