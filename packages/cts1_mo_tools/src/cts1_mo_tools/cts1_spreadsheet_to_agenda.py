@@ -24,13 +24,7 @@ class Args:
 # ---------------------------------------------------------------------
 
 
-def epoch_ms(dt: datetime | None) -> int:
-    if dt is None:
-        return 0
-    return int(dt.timestamp() * 1000)
-
-
-def parse_time(date: str, value: str | None) -> datetime | None:
+def parse_time(date: str, value: str | None) -> datetime | int | None:
     if value is None:
         return None
 
@@ -42,7 +36,40 @@ def parse_time(date: str, value: str | None) -> datetime | None:
     if value.lower() == "past":
         return datetime(1970, 1, 1, tzinfo=UTC)
 
-    return datetime.fromisoformat(f"{date}").replace(tzinfo=UTC)
+    if value == "0":
+        return 0
+
+    parts = value.split(":")
+
+    if len(parts) == 2:
+        hour, minute = map(int, parts)
+        second = 0
+    elif len(parts) == 3:
+        hour, minute, second = map(int, parts)
+    else:
+        raise ValueError(f"Invalid time: {value}")
+
+    year, month, day = map(int, date.split("-"))
+
+    return datetime(
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+        tzinfo=UTC,
+    )
+
+
+def epoch_ms(dt: datetime | int | None) -> int:
+    if dt is None:
+        return 0
+
+    if dt == 0:
+        return 0
+
+    return int(dt.timestamp() * 1000)
 
 
 def parse_interval(text: str | None) -> timedelta | None:
@@ -74,27 +101,10 @@ def substitute(text: str | None, mission_date: str) -> str:
     return str(text).replace("{DATE}", mission_date)
 
 
-def random_times(
-    start: datetime,
-    end: datetime,
-    count: int,
-) -> list[datetime]:
-    start_ts = int(start.timestamp())
-    end_ts = int(end.timestamp())
-
-    return sorted(
-        datetime.fromtimestamp(
-            random.randint(start_ts, end_ts),
-            tz=UTC,
-        )
-        for _ in range(count)
-    )
-
-
 def format_command(
     command: str,
-    tssent: datetime,
-    tsexec: datetime,
+    tssent: datetime | int,
+    tsexec: datetime | int,
     resp: str,
 ) -> str:
     command = command.strip("!")
@@ -135,7 +145,7 @@ def load_sheet(path: Path) -> tuple[str, list[dict[str, str]]]:
         first = row[0].strip()
 
         if first == "Start UTC":
-            mission_date = row[1].strip()
+            mission_date = row[1].strip().split("T")[0]
 
         if first == "Mode":
             header_row = i
@@ -170,6 +180,7 @@ def build_agenda(
     rows: list[dict[str, str]],
 ) -> list[str]:
     agenda: list[tuple[int, str]] = []
+    random_commands: list[str] = []
 
     for row in rows:
         mode = row["Mode"].strip().lower()
@@ -188,39 +199,15 @@ def build_agenda(
             if tssent is None or tsexec is None:
                 raise ValueError(f"Missing timestamp for {cmd}")
 
+            command = format_command(cmd, tssent, tsexec, resp)
+
+            # Normal repeats
             for _ in range(repeat):
-                agenda.append(
-                    (
-                        epoch_ms(tssent),
-                        format_command(cmd, tssent, tsexec, resp),
-                    )
-                )
+                agenda.append((epoch_ms(tssent), command))
 
-            if random_repeat:
-                window_start = parse_time(
-                    mission_date,
-                    row["Window Start"],
-                )
-
-                window_end = parse_time(
-                    mission_date,
-                    row["Window End"],
-                )
-
-                if window_start is None or window_end is None:
-                    raise ValueError(f"Random window missing for {cmd}")
-
-                for dt in random_times(
-                    window_start,
-                    window_end,
-                    random_repeat,
-                ):
-                    agenda.append(
-                        (
-                            epoch_ms(dt),
-                            format_command(cmd, dt, dt, resp),
-                        )
-                    )
+            # Random copies
+            for _ in range(random_repeat):
+                random_commands.append(command)
 
         elif mode == "interval":
             start = parse_time(
@@ -257,7 +244,13 @@ def build_agenda(
 
     agenda.sort(key=lambda x: x[0])
 
-    return [x[1] for x in agenda]
+    lines = [cmd for _, cmd in agenda]
+
+    for cmd in random_commands:
+        index = random.randint(0, len(lines))
+        lines.insert(index, cmd)
+
+    return lines
 
 
 # ---------------------------------------------------------------------
