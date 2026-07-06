@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import random
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -10,6 +11,7 @@ import pandas as pd
 import tyro
 
 UTC = timezone.utc
+DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 
 
 @dataclass
@@ -123,6 +125,16 @@ def format_command(
 # ---------------------------------------------------------------------
 
 
+def extract_date(value: str | None) -> str | None:
+    """Pull a YYYY-MM-DD date out of a cell that may hold extra text
+    (e.g. "2026-07-05T07:03:00" or "2026-07-05 00:00:00")."""
+    if not value:
+        return None
+
+    match = DATE_RE.search(str(value))
+    return match.group(1) if match else None
+
+
 def load_sheet(path: Path) -> tuple[str, list[dict[str, str]]]:
     if path.suffix.lower() == ".xlsx":
         df = pd.read_excel(path, header=None, dtype=str).fillna("")
@@ -131,35 +143,52 @@ def load_sheet(path: Path) -> tuple[str, list[dict[str, str]]]:
         with path.open(encoding="utf-8-sig", newline="") as f:
             rows = list(csv.reader(f))
 
-    mission_date = ""
-    header_row = None
+    date_value: str | None = None
+    start_utc_value: str | None = None
+    header_row: int | None = None
+    header_col = 0
 
     for i, row in enumerate(rows):
         if not row:
             continue
 
-        first = row[0].strip()
+        for j, cell in enumerate(row):
+            label = str(cell).strip()
 
-        if first == "Start UTC":
-            mission_date = row[1].strip().split("T")[0]
+            if label.lower() == "date" and date_value is None and j + 1 < len(row):
+                date_value = row[j + 1]
+            elif (
+                label.lower() == "start utc"
+                and start_utc_value is None
+                and j + 1 < len(row)
+            ):
+                start_utc_value = row[j + 1]
+            elif label == "Mode" and header_row is None:
+                header_row = i
+                header_col = j
 
-        if first == "Mode":
-            header_row = i
+        if header_row is not None:
             break
 
     if header_row is None:
         raise ValueError("Could not locate command table.")
 
-    headers = [c.strip() for c in rows[header_row]]
+    # Prefer an explicit "Date" row; fall back to a date embedded in
+    # "Start UTC" for templates that don't have a separate Date row.
+    mission_date = extract_date(date_value) or extract_date(start_utc_value) or ""
+
+    headers = [c.strip() for c in rows[header_row][header_col:]]
 
     commands: list[dict[str, str]] = []
 
     for row in rows[header_row + 1 :]:
-        if not any(str(x).strip() for x in row):
+        sliced = row[header_col:]
+
+        if not any(str(x).strip() for x in sliced):
             continue
 
-        row += [""] * (len(headers) - len(row))
-        commands.append(dict(zip(headers, row, strict=False)))
+        sliced = sliced + [""] * (len(headers) - len(sliced))
+        commands.append(dict(zip(headers, sliced, strict=False)))
 
     return mission_date, commands
 
