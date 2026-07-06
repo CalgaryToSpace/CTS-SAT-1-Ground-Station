@@ -24,20 +24,30 @@ class Args:
 # ---------------------------------------------------------------------
 
 
-def parse_time(date: str, value: str | None) -> datetime | int | None:
+def parse_time(date: str, value: str | None) -> datetime | None:
     if value is None:
         return None
 
     value = str(value).strip()
 
-    if value == "" or value.lower() == "nan":
+    if not value or value.lower() == "nan":
         return None
 
-    if value.lower() == "past":
-        return datetime(1970, 1, 1, tzinfo=UTC)
+    year, month, day = map(int, date.split("-"))
 
-    if value == "0":
-        return 0
+    if value.lower() == "past":
+        # Sentinel: the command was already sent before this mission
+        # window. Anchor it to the start of the mission year so it always
+        # sorts first, without needing a real recorded send time.
+        return datetime(year, 1, 1, tzinfo=UTC)
+
+    try:
+        if float(value) == 0:
+            # Sentinel: 0 means "no real timestamp" and should be emitted
+            # literally as epoch (0 ms), not resolved to the current time.
+            return datetime(1970, 1, 1, tzinfo=UTC)
+    except ValueError:
+        pass
 
     parts = value.split(":")
 
@@ -47,43 +57,23 @@ def parse_time(date: str, value: str | None) -> datetime | int | None:
     elif len(parts) == 3:
         hour, minute, second = map(int, parts)
     else:
-        raise ValueError(f"Invalid time: {value}")
+        raise ValueError(f"Invalid time format: {value}")
 
-    year, month, day = map(int, date.split("-"))
-
-    return datetime(
-        year,
-        month,
-        day,
-        hour,
-        minute,
-        second,
-        tzinfo=UTC,
-    )
+    return datetime(year, month, day, hour, minute, second, tzinfo=UTC)
 
 
-def epoch_ms(dt: datetime | int | None) -> int:
+def epoch_ms(dt: datetime | None) -> int:
     if dt is None:
         return 0
-
-    if dt == 0:
-        return 0
-
     return int(dt.timestamp() * 1000)
 
 
 def parse_interval(text: str | None) -> timedelta | None:
-    if text is None:
+    if not text:
         return None
 
-    text = str(text).strip()
-
-    if text == "":
-        return None
-
-    number, units = text.lower().split()
-
-    value = int(number)
+    number, units = str(text).strip().lower().split()
+    value = int(float(number))
 
     if units.startswith("sec"):
         return timedelta(seconds=value)
@@ -91,20 +81,31 @@ def parse_interval(text: str | None) -> timedelta | None:
     if units.startswith("min"):
         return timedelta(minutes=value)
 
-    raise ValueError(f"Unknown interval: {text}")
+    raise ValueError(f"Unknown interval format: {text}")
+
+
+def to_int(value: str | None, default: int = 0) -> int:
+    """Parse an int from a cell that may be blank or a float-like string.
+
+    xlsx cells read back as strings (e.g. via dtype=str) frequently come
+    through as "5.0" instead of "5", which plain int() cannot parse.
+    """
+    text = "" if value is None else str(value).strip()
+
+    if not text or text.lower() == "nan":
+        return default
+
+    return int(float(text))
 
 
 def substitute(text: str | None, mission_date: str) -> str:
-    if text is None:
-        return ""
-
-    return str(text).replace("{DATE}", mission_date)
+    return "" if text is None else str(text).replace("{DATE}", mission_date)
 
 
 def format_command(
     command: str,
-    tssent: datetime | int,
-    tsexec: datetime | int,
+    tssent: datetime,
+    tsexec: datetime,
     resp: str,
 ) -> str:
     command = command.strip("!")
@@ -114,10 +115,7 @@ def format_command(
     if resp:
         line += f"@resp_fname={resp}"
 
-    if not line.endswith("!"):
-        line += "!"
-
-    return line
+    return line + "!"
 
 
 # ---------------------------------------------------------------------
@@ -129,13 +127,11 @@ def load_sheet(path: Path) -> tuple[str, list[dict[str, str]]]:
     if path.suffix.lower() == ".xlsx":
         df = pd.read_excel(path, header=None, dtype=str).fillna("")
         rows = df.values.tolist()
-
     else:
         with path.open(encoding="utf-8-sig", newline="") as f:
             rows = list(csv.reader(f))
 
     mission_date = ""
-
     header_row = None
 
     for i, row in enumerate(rows):
@@ -152,8 +148,7 @@ def load_sheet(path: Path) -> tuple[str, list[dict[str, str]]]:
             break
 
     if header_row is None:
-        msg = "Could not locate command table."
-        raise ValueError(msg)
+        raise ValueError("Could not locate command table.")
 
     headers = [c.strip() for c in rows[header_row]]
 
@@ -164,7 +159,6 @@ def load_sheet(path: Path) -> tuple[str, list[dict[str, str]]]:
             continue
 
         row += [""] * (len(headers) - len(row))
-
         commands.append(dict(zip(headers, row, strict=False)))
 
     return mission_date, commands
@@ -186,40 +180,32 @@ def build_agenda(
         mode = row["Mode"].strip().lower()
 
         cmd = substitute(row["Telecommand"], mission_date)
-
         resp = substitute(row["resp_fname"], mission_date)
 
-        repeat = int(row["Repeat"] or 0)
-        random_repeat = int(row["Random"] or 0)
+        repeat = to_int(row["Repeat"])
+        random_repeat = to_int(row["Random"])
 
         if mode == "single":
             tssent = parse_time(mission_date, row["tssent (UTC)"])
+            if tssent is None:
+                raise ValueError(f"Missing tssent for {cmd}")
+
             tsexec = parse_time(mission_date, row["tsexec (UTC)"])
 
-            if tssent is None or tsexec is None:
-                raise ValueError(f"Missing timestamp for {cmd}")
+            if tsexec is None:
+                raise ValueError(f"Missing tsexec for {cmd}")
 
             command = format_command(cmd, tssent, tsexec, resp)
 
-            # Normal repeats
             for _ in range(repeat):
                 agenda.append((epoch_ms(tssent), command))
 
-            # Random copies
             for _ in range(random_repeat):
                 random_commands.append(command)
 
         elif mode == "interval":
-            start = parse_time(
-                mission_date,
-                row["Window Start"],
-            )
-
-            end = parse_time(
-                mission_date,
-                row["Window End"],
-            )
-
+            start = parse_time(mission_date, row["Window Start"])
+            end = parse_time(mission_date, row["Window End"])
             interval = parse_interval(row["Interval"])
 
             if start is None or end is None or interval is None:
@@ -231,15 +217,9 @@ def build_agenda(
                 agenda.append(
                     (
                         epoch_ms(current),
-                        format_command(
-                            cmd,
-                            current,
-                            current,
-                            resp,
-                        ),
+                        format_command(cmd, current, current, resp),
                     )
                 )
-
                 current += interval
 
     agenda.sort(key=lambda x: x[0])
@@ -247,8 +227,7 @@ def build_agenda(
     lines = [cmd for _, cmd in agenda]
 
     for cmd in random_commands:
-        index = random.randint(0, len(lines))
-        lines.insert(index, cmd)
+        lines.insert(random.randint(0, len(lines)), cmd)
 
     return lines
 
@@ -271,14 +250,9 @@ def main() -> None:
 
     agenda = build_agenda(mission_date, rows)
 
-    args.output_file.write_text(
-        "\n".join(agenda),
-        encoding="utf-8",
-    )
+    args.output_file.write_text("\n".join(agenda), encoding="utf-8")
 
-    print(
-        f"Generated {len(agenda)} commands → {args.output_file}",
-    )
+    print(f"Generated {len(agenda)} commands → {args.output_file}")
 
 
 if __name__ == "__main__":
