@@ -8,7 +8,6 @@ dependencies = [
     "tyro",
     "polars",
     "loguru",
-    "pandas",
     "openpyxl",
     "ordered-set",
     "dearpygui",

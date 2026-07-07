@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-import pandas as pd
+import polars as pl
 import tyro
 
 DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
@@ -170,11 +170,8 @@ def extract_date(value: str | None) -> str | None:
 
 def _read_raw_rows(path: Path) -> list[list[str]]:
     if path.suffix.lower() == ".xlsx":
-        raw = pd.read_excel(  # pyright: ignore[reportUnknownMemberType]
-            path, header=None, dtype=str
-        )
-        df = raw.fillna("")
-        return df.to_numpy().tolist()
+        df = pl.read_excel(path, has_header=False, engine="openpyxl")
+        return [list(row) for row in df.fill_null("").rows()]
 
     with path.open(encoding="utf-8-sig", newline="") as f:
         return list(csv.reader(f))
