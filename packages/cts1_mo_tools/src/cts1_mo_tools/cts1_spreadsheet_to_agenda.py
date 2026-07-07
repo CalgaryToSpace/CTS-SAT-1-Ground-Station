@@ -4,10 +4,10 @@ import csv
 import random
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 
-import polars as pl
+import openpyxl
 import tyro
 
 DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
@@ -168,10 +168,33 @@ def extract_date(value: str | None) -> str | None:
     return match.group(1) if match else None
 
 
+def _cell_to_str(value: object) -> str:
+    """Stringify a raw openpyxl cell value."""
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, time):
+        return value.strftime("%H:%M:%S")
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
 def _read_raw_rows(path: Path) -> list[list[str]]:
     if path.suffix.lower() == ".xlsx":
-        df = pl.read_excel(path, has_header=False, engine="openpyxl")
-        return [list(row) for row in df.fill_null("").rows()]
+        workbook = openpyxl.load_workbook(path, data_only=True, read_only=True)
+        worksheet = workbook.active
+
+        if worksheet is None:
+            return []
+
+        return [
+            [_cell_to_str(cell) for cell in row]
+            for row in worksheet.iter_rows(values_only=True)
+        ]
 
     with path.open(encoding="utf-8-sig", newline="") as f:
         return list(csv.reader(f))
