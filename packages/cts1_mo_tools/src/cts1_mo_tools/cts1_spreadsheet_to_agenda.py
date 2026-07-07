@@ -4,14 +4,17 @@ import csv
 import random
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
 import tyro
 
-UTC = timezone.utc
 DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
+
+# Number of ":"-separated parts in a "HH:MM" / "HH:MM:SS" time string.
+_TIME_PARTS_HOUR_MINUTE = 2
+_TIME_PARTS_HOUR_MINUTE_SECOND = 3
 
 
 @dataclass
@@ -40,9 +43,6 @@ def parse_time(date: str, value: str | None) -> datetime | None:
     year, month, day = map(int, date.split("-"))
 
     if value.lower() == "past":
-        # Sentinel: the command was already sent before this mission
-        # window. Anchor it to the start of the mission year so it always
-        # sorts first, without needing a real recorded send time.
         return datetime(year, 1, 1, tzinfo=UTC)
 
     try:
@@ -55,13 +55,14 @@ def parse_time(date: str, value: str | None) -> datetime | None:
 
     parts = value.split(":")
 
-    if len(parts) == 2:
+    if len(parts) == _TIME_PARTS_HOUR_MINUTE:
         hour, minute = map(int, parts)
         second = 0
-    elif len(parts) == 3:
+    elif len(parts) == _TIME_PARTS_HOUR_MINUTE_SECOND:
         hour, minute, second = map(int, parts)
     else:
-        raise ValueError(f"Invalid time format: {value}")
+        msg = f"Invalid time format: {value}"
+        raise ValueError(msg)
 
     return datetime(year, month, day, hour, minute, second, tzinfo=UTC)
 
@@ -85,7 +86,8 @@ def parse_interval(text: str | None) -> timedelta | None:
     if units.startswith("min"):
         return timedelta(minutes=value)
 
-    raise ValueError(f"Unknown interval format: {text}")
+    msg = f"Unknown interval format: {text}"
+    raise ValueError(msg)
 
 
 def to_int(value: str | None, default: int = 0) -> int:
@@ -116,15 +118,14 @@ def format_epoch_ms(ms_text: str) -> str:
 
 
 def annotate_readable(line: str) -> str:
-    """Prefix a command line with human-readable UTC times for
-    @tssent=/@tsexec=, mirroring the "--readable" companion script."""
+    """Prefix a command line with human-readable UTC times for @tssent=/@tsexec="""
     tssent_match = TSSENT_RE.search(line)
     tsexec_match = TSEXEC_RE.search(line)
 
     if not tssent_match and not tsexec_match:
         return line
 
-    parts = []
+    parts: list[str] = []
 
     if tssent_match:
         parts.append(f"tssent: {format_epoch_ms(tssent_match.group(1))} UTC")
@@ -158,7 +159,8 @@ def format_command(
 
 def extract_date(value: str | None) -> str | None:
     """Pull a YYYY-MM-DD date out of a cell that may hold extra text
-    (e.g. "2026-07-05T07:03:00" or "2026-07-05 00:00:00")."""
+    (e.g. "2026-07-05T07:03:00" or "2026-07-05 00:00:00").
+    """
     if not value:
         return None
 
@@ -166,18 +168,30 @@ def extract_date(value: str | None) -> str | None:
     return match.group(1) if match else None
 
 
-def load_sheet(path: Path) -> tuple[str, list[dict[str, str]]]:
+def _read_raw_rows(path: Path) -> list[list[str]]:
     if path.suffix.lower() == ".xlsx":
-        df = pd.read_excel(path, header=None, dtype=str).fillna("")
-        rows = df.values.tolist()
-    else:
-        with path.open(encoding="utf-8-sig", newline="") as f:
-            rows = list(csv.reader(f))
+        raw = pd.read_excel(  # pyright: ignore[reportUnknownMemberType]
+            path, header=None, dtype=str
+        )
+        df = raw.fillna("")
+        return df.to_numpy().tolist()
 
+    with path.open(encoding="utf-8-sig", newline="") as f:
+        return list(csv.reader(f))
+
+
+@dataclass
+class _HeaderInfo:
+    row: int
+    col: int
+    date_value: str | None
+    start_utc_value: str | None
+
+
+def _find_header(rows: list[list[str]]) -> _HeaderInfo:
+    """Scan rows for the "Date"/"Start UTC" labels and the "Mode" header"""
     date_value: str | None = None
     start_utc_value: str | None = None
-    header_row: int | None = None
-    header_col = 0
 
     for i, row in enumerate(rows):
         if not row:
@@ -194,26 +208,22 @@ def load_sheet(path: Path) -> tuple[str, list[dict[str, str]]]:
                 and j + 1 < len(row)
             ):
                 start_utc_value = row[j + 1]
-            elif label == "Mode" and header_row is None:
-                header_row = i
-                header_col = j
+            elif label == "Mode":
+                return _HeaderInfo(i, j, date_value, start_utc_value)
 
-        if header_row is not None:
-            break
+    msg = "Could not locate command table."
+    raise ValueError(msg)
 
-    if header_row is None:
-        raise ValueError("Could not locate command table.")
 
-    # Prefer an explicit "Date" row; fall back to a date embedded in
-    # "Start UTC" for templates that don't have a separate Date row.
-    mission_date = extract_date(date_value) or extract_date(start_utc_value) or ""
-
-    headers = [c.strip() for c in rows[header_row][header_col:]]
-
+def _extract_commands(
+    rows: list[list[str]],
+    header: _HeaderInfo,
+) -> list[dict[str, str]]:
+    headers = [c.strip() for c in rows[header.row][header.col :]]
     commands: list[dict[str, str]] = []
 
-    for row in rows[header_row + 1 :]:
-        sliced = row[header_col:]
+    for row in rows[header.row + 1 :]:
+        sliced = row[header.col :]
 
         if not any(str(x).strip() for x in sliced):
             continue
@@ -221,12 +231,74 @@ def load_sheet(path: Path) -> tuple[str, list[dict[str, str]]]:
         sliced = sliced + [""] * (len(headers) - len(sliced))
         commands.append(dict(zip(headers, sliced, strict=False)))
 
-    return mission_date, commands
+    return commands
+
+
+def load_sheet(path: Path) -> tuple[str, list[dict[str, str]]]:
+    rows = _read_raw_rows(path)
+    header = _find_header(rows)
+
+    mission_date = (
+        extract_date(header.date_value) or extract_date(header.start_utc_value) or ""
+    )
+
+    return mission_date, _extract_commands(rows, header)
 
 
 # ---------------------------------------------------------------------
 # Generator
 # ---------------------------------------------------------------------
+
+
+@dataclass
+class _RowContext:
+    row: dict[str, str]
+    mission_date: str
+    cmd: str
+    resp: str
+
+
+def _build_single_entries(
+    ctx: _RowContext,
+    repeat: int,
+    random_repeat: int,
+) -> tuple[list[tuple[int, str]], list[str]]:
+    tssent = parse_time(ctx.mission_date, ctx.row["tssent (UTC)"])
+    if tssent is None:
+        msg = f"Missing tssent for {ctx.cmd}"
+        raise ValueError(msg)
+
+    tsexec = parse_time(ctx.mission_date, ctx.row["tsexec (UTC)"])
+    if tsexec is None:
+        msg = f"Missing tsexec for {ctx.cmd}"
+        raise ValueError(msg)
+
+    command = format_command(ctx.cmd, tssent, tsexec, ctx.resp)
+
+    entries = [(epoch_ms(tssent), command) for _ in range(repeat)]
+    random_entries = [command for _ in range(random_repeat)]
+
+    return entries, random_entries
+
+
+def _build_interval_entries(ctx: _RowContext) -> list[tuple[int, str]]:
+    start = parse_time(ctx.mission_date, ctx.row["Window Start"])
+    end = parse_time(ctx.mission_date, ctx.row["Window End"])
+    interval = parse_interval(ctx.row["Interval"])
+
+    if start is None or end is None or interval is None:
+        msg = f"Interval missing for {ctx.cmd}"
+        raise ValueError(msg)
+
+    entries: list[tuple[int, str]] = []
+    current = start
+
+    while current <= end:
+        command = format_command(ctx.cmd, current, current, ctx.resp)
+        entries.append((epoch_ms(current), command))
+        current += interval
+
+    return entries
 
 
 def build_agenda(
@@ -238,56 +310,26 @@ def build_agenda(
 
     for row in rows:
         mode = row["Mode"].strip().lower()
-
         cmd = substitute(row["Telecommand"], mission_date)
         resp = substitute(row["resp_fname"], mission_date)
-
-        repeat = to_int(row["Repeat"])
-        random_repeat = to_int(row["Random"])
+        ctx = _RowContext(row=row, mission_date=mission_date, cmd=cmd, resp=resp)
 
         if mode == "single":
-            tssent = parse_time(mission_date, row["tssent (UTC)"])
-            if tssent is None:
-                raise ValueError(f"Missing tssent for {cmd}")
-
-            tsexec = parse_time(mission_date, row["tsexec (UTC)"])
-
-            if tsexec is None:
-                raise ValueError(f"Missing tsexec for {cmd}")
-
-            command = format_command(cmd, tssent, tsexec, resp)
-
-            for _ in range(repeat):
-                agenda.append((epoch_ms(tssent), command))
-
-            for _ in range(random_repeat):
-                random_commands.append(command)
+            repeat = to_int(row["Repeat"])
+            random_repeat = to_int(row["Random"])
+            entries, random_entries = _build_single_entries(ctx, repeat, random_repeat)
+            agenda.extend(entries)
+            random_commands.extend(random_entries)
 
         elif mode == "interval":
-            start = parse_time(mission_date, row["Window Start"])
-            end = parse_time(mission_date, row["Window End"])
-            interval = parse_interval(row["Interval"])
-
-            if start is None or end is None or interval is None:
-                raise ValueError(f"Interval missing for {cmd}")
-
-            current = start
-
-            while current <= end:
-                agenda.append(
-                    (
-                        epoch_ms(current),
-                        format_command(cmd, current, current, resp),
-                    )
-                )
-                current += interval
+            agenda.extend(_build_interval_entries(ctx))
 
     agenda.sort(key=lambda x: x[0])
 
     lines = [cmd for _, cmd in agenda]
 
     for cmd in random_commands:
-        lines.insert(random.randint(0, len(lines)), cmd)
+        lines.insert(random.randint(0, len(lines)), cmd)  # noqa: S311
 
     return lines
 
@@ -306,13 +348,14 @@ def main() -> None:
     mission_date, rows = load_sheet(args.input_file)
 
     if not mission_date:
-        raise ValueError("Mission date not found.")
+        msg = "Mission date not found."
+        raise ValueError(msg)
 
     agenda = build_agenda(mission_date, rows)
 
     args.output_file.write_text("\n".join(agenda), encoding="utf-8")
 
-    print(f"Generated {len(agenda)} commands → {args.output_file}")
+    print(f"Generated {len(agenda)} commands → {args.output_file}")  # noqa: T201
 
     if args.readable:
         readable_path = args.output_file.with_name(
@@ -321,7 +364,7 @@ def main() -> None:
         readable_lines = [annotate_readable(line) for line in agenda]
         readable_path.write_text("\n".join(readable_lines), encoding="utf-8")
 
-        print(f"Saved readable version → {readable_path}")
+        print(f"Saved readable version → {readable_path}")  # noqa: T201
 
 
 if __name__ == "__main__":
