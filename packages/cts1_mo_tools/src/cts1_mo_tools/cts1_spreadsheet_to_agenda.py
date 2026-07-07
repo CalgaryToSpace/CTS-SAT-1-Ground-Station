@@ -19,6 +19,8 @@ class Args:
     input_file: Path
     output_file: Path = Path("agenda_output.txt")
     seed: int | None = None
+    readable: bool = False
+    """Also write a human-readable copy with tssent/tsexec decoded to UTC."""
 
 
 # ---------------------------------------------------------------------
@@ -102,6 +104,35 @@ def to_int(value: str | None, default: int = 0) -> int:
 
 def substitute(text: str | None, mission_date: str) -> str:
     return "" if text is None else str(text).replace("{DATE}", mission_date)
+
+
+TSSENT_RE = re.compile(r"@tssent=(\d+)")
+TSEXEC_RE = re.compile(r"@tsexec=(\d+)")
+
+
+def format_epoch_ms(ms_text: str) -> str:
+    dt = datetime.fromtimestamp(int(ms_text) / 1000, tz=UTC)
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def annotate_readable(line: str) -> str:
+    """Prefix a command line with human-readable UTC times for
+    @tssent=/@tsexec=, mirroring the "--readable" companion script."""
+    tssent_match = TSSENT_RE.search(line)
+    tsexec_match = TSEXEC_RE.search(line)
+
+    if not tssent_match and not tsexec_match:
+        return line
+
+    parts = []
+
+    if tssent_match:
+        parts.append(f"tssent: {format_epoch_ms(tssent_match.group(1))} UTC")
+
+    if tsexec_match:
+        parts.append(f"tsexec: {format_epoch_ms(tsexec_match.group(1))} UTC")
+
+    return " | ".join(parts) + " | " + line
 
 
 def format_command(
@@ -282,6 +313,15 @@ def main() -> None:
     args.output_file.write_text("\n".join(agenda), encoding="utf-8")
 
     print(f"Generated {len(agenda)} commands → {args.output_file}")
+
+    if args.readable:
+        readable_path = args.output_file.with_name(
+            f"{args.output_file.stem}_readable{args.output_file.suffix}"
+        )
+        readable_lines = [annotate_readable(line) for line in agenda]
+        readable_path.write_text("\n".join(readable_lines), encoding="utf-8")
+
+        print(f"Saved readable version → {readable_path}")
 
 
 if __name__ == "__main__":
