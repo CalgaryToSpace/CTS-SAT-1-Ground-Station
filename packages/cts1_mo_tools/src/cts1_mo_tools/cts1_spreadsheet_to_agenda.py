@@ -1,5 +1,4 @@
-from __future__ import annotations
-
+import contextlib
 import csv
 import random
 import re
@@ -12,9 +11,7 @@ import tyro
 
 DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 
-# Number of ":"-separated parts in a "HH:MM" / "HH:MM:SS" time string.
-_TIME_PARTS_HOUR_MINUTE = 2
-_TIME_PARTS_HOUR_MINUTE_SECOND = 3
+_TIME_FORMATS = ("%H:%M:%S", "%H:%M")
 
 
 @dataclass
@@ -22,8 +19,7 @@ class Args:
     input_file: Path
     output_file: Path = Path("agenda_output.txt")
     seed: int | None = None
-    readable: bool = False
-    """Also write a human-readable copy with tssent/tsexec decoded to UTC."""
+    readable: bool = False  # Human-readable copy with tssent/tsexec decoded to UTC.
 
 
 # ---------------------------------------------------------------------
@@ -31,7 +27,20 @@ class Args:
 # ---------------------------------------------------------------------
 
 
-def parse_time(date: str, value: str | None) -> datetime | None:
+def _parse_time_of_day(value: str) -> time:
+    for fmt in _TIME_FORMATS:
+        with contextlib.suppress(ValueError):
+            return datetime.strptime(value, fmt).replace(tzinfo=UTC).time()
+
+    msg = f"Invalid time format: {value}"
+    raise ValueError(msg)
+
+
+def parse_time(
+    mission_date: str,
+    mission_start: datetime,
+    value: str | None,
+) -> datetime | None:
     if value is None:
         return None
 
@@ -40,31 +49,32 @@ def parse_time(date: str, value: str | None) -> datetime | None:
     if not value or value.lower() == "nan":
         return None
 
-    year, month, day = map(int, date.split("-"))
-
     if value.lower() == "past":
-        return datetime(year, 1, 1, tzinfo=UTC)
+        year = int(mission_date.split("-", maxsplit=1)[0])
+        return datetime(1970, 1, 1, tzinfo=UTC)
 
     try:
         if float(value) == 0:
-            # Sentinel: 0 means "no real timestamp" and should be emitted
-            # literally as epoch (0 ms), not resolved to the current time.
             return datetime(1970, 1, 1, tzinfo=UTC)
     except ValueError:
         pass
 
-    parts = value.split(":")
+    parsed_time = _parse_time_of_day(value)
+    year, month, day = map(int, mission_date.split("-"))
+    candidate = datetime(
+        year,
+        month,
+        day,
+        parsed_time.hour,
+        parsed_time.minute,
+        parsed_time.second,
+        tzinfo=UTC,
+    )
 
-    if len(parts) == _TIME_PARTS_HOUR_MINUTE:
-        hour, minute = map(int, parts)
-        second = 0
-    elif len(parts) == _TIME_PARTS_HOUR_MINUTE_SECOND:
-        hour, minute, second = map(int, parts)
-    else:
-        msg = f"Invalid time format: {value}"
-        raise ValueError(msg)
+    if candidate < mission_start:
+        candidate += timedelta(days=1)
 
-    return datetime(year, month, day, hour, minute, second, tzinfo=UTC)
+    return candidate
 
 
 def epoch_ms(dt: datetime | None) -> int:
@@ -78,7 +88,7 @@ def parse_interval(text: str | None) -> timedelta | None:
         return None
 
     number, units = str(text).strip().lower().split()
-    value = int(float(number))
+    value = float(number)
 
     if units.startswith("sec"):
         return timedelta(seconds=value)
@@ -91,11 +101,6 @@ def parse_interval(text: str | None) -> timedelta | None:
 
 
 def to_int(value: str | None, default: int = 0) -> int:
-    """Parse an int from a cell that may be blank or a float-like string.
-
-    xlsx cells read back as strings (e.g. via dtype=str) frequently come
-    through as "5.0" instead of "5", which plain int() cannot parse.
-    """
     text = "" if value is None else str(value).strip()
 
     if not text or text.lower() == "nan":
@@ -113,8 +118,8 @@ TSEXEC_RE = re.compile(r"@tsexec=(\d+)")
 
 
 def format_epoch_ms(ms_text: str) -> str:
-    dt = datetime.fromtimestamp(int(ms_text) / 1000, tz=UTC)
-    return dt.strftime("%Y-%m-%d %H:%M:%S")
+    dt = datetime(1970, 1, 1, tzinfo=UTC) + timedelta(milliseconds=int(ms_text))
+    return dt.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def annotate_readable(line: str) -> str:
@@ -128,10 +133,10 @@ def annotate_readable(line: str) -> str:
     parts: list[str] = []
 
     if tssent_match:
-        parts.append(f"tssent: {format_epoch_ms(tssent_match.group(1))} UTC")
+        parts.append(f"tssent: {format_epoch_ms(tssent_match.group(1))}")
 
     if tsexec_match:
-        parts.append(f"tsexec: {format_epoch_ms(tsexec_match.group(1))} UTC")
+        parts.append(f"tsexec: {format_epoch_ms(tsexec_match.group(1))}")
 
     return " | ".join(parts) + " | " + line
 
@@ -166,6 +171,27 @@ def extract_date(value: str | None) -> str | None:
 
     match = DATE_RE.search(str(value))
     return match.group(1) if match else None
+
+
+def _parse_mission_start(mission_date: str, start_utc_value: str | None) -> datetime:
+    """Resolve the mission's exact start datetime, used as the anchor for
+    the midnight-rollover logic in parse_time.
+    """
+    if start_utc_value:
+        try:
+            parsed = datetime.fromisoformat(start_utc_value.strip())
+        except ValueError as exc:
+            msg = f"Could not parse Start UTC value: {start_utc_value!r}"
+            raise ValueError(msg) from exc
+
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+    year, month, day = map(int, mission_date.split("-"))
+    return datetime(year, month, day, tzinfo=UTC)
+
+
+def _normalize_header(text: str) -> str:
+    return " ".join(text.split())
 
 
 def _cell_to_str(value: object) -> str:
@@ -218,7 +244,7 @@ def _find_header(rows: list[list[str]]) -> _HeaderInfo:
             continue
 
         for j, cell in enumerate(row):
-            label = str(cell).strip()
+            label = _normalize_header(str(cell).strip())
 
             if label.lower() == "date" and date_value is None and j + 1 < len(row):
                 date_value = row[j + 1]
@@ -239,7 +265,7 @@ def _extract_commands(
     rows: list[list[str]],
     header: _HeaderInfo,
 ) -> list[dict[str, str]]:
-    headers = [c.strip() for c in rows[header.row][header.col :]]
+    headers = [_normalize_header(c.strip()) for c in rows[header.row][header.col :]]
     commands: list[dict[str, str]] = []
 
     for row in rows[header.row + 1 :]:
@@ -254,7 +280,7 @@ def _extract_commands(
     return commands
 
 
-def load_sheet(path: Path) -> tuple[str, list[dict[str, str]]]:
+def load_sheet(path: Path) -> tuple[str, datetime, list[dict[str, str]]]:
     rows = _read_raw_rows(path)
     header = _find_header(rows)
 
@@ -262,7 +288,13 @@ def load_sheet(path: Path) -> tuple[str, list[dict[str, str]]]:
         extract_date(header.date_value) or extract_date(header.start_utc_value) or ""
     )
 
-    return mission_date, _extract_commands(rows, header)
+    if not mission_date:
+        msg = "Mission date not found."
+        raise ValueError(msg)
+
+    mission_start = _parse_mission_start(mission_date, header.start_utc_value)
+
+    return mission_date, mission_start, _extract_commands(rows, header)
 
 
 # ---------------------------------------------------------------------
@@ -274,6 +306,7 @@ def load_sheet(path: Path) -> tuple[str, list[dict[str, str]]]:
 class _RowContext:
     row: dict[str, str]
     mission_date: str
+    mission_start: datetime
     cmd: str
     resp: str
 
@@ -283,12 +316,13 @@ def _build_single_entries(
     repeat: int,
     random_repeat: int,
 ) -> tuple[list[tuple[int, str]], list[str]]:
-    tssent = parse_time(ctx.mission_date, ctx.row["tssent (UTC)"])
+    tssent = parse_time(ctx.mission_date, ctx.mission_start, ctx.row["tssent (UTC)"])
     if tssent is None:
         msg = f"Missing tssent for {ctx.cmd}"
         raise ValueError(msg)
-
-    tsexec = parse_time(ctx.mission_date, ctx.row["tsexec (UTC)"])
+    tsexec = parse_time(
+        ctx.mission_date, ctx.mission_start, ctx.row["tsexec Start (UTC)"]
+    )
     if tsexec is None:
         msg = f"Missing tsexec for {ctx.cmd}"
         raise ValueError(msg)
@@ -302,8 +336,10 @@ def _build_single_entries(
 
 
 def _build_interval_entries(ctx: _RowContext) -> list[tuple[int, str]]:
-    start = parse_time(ctx.mission_date, ctx.row["Window Start"])
-    end = parse_time(ctx.mission_date, ctx.row["Window End"])
+    start = parse_time(
+        ctx.mission_date, ctx.mission_start, ctx.row["tsexec Start (UTC)"]
+    )
+    end = parse_time(ctx.mission_date, ctx.mission_start, ctx.row["tsexec End (UTC)"])
     interval = parse_interval(ctx.row["Interval"])
 
     if start is None or end is None or interval is None:
@@ -323,16 +359,26 @@ def _build_interval_entries(ctx: _RowContext) -> list[tuple[int, str]]:
 
 def build_agenda(
     mission_date: str,
+    mission_start: datetime,
     rows: list[dict[str, str]],
 ) -> list[str]:
-    agenda: list[tuple[int, str]] = []
+
+    agenda: list[
+        tuple[int, str]
+    ] = []  # Tuple of (epoch_ms of tssent, the formatted command line)
     random_commands: list[str] = []
 
     for row in rows:
         mode = row["Mode"].strip().lower()
         cmd = substitute(row["Telecommand"], mission_date)
         resp = substitute(row["resp_fname"], mission_date)
-        ctx = _RowContext(row=row, mission_date=mission_date, cmd=cmd, resp=resp)
+        ctx = _RowContext(
+            row=row,
+            mission_date=mission_date,
+            mission_start=mission_start,
+            cmd=cmd,
+            resp=resp,
+        )
 
         if mode == "single":
             repeat = to_int(row["Repeat"])
@@ -343,6 +389,10 @@ def build_agenda(
 
         elif mode == "interval":
             agenda.extend(_build_interval_entries(ctx))
+
+        else:
+            msg = "Invalid Mode (Options: Single or Interval)"
+            raise ValueError(msg)
 
     agenda.sort(key=lambda x: x[0])
 
@@ -365,13 +415,9 @@ def main() -> None:
     if args.seed is not None:
         random.seed(args.seed)
 
-    mission_date, rows = load_sheet(args.input_file)
+    mission_date, mission_start, rows = load_sheet(args.input_file)
 
-    if not mission_date:
-        msg = "Mission date not found."
-        raise ValueError(msg)
-
-    agenda = build_agenda(mission_date, rows)
+    agenda = build_agenda(mission_date, mission_start, rows)
 
     args.output_file.write_text("\n".join(agenda), encoding="utf-8")
 
