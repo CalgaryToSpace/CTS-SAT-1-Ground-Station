@@ -7,3 +7,4 @@ Mission Operations tools that are mostly independent of the ground station capab
 * `cts1_decode_satnogs_packets`
 * `cts1_agenda_maker`
 * `cts1_make_bulk_uplink_agenda`
+* `cts1_spreadsheet_to_agenda`

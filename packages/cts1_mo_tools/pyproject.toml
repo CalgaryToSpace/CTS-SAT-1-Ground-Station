@@ -8,6 +8,7 @@ dependencies = [
     "tyro",
     "polars",
     "loguru",
+    "openpyxl",
     "ordered-set",
     "dearpygui",
     "requests",
@@ -20,6 +21,7 @@ dependencies = [
 cts1_decode_satnogs_packets = "cts1_mo_tools.cts1_decode_satnogs_packets:main"
 cts1_agenda_maker = "cts1_mo_tools.cts1_agenda_maker.main:main"
 cts1_make_bulk_uplink_agenda = "cts1_mo_tools.cts1_make_bulk_uplink_agenda:main"
+cts1_spreadsheet_to_agenda = "cts1_mo_tools.cts1_spreadsheet_to_agenda:main"
 
 [dependency-groups]
 dev = [
