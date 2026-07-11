@@ -228,12 +228,17 @@ def decode_beacon_basic_packet(payload: bytes) -> dict[str, Any]:
     end_ok = end_raw == b"END\x00"
     sat_name = rf["satellite_name"].decode("ascii", errors="replace").rstrip("\x00")
     epoch_ms = rf["unix_epoch_time_ms"]
-    utc_time = (
-        datetime.datetime.fromtimestamp(epoch_ms / 1000.0, datetime.UTC).isoformat()
-        + "Z"
-        if epoch_ms
-        else None
-    )
+    utc_time = None
+    if epoch_ms:
+        try:
+            utc_time = (
+                datetime.datetime.fromtimestamp(
+                    epoch_ms / 1000.0, datetime.UTC
+                ).isoformat()
+                + "Z"
+            )
+        except OSError:
+            utc_time = None
 
     data = {
         "packet_type": e(PACKET_TYPE_MAP, rf["packet_type"]),
