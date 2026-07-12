@@ -596,21 +596,53 @@ async def index() -> None:  # noqa: C901, PLR0915
                 ).classes("text-gray-400 mt-2")
                 coverage_chart = ui.echart(
                     {
-                        "xAxis": {"type": "time"},
+                        # Axis ticks/labels are computed in UTC (see xAxis
+                        # below); the tooltip formatter additionally shows
+                        # local time for convenience.
+                        "useUTC": True,
+                        "xAxis": {
+                            "type": "time",
+                            "name": "Time (UTC)",
+                            "nameLocation": "middle",
+                            "nameGap": 40,
+                            "axisLabel": {
+                                "formatter": "{yyyy}-{MM}-{dd}\n{HH}:{mm} UTC",
+                            },
+                        },
                         "yAxis": {
                             "type": "value",
+                            "name": "Observations",
                             "minInterval": 1,
                             "min": 0,
                         },
                         "tooltip": {
                             "trigger": "axis",
                             "axisPointer": {"type": "cross"},
+                            ":formatter": (
+                                "params => {"
+                                "  if (!params || !params.length) return '';"
+                                "  const p = params[0];"
+                                "  const ts = p.value[0];"
+                                "  const d = new Date(ts);"
+                                "  const pad = n => String(n).padStart(2, '0');"
+                                "  const utc = `${d.getUTCFullYear()}-"
+                                "${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} "
+                                "${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:"
+                                "${pad(d.getUTCSeconds())} UTC`;"
+                                "  const local = `${d.getFullYear()}-"
+                                "${pad(d.getMonth() + 1)}-${pad(d.getDate())} "
+                                "${pad(d.getHours())}:${pad(d.getMinutes())}:"
+                                "${pad(d.getSeconds())} Local`;"
+                                "  return `Observations active: ${p.value[1]}"
+                                "<br/>${utc}<br/>${local}`;"
+                                "}"
+                            ),
                         },
                         "grid": {
-                            "left": 50,
+                            "left": 60,
                             "right": 20,
                             "top": 20,
-                            "bottom": 30,
+                            "bottom": 60,
                         },
                         "series": [
                             {
