@@ -437,6 +437,38 @@ def _make_obs_row(
     return row
 
 
+def _build_coverage_series(observations: list[dict[str, Any]]) -> list[list[float]]:
+    """Build a strictly-stepped [timestamp_ms, concurrent_count] series.
+
+    Each observation contributes a +1 event at AOS and a -1 event at LOS.
+    Every event is emitted as two points sharing the same x (the count
+    just before, then just after), so a plain straight-line series draws
+    vertical jumps at event times and flat horizontal runs in between --
+    no reliance on ECharts' own step interpolation.
+    """
+    events: list[tuple[datetime, int]] = []
+    for obs in observations:
+        start_dt = parse_iso(obs["start"])
+        end_dt = parse_iso(obs["end"])
+
+        events.append((start_dt, 1))
+        events.append((end_dt, -1))
+
+    if not events:
+        return []
+
+    events.sort(key=lambda e: e[0])
+
+    points: list[list[float]] = []
+    count = 0
+    for t, delta in events:
+        ts_ms = t.timestamp() * 1000
+        points.append([ts_ms, count])
+        count += delta
+        points.append([ts_ms, count])
+    return points
+
+
 async def _fetch_pages(
     sat_id: str,
     start_gt_filter: datetime,
@@ -557,6 +589,41 @@ async def index() -> None:  # noqa: C901, PLR0915
                     selection="multiple",
                 ).classes("w-full")
                 obs_table.props("dense bordered separator=cell")
+
+                ui.label(
+                    "Observation coverage: number of observations active at "
+                    "each point in time."
+                ).classes("text-gray-400 mt-2")
+                coverage_chart = ui.echart(
+                    {
+                        "xAxis": {"type": "time"},
+                        "yAxis": {
+                            "type": "value",
+                            "minInterval": 1,
+                            "min": 0,
+                        },
+                        "tooltip": {
+                            "trigger": "axis",
+                            "axisPointer": {"type": "cross"},
+                        },
+                        "grid": {
+                            "left": 50,
+                            "right": 20,
+                            "top": 20,
+                            "bottom": 30,
+                        },
+                        "series": [
+                            {
+                                "type": "line",
+                                "data": [],
+                                "showSymbol": False,
+                                "step": False,
+                                "lineStyle": {"width": 2},
+                                "areaStyle": {"opacity": 0.15},
+                            }
+                        ],
+                    }
+                ).classes("w-full h-64")
 
                 with ui.row().classes("items-center"):
                     obs_count_text = ui.label("").classes("text-gray-400")
@@ -679,6 +746,11 @@ async def index() -> None:  # noqa: C901, PLR0915
 
     obs_table.on("selection", _on_selection_change)
 
+    def _update_coverage_chart() -> None:
+        series = coverage_chart.options["series"][0]
+        series["data"] = _build_coverage_series(session.observations)
+        coverage_chart.update()
+
     def get_float(element: ui.number, default: float = 0.0) -> float:
         try:
             return float(element.value)  # pyright: ignore[reportArgumentType]
@@ -734,6 +806,7 @@ async def index() -> None:  # noqa: C901, PLR0915
         obs_table.rows = []
         obs_table.selected = []
         _update_obs_count()
+        _update_coverage_chart()
 
         set_status("Fetching observations from SatNOGS...", "text-blue-300")
         fetch_btn.set_visibility(False)
@@ -757,6 +830,7 @@ async def index() -> None:  # noqa: C901, PLR0915
                 obs_table.selected = list(obs_table.rows)
                 obs_table.update()
                 _update_obs_count()
+                _update_coverage_chart()
 
                 set_status(
                     f"Fetching... {len(session.observations)} so far",
