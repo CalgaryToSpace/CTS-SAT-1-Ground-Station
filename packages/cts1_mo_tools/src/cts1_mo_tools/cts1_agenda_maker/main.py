@@ -1,30 +1,29 @@
 """
 CTS-SAT-1 Command Agenda Generator
-====================================
+==================================
 Fetches SatNOGS observations, lets you define repeating and priority
 telecommands, and produces a time-stamped command agenda file.
 """
 
 # pyright: standard
-# dearpygui has typing issues.
+# NiceGUI doesn't support pyright strict very well.
 
+import asyncio
 import contextlib
 import functools
 import re
 import threading
-from collections.abc import Callable
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, assert_never
 
-import dearpygui.dearpygui as dpg
 import pycountry
-import reverse_geocoder
+import reverse_geocoder  # pyright: ignore[reportMissingTypeStubs]
 from dotenv import load_dotenv
+from nicegui import ui
 
 from .satnogs_data import iter_future_observation_pages
-
-_fetch_stop = threading.Event()
 
 # -------------------------------------------------------------
 # CONSTANTS
@@ -35,16 +34,7 @@ VERY_EVIL_COMMAND_SUBSTRING = ")!@"  # Causes suffix tags to be ignored.
 TSSENT_INCREMENT_MS = 1000
 
 # -------------------------------------------------------------
-# STATE
-# -------------------------------------------------------------
-state = {
-    "observations": [],  # raw SatNOGS observation dicts
-    "selected_obs_ids": set(),  # user-selected observation IDs
-    "generated_commands": [],  # list of formatted command strings
-}
-
-# -------------------------------------------------------------
-# HELPERS
+# HELPERS (framework-independent -- unchanged from the dpg version)
 # -------------------------------------------------------------
 
 
@@ -99,42 +89,6 @@ def format_command(name_args: str, tssent_ms: int, tsexec_ms: int) -> str:
     return f"{out}  # tssent={tssent_utc} tsexec={tsexec_utc}"
 
 
-def set_status(
-    msg: str, colour: tuple[int, int, int, int] = (255, 255, 255, 255)
-) -> None:
-    if dpg.does_item_exist("status_text"):
-        dpg.set_value("status_text", msg)
-        dpg.configure_item("status_text", color=colour)
-
-
-def get_float(tag: str, default: float = 0.0) -> float:
-    try:
-        return float(dpg.get_value(tag))
-    except ValueError:
-        return default
-
-
-def get_int(tag: str, default: int = 0) -> int:
-    try:
-        return int(dpg.get_value(tag))
-    except ValueError:
-        return default
-
-
-def get_str(tag: str) -> str:
-    try:
-        return str(dpg.get_value(tag)).strip()
-    except ValueError:
-        return ""
-
-
-def _update_obs_count() -> None:
-    if dpg.does_item_exist("obs_count_text"):
-        total = len(state["observations"])
-        selected = len(state["selected_obs_ids"])
-        dpg.set_value("obs_count_text", f"{total} fetched, {selected} selected")
-
-
 def format_timedelta(delta: timedelta) -> str:
     if delta < timedelta(seconds=0):
         return f"{-delta} ago"
@@ -142,195 +96,32 @@ def format_timedelta(delta: timedelta) -> str:
     return str(delta)
 
 
-# -------------------------------------------------------------
-# SATNOGS
-# -------------------------------------------------------------
+@functools.lru_cache(maxsize=2500)  # Important for GUI performance.
+def _lat_lon_to_country(latitude: float, longitude: float) -> str | None:
+    gs_geocode = reverse_geocoder.search((latitude, longitude))  # pyright: ignore[reportUnknownMemberType,reportUnknownVariableType]
+    gs_country_obj = pycountry.countries.get(alpha_2=gs_geocode[0].get("cc"))  # pyright: ignore[reportUnknownMemberType,reportUnknownArgumentType]
+    return gs_country_obj.name if gs_country_obj else None
 
 
-def _obs_row_tag(obs_id: Any) -> str:
-    return f"obs_row_{obs_id}"
+def _format_satnogs_observation_info(satnogs_observation: dict[str, Any]) -> str:
+    obs_id = satnogs_observation.get("id", "?")
+    gs = satnogs_observation.get("ground_station", "?")
+    gs_lat_lon = (
+        str(satnogs_observation.get("station_lat", "?"))
+        + ", "
+        + str(satnogs_observation.get("station_lng", "?"))
+    )
+    gs_country_name = _lat_lon_to_country(
+        satnogs_observation["station_lat"], satnogs_observation["station_lng"]
+    )
 
-
-def _append_obs_rows(
-    obs_list: list[dict[str, Any]],
-    all_obs_sorted: list[dict[str, Any]],
-    uplink_end_dt: datetime | None,
-) -> None:
-    # Process new rows in sorted order so earlier-inserted rows don't shift later ones.
-    for obs in sorted(obs_list, key=lambda o: parse_iso(o["start"])):
-        obs_id = obs.get("id", "?")
-        gs = obs.get("ground_station", "?")
-
-        start_dt: datetime | None = None
-        end_dt: datetime | None = None
-        with contextlib.suppress(Exception):
-            start_dt = parse_iso(obs["start"])
-        with contextlib.suppress(Exception):
-            end_dt = parse_iso(obs["end"])
-
-        start_utc = (
-            start_dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-            if start_dt
-            else obs.get("start", "?")
-        )
-        end_utc = (
-            end_dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-            if end_dt
-            else obs.get("end", "?")
-        )
-        start_local = dt_to_local_str(start_dt) if start_dt else "?"
-        end_local = dt_to_local_str(end_dt) if end_dt else "?"
-
-        country_str = "?"
-        with contextlib.suppress(Exception):
-            lat = obs["station_lat"]
-            lng = obs["station_lng"]
-            country_str = _lat_lon_to_country(lat, lng) or "?"
-
-        wait_str = "N/A"
-        if uplink_end_dt is not None and start_dt is not None:
-            delta = start_dt - uplink_end_dt
-            wait_str = format_timedelta(delta)
-
-        # Find the first already-rendered row that should come after this one.
-        obs_pos = next(
-            (i for i, o in enumerate(all_obs_sorted) if o.get("id") == obs_id), None
-        )
-        before_tag: str | None = None
-        if obs_pos is not None:
-            for subsequent in all_obs_sorted[obs_pos + 1 :]:
-                tag = _obs_row_tag(subsequent.get("id"))
-                if dpg.does_item_exist(tag):
-                    before_tag = tag
-                    break
-
-        row_kwargs: dict[str, Any] = {
-            "parent": "obs_table",
-            "tag": _obs_row_tag(obs_id),
-        }
-        if before_tag:
-            row_kwargs["before"] = before_tag
-
-        with dpg.table_row(**row_kwargs):  # pyright: ignore[reportGeneralTypeIssues]
-
-            def make_cb(oid: int) -> Callable[[Any, bool], None]:
-                def cb(_: Any, v: bool) -> None:  # noqa: FBT001
-                    if v:
-                        state["selected_obs_ids"].add(oid)
-                    else:
-                        state["selected_obs_ids"].discard(oid)
-                    _update_obs_count()
-
-                return cb
-
-            dpg.add_checkbox(default_value=True, callback=make_cb(obs_id))
-            state["selected_obs_ids"].add(obs_id)  # select by default
-
-            dpg.add_text(str(obs_id))
-            dpg.add_text(str(gs))
-            dpg.add_text(country_str)
-            dpg.add_text(start_utc)
-            dpg.add_text(end_utc)
-            dpg.add_text(start_local)
-            dpg.add_text(end_local)
-            dpg.add_text(wait_str)
-
-    _update_obs_count()
-
-
-def fetch_observations() -> None:
-    sat_id = get_str("sat_id_input")
-    if not sat_id:
-        set_status("[!] Enter a SatNOGS satellite ID first.", (255, 200, 0, 255))
-        return
-
-    _fetch_stop.clear()
-    set_status("Fetching observations from SatNOGS...", (180, 200, 255, 255))
-    dpg.configure_item("fetch_btn", enabled=False)
-    dpg.configure_item("stop_fetch_btn", show=True)
-    dpg.configure_item("fetch_spinner", show=True)
-
-    # Clear table and state
-    if dpg.does_item_exist("obs_table"):
-        for row in dpg.get_item_children("obs_table", slot=1) or []:
-            dpg.delete_item(row)
-    state["observations"] = []
-    state["selected_obs_ids"] = set()
-    _update_obs_count()
-
-    # Parse uplink start. Used for API filters and the wait-time column.
-    uplink_start_dt: datetime = parse_iso(get_str("uplink_start"))
-    uplink_end_dt = uplink_start_dt + timedelta(minutes=get_float("uplink_dur"))
-
-    next_hours = get_float("next_hours_input", 6.0)
-    start_lt_filter = uplink_start_dt + timedelta(hours=next_hours)
-
-    def _thread() -> None:
-        try:
-            all_obs: list[dict[str, Any]] = []
-            state["observations"] = all_obs  # share reference so counter updates live
-            stopped = False
-            for page in iter_future_observation_pages(
-                sat_id,
-                start_gt_filter=uplink_end_dt,
-                start_lt_filter=start_lt_filter,
-            ):
-                all_obs.extend(page)
-                all_obs.sort(key=lambda o: parse_iso(o["start"]))
-                _append_obs_rows(page, all_obs, uplink_end_dt)
-                set_status(
-                    f"Fetching... {len(all_obs)} so far",
-                    (180, 200, 255, 255),
-                )
-                if _fetch_stop.is_set():
-                    stopped = True
-                    break
-
-            if stopped:
-                set_status(
-                    f"[stop] Stopped. {len(all_obs)} observations loaded.",
-                    (255, 200, 0, 255),
-                )
-            else:
-                set_status(
-                    f"[ok] Loaded {len(all_obs)} future observations.",
-                    (100, 255, 150, 255),
-                )
-        except Exception as exc:  # noqa: BLE001
-            set_status(f"[x] Fetch error: {exc}", (255, 100, 100, 255))
-        finally:
-            dpg.configure_item("fetch_btn", enabled=True)
-            dpg.configure_item("stop_fetch_btn", show=False)
-            dpg.configure_item("fetch_spinner", show=False)
-
-    threading.Thread(target=_thread, daemon=True).start()
-
-
-def _stop_fetch() -> None:
-    _fetch_stop.set()
-
-
-def _deselect_all() -> None:
-    state["selected_obs_ids"] = set()
-    for row in dpg.get_item_children("obs_table", slot=1) or []:
-        children = dpg.get_item_children(row, slot=1) or []
-        if children:
-            dpg.set_value(children[0], value=False)
-    _update_obs_count()
-
-
-def _select_all() -> None:
-    for row in dpg.get_item_children("obs_table", slot=1) or []:
-        children = dpg.get_item_children(row, slot=1) or []
-        if children:
-            dpg.set_value(children[0], value=True)
-    state["selected_obs_ids"] = {obs.get("id") for obs in state["observations"]}
-    _update_obs_count()
-
-
-# -------------------------------------------------------------
-# COMMAND GENERATION
-# -------------------------------------------------------------
+    return " | ".join(
+        [
+            f"Observation {obs_id}",
+            f"GS {gs} @ {gs_lat_lon} (in {gs_country_name})",
+            f"Observer: {satnogs_observation.get('observer', '?')}",
+        ]
+    )
 
 
 def _parse_priority_cmd(raw: str) -> tuple[str, int]:
@@ -356,36 +147,8 @@ class AgendaParams:
     sat_id: str
     next_hours: float
     loop_cmds: list[str]
-    priority_cmds: list[str] = field(default_factory=list)
-    observations: list[dict[str, Any]] = field(default_factory=list)
-
-
-@functools.lru_cache(maxsize=2500)  # Important for GUI performance.
-def _lat_lon_to_country(latitude: float, longitude: float) -> str | None:
-    gs_geocode = reverse_geocoder.search((latitude, longitude))
-    gs_country_obj = pycountry.countries.get(alpha_2=gs_geocode[0].get("cc"))
-    return gs_country_obj.name if gs_country_obj else None
-
-
-def _format_satnogs_observation_info(satnogs_observation: dict[str, Any]) -> str:
-    obs_id = satnogs_observation.get("id", "?")
-    gs = satnogs_observation.get("ground_station", "?")
-    gs_lat_lon = (
-        str(satnogs_observation.get("station_lat", "?"))
-        + ", "
-        + str(satnogs_observation.get("station_lng", "?"))
-    )
-    gs_country_name = _lat_lon_to_country(
-        satnogs_observation["station_lat"], satnogs_observation["station_lng"]
-    )
-
-    return " | ".join(
-        [
-            f"Observation {obs_id}",
-            f"GS {gs} @ {gs_lat_lon} (in {gs_country_name})",
-            f"Observer: {satnogs_observation.get('observer', '?')}",
-        ]
-    )
+    priority_cmds: list[str] = field(default_factory=list[str])
+    observations: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
 
 
 def build_agenda(params: AgendaParams) -> list[str]:  # noqa: C901, PLR0912, PLR0915
@@ -409,7 +172,7 @@ def build_agenda(params: AgendaParams) -> list[str]:  # noqa: C901, PLR0912, PLR
     # -- Build AOS/LOS event list -------------------------------
     # Each entry: (datetime, event_type, obs)
     # event_type is "AOS" or "LOS"
-    events: list[tuple[datetime, Literal["AOS", "LOS"], dict]] = []
+    events: list[tuple[datetime, Literal["AOS", "LOS"], dict[str, Any]]] = []
     for obs in valid_obs:
         events.append((parse_iso(obs["start"]), "AOS", obs))
         events.append((parse_iso(obs["end"]), "LOS", obs))
@@ -418,7 +181,6 @@ def build_agenda(params: AgendaParams) -> list[str]:  # noqa: C901, PLR0912, PLR
     # -- Header -------------------------------------------------
     output_lines: list[str] = []
     output_lines.append("# CTS-SAT-1 Command Agenda")
-    output_lines.append(f"# Generated: {datetime.now(tz=UTC).isoformat()}")
     output_lines.append(f"# Satellite NORAD ID: {params.sat_id}")
     output_lines.append(
         f"# Uplink window: {_fmt(params.uplink_start_dt)} -> {_fmt(uplink_end_dt)}"
@@ -427,6 +189,7 @@ def build_agenda(params: AgendaParams) -> list[str]:  # noqa: C901, PLR0912, PLR
     output_lines.append(
         f"# Observation fetch window end: {params.next_hours} hrs after uplink"
     )
+    output_lines.append(f"# Generated at: {datetime.now().isoformat()}")  # noqa: DTZ005
     output_lines.append(f"# Valid observations: {len(valid_obs)}")
     output_lines.append(
         f"# Time between loop command blocks: {params.block_interval_sec:.1f} s"
@@ -565,401 +328,535 @@ def build_agenda(params: AgendaParams) -> list[str]:  # noqa: C901, PLR0912, PLR
     return output_lines
 
 
-def generate_agenda() -> None:
-    uplink_start_str = get_str("uplink_start")
-    try:
-        uplink_start_dt = parse_iso(uplink_start_str)
-    except Exception:  # noqa: BLE001
-        set_status(
-            "[x] Invalid 'Start of Uplink Pass'. "
-            "Use ISO format with timezone: 2024-05-01T12:00:00-07:00",
-            (255, 100, 100, 255),
-        )
-        return
+# -------------------------------------------------------------
+# TABLE COLUMNS
+# -------------------------------------------------------------
+OBS_TABLE_COLUMNS = [
+    {"name": "id", "label": "Obs ID", "field": "id", "sortable": True, "align": "left"},
+    {
+        "name": "ground_station",
+        "label": "GS ID",
+        "field": "ground_station",
+        "sortable": True,
+        "align": "left",
+    },
+    {"name": "country", "label": "Country", "field": "country", "align": "left"},
+    {
+        "name": "start_utc",
+        "label": "Start (UTC)",
+        "field": "start_utc",
+        "sortable": True,
+        "align": "left",
+    },
+    {"name": "end_utc", "label": "End (UTC)", "field": "end_utc", "align": "left"},
+    {
+        "name": "start_local",
+        "label": "Start (Local)",
+        "field": "start_local",
+        "align": "left",
+    },
+    {
+        "name": "end_local",
+        "label": "End (Local)",
+        "field": "end_local",
+        "align": "left",
+    },
+    {
+        "name": "wait",
+        "label": "Wait (uplink LOS -> pass AOS)",
+        "field": "wait",
+        "align": "left",
+    },
+]
 
-    loop_cmds = [
-        c.strip() for c in get_str("loop_cmds_input").splitlines() if c.strip()
-    ]
-    priority_cmds = [
-        c.strip() for c in get_str("priority_cmds_input").splitlines() if c.strip()
-    ]
-    selected_obs = [
-        obs
-        for obs in state["observations"]
-        if obs.get("id") in state["selected_obs_ids"]
-    ]
 
-    params = AgendaParams(
-        uplink_start_dt=uplink_start_dt,
-        uplink_dur_min=get_float("uplink_dur", 10.0),
-        block_interval_sec=get_float("block_interval", 20.0),
-        cmd_interval_sec=get_float("cmd_interval", 2.0),
-        priority_interval=get_int("priority_interval", 50),
-        sat_id=get_str("sat_id_input"),
-        next_hours=get_float("next_hours_input", 6.0),
-        loop_cmds=loop_cmds,
-        priority_cmds=priority_cmds,
-        observations=selected_obs,
+# -------------------------------------------------------------
+# PER-SESSION UI STATE
+# -------------------------------------------------------------
+@dataclass
+class SessionState:
+    """Holds per-browser-tab state (mirrors the old module-level `state` dict)."""
+
+    observations: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
+    generated_commands: list[str] = field(default_factory=list[str])
+    fetch_stop: threading.Event = field(default_factory=threading.Event)
+    fetching: bool = False
+
+
+def _make_obs_row(
+    obs: dict[str, Any], uplink_end_dt: datetime | None
+) -> dict[str, Any]:
+    """Build a table row dict (raw obs fields + computed display fields)."""
+    start_dt: datetime | None = None
+    end_dt: datetime | None = None
+    with contextlib.suppress(Exception):
+        start_dt = parse_iso(obs["start"])
+    with contextlib.suppress(Exception):
+        end_dt = parse_iso(obs["end"])
+
+    start_utc = (
+        start_dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if start_dt
+        else obs.get("start", "?")
     )
-
-    try:
-        output_lines = build_agenda(params)
-    except ValueError as exc:
-        set_status(f"[x] {exc}", (255, 100, 100, 255))
-        return
-
-    state["generated_commands"] = output_lines
-    dpg.set_value("preview_text", "\n".join(output_lines))
-    total_cmd_count = sum(
-        1 for line in output_lines if line.strip() and not line.startswith("#")
+    end_utc = (
+        end_dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        if end_dt
+        else obs.get("end", "?")
     )
-    output_lines.append(f"\n# Total commands: {total_cmd_count}\n")
-    set_status(f"[ok] Generated {total_cmd_count} commands.", (100, 255, 150, 255))
+    start_local = dt_to_local_str(start_dt) if start_dt else "?"
+    end_local = dt_to_local_str(end_dt) if end_dt else "?"
+
+    country_str = "?"
+    with contextlib.suppress(Exception):
+        lat = obs["station_lat"]
+        lng = obs["station_lng"]
+        country_str = _lat_lon_to_country(lat, lng) or "?"
+
+    wait_str = "N/A"
+    if uplink_end_dt is not None and start_dt is not None:
+        delta = start_dt - uplink_end_dt
+        wait_str = format_timedelta(delta)
+
+    # Spread the raw obs dict so build_agenda() can consume selected rows
+    # directly (it needs "start", "end", "station_lat", etc.) and layer the
+    # computed display fields on top.
+    row = dict(obs)
+    row.update(
+        {
+            "id": obs.get("id", "?"),
+            "ground_station": obs.get("ground_station", "?"),
+            "country": country_str,
+            "start_utc": start_utc,
+            "end_utc": end_utc,
+            "start_local": start_local,
+            "end_local": end_local,
+            "wait": wait_str,
+        }
+    )
+    return row
+
+
+async def _fetch_pages(
+    sat_id: str,
+    start_gt_filter: datetime,
+    start_lt_filter: datetime,
+    stop_event: threading.Event,
+) -> AsyncGenerator[list[dict[str, Any]], None]:
+    """Async generator that drives the blocking SatNOGS iterator in a
+    background thread and yields pages back on the event loop."""
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+
+    def worker() -> None:
+        try:
+            for page in iter_future_observation_pages(
+                sat_id,
+                start_gt_filter=start_gt_filter,
+                start_lt_filter=start_lt_filter,
+            ):
+                loop.call_soon_threadsafe(queue.put_nowait, ("page", page))
+                if stop_event.is_set():
+                    break
+            loop.call_soon_threadsafe(queue.put_nowait, ("done", None))
+        except Exception as exc:  # noqa: BLE001
+            loop.call_soon_threadsafe(queue.put_nowait, ("error", exc))
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    while True:
+        kind, payload = await queue.get()
+        if kind == "page":
+            yield payload
+        elif kind == "done":
+            return
+        elif kind == "error":
+            raise payload
 
 
 # -------------------------------------------------------------
 # GUI
 # -------------------------------------------------------------
+@ui.page("/")
+async def index() -> None:  # noqa: C901, PLR0915
+    ui.add_head_html(
+        """
+        <style>
+            body { background-color: #161b1e; }
+        </style>
+        """
+    )
+    ui.colors(primary="#2870a0")
 
-
-def build_gui() -> None:  # noqa: PLR0915
-    dpg.create_context()
-
-    with dpg.font_registry():  # pyright: ignore[reportGeneralTypeIssues]
-        pass  # use default font
-
-    with dpg.theme() as global_theme, dpg.theme_component(dpg.mvAll):  # pyright: ignore[reportGeneralTypeIssues]
-        dpg.add_theme_color(dpg.mvThemeCol_WindowBg, (22, 27, 34, 255))
-        dpg.add_theme_color(dpg.mvThemeCol_TitleBg, (30, 40, 55, 255))
-        dpg.add_theme_color(dpg.mvThemeCol_TitleBgActive, (40, 80, 130, 255))
-        dpg.add_theme_color(dpg.mvThemeCol_FrameBg, (35, 45, 60, 255))
-        dpg.add_theme_color(dpg.mvThemeCol_FrameBgHovered, (50, 65, 90, 255))
-        dpg.add_theme_color(dpg.mvThemeCol_Button, (40, 90, 160, 255))
-        dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (55, 120, 200, 255))
-        dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, (30, 70, 130, 255))
-        dpg.add_theme_color(dpg.mvThemeCol_Header, (40, 80, 130, 255))
-        dpg.add_theme_color(dpg.mvThemeCol_CheckMark, (100, 200, 255, 255))
-        dpg.add_theme_color(dpg.mvThemeCol_Text, (220, 230, 245, 255))
-        dpg.add_theme_color(dpg.mvThemeCol_Tab, (30, 50, 80, 255))
-        dpg.add_theme_color(dpg.mvThemeCol_TabActive, (40, 90, 160, 255))
-        dpg.add_theme_color(dpg.mvThemeCol_TabHovered, (55, 120, 200, 255))
-        dpg.add_theme_color(dpg.mvThemeCol_Separator, (60, 80, 110, 255))
-        dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, 4)
-        dpg.add_theme_style(dpg.mvStyleVar_WindowRounding, 6)
-        dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing, 8, 6)
-
-    dpg.bind_theme(global_theme)
-
+    session = SessionState()
     now_local = datetime.now().astimezone().replace(microsecond=0).isoformat()
 
-    with (
-        dpg.window(
-            label="CTS-SAT-1 Command Agenda Generator",
-            tag="main_window",
-            width=1200,
-            height=800,
-            no_close=True,
-        ),  # pyright: ignore[reportGeneralTypeIssues]
-        dpg.tab_bar(),  # pyright: ignore[reportGeneralTypeIssues]
-    ):
+    ui.label("CTS-SAT-1 Command Agenda Generator").classes("text-2xl font-bold mt-2")
+
+    with ui.tabs().classes("w-full") as tabs:
+        settings_tab = ui.tab("Settings")
+        commands_tab = ui.tab("Commands")
+        generate_tab = ui.tab("Generate")
+
+    with ui.tab_panels(tabs, value=settings_tab).classes("w-full"):
         # ==================================================
         # TAB 1 - SETTINGS
         # ==================================================
-        with dpg.tab(label="Settings"):  # pyright: ignore[reportGeneralTypeIssues]
-            dpg.add_spacer(height=8)
-
-            # -- Uplink window ------------------------------
-            with dpg.collapsing_header(label="Uplink Pass Window", default_open=True):  # pyright: ignore[reportGeneralTypeIssues]
-                dpg.add_spacer(height=4)
-                with dpg.group(horizontal=True):  # pyright: ignore[reportGeneralTypeIssues]
-                    dpg.add_text("Start of Uplink Pass (ISO with timezone):")
-                    dpg.add_input_text(
-                        tag="uplink_start",
-                        default_value=now_local,
-                        width=260,
-                        hint="2024-05-01T12:00:00-07:00",
-                    )
-                dpg.add_tooltip("uplink_start")
-                with dpg.tooltip("uplink_start"):  # pyright: ignore[reportGeneralTypeIssues]
-                    dpg.add_text(
-                        "ISO 8601 with timezone offset. Timezone is required.\n"
-                        "Examples: 2024-05-01T12:00:00-07:00 or 2024-05-01T19:00:00Z\n"
-                        "This sets the tssent for the first command.\n"
-                        "Only observations that START after (uplink_start + duration)\n"
-                        "will be included."
-                    )
-
-                with dpg.group(horizontal=True):  # pyright: ignore[reportGeneralTypeIssues]
-                    dpg.add_text("Uplink Pass Duration (minutes):     ")
-                    dpg.add_input_float(
-                        tag="uplink_dur",
-                        default_value=15.0,
-                        min_value=0.1,
-                        max_value=60.0,
-                        width=120,
-                        format="%.1f",
-                    )
-
-                    dpg.add_tooltip("uplink_dur")
-                    with dpg.tooltip("uplink_dur"):  # pyright: ignore[reportGeneralTypeIssues]
-                        dpg.add_text(
-                            "Fine to overestimate the duration by a few minutes."
-                        )
-
-            dpg.add_spacer(height=10)
-
-            # -- SatNOGS fetch ------------------------------
-            with dpg.collapsing_header(label="SatNOGS Observations", default_open=True):  # pyright: ignore[reportGeneralTypeIssues]
-                dpg.add_spacer(height=4)
-                with dpg.group(horizontal=True):  # pyright: ignore[reportGeneralTypeIssues]
-                    dpg.add_text("Satellite NORAD ID:")
-                    dpg.add_input_text(
-                        tag="sat_id_input",
-                        default_value="69015",
-                        width=120,
-                        hint="e.g. 69015",
-                    )
-                    dpg.add_text("Fetch next")
-                    dpg.add_input_float(
-                        tag="next_hours_input",
-                        default_value=3.0,
-                        min_value=0.1,
-                        max_value=720.0,
-                        width=80,
-                        format="%.1f",
-                    )
-                    dpg.add_text("hrs after uplink")
-                    dpg.add_button(
-                        label="Fetch Observations",
-                        tag="fetch_btn",
-                        callback=fetch_observations,
-                    )
-                    dpg.add_button(
-                        label="Stop",
-                        tag="stop_fetch_btn",
-                        callback=_stop_fetch,
-                        show=False,
-                    )
-                    dpg.add_loading_indicator(
-                        tag="fetch_spinner",
-                        show=False,
-                        radius=1.5,
-                        speed=1.5,
-                        color=(100, 180, 255, 255),
-                    )
-                dpg.add_spacer(height=6)
-
-                dpg.add_text(
-                    "Select the observations to target with downlinks.",
-                    color=(160, 170, 190, 255),
+        with ui.tab_panel(settings_tab):
+            with ui.expansion("Uplink Pass Window", value=True).classes("w-full"):
+                uplink_start = ui.input(
+                    "Start of Uplink Pass (ISO with timezone)",
+                    value=now_local,
+                    placeholder="2024-05-01T12:00:00-07:00",
+                ).classes("w-96")
+                uplink_start.tooltip(
+                    "ISO 8601 with timezone offset. Timezone is required.\n"
+                    "Examples: 2024-05-01T12:00:00-07:00 or 2024-05-01T19:00:00Z\n"
+                    "This sets the tssent for the first command.\n"
+                    "Only observations that START after (uplink_start + duration)\n"
+                    "will be included."
                 )
 
-                # Observations table
-                with dpg.table(
-                    tag="obs_table",
-                    header_row=True,
-                    borders_outerH=True,
-                    borders_innerH=True,
-                    borders_innerV=True,
-                    borders_outerV=True,
-                    scrollY=True,
-                    height=180,
-                    resizable=True,
-                ):  # pyright: ignore[reportGeneralTypeIssues]
-                    dpg.add_table_column(
-                        label="Use", width_fixed=True, init_width_or_weight=30
-                    )
-                    dpg.add_table_column(
-                        label="Obs ID", width_fixed=True, init_width_or_weight=50
-                    )
-                    dpg.add_table_column(
-                        label="GS ID", width_fixed=True, init_width_or_weight=50
-                    )
-                    dpg.add_table_column(label="Country")
-                    dpg.add_table_column(label="Start (UTC)")
-                    dpg.add_table_column(label="End (UTC)")
-                    dpg.add_table_column(label="Start (Local)")
-                    dpg.add_table_column(label="End (Local)")
-                    dpg.add_table_column(label="Wait (uplink LOS -> pass AOS)")
-
-                dpg.add_spacer(height=4)
-                with dpg.group(horizontal=True):  # pyright: ignore[reportGeneralTypeIssues]
-                    dpg.add_text("", tag="obs_count_text", color=(160, 170, 190, 255))
-                    dpg.add_spacer(width=12)
-                    dpg.add_button(
-                        label="Select All",
-                        callback=_select_all,
-                    )
-                    dpg.add_spacer(width=4)
-                    dpg.add_button(
-                        label="Deselect All",
-                        callback=_deselect_all,
-                    )
-
-            dpg.add_spacer(height=10)
-
-            # -- Timing settings ----------------------------
-            with dpg.collapsing_header(label="Timing & Output", default_open=True):  # pyright: ignore[reportGeneralTypeIssues]
-                dpg.add_spacer(height=4)
-                with dpg.group(horizontal=True):  # pyright: ignore[reportGeneralTypeIssues]
-                    dpg.add_text("Time between loop command blocks (s):")
-                    dpg.add_input_float(
-                        tag="block_interval",
-                        default_value=20.0,
-                        min_value=0.1,
-                        max_value=3600.0,
-                        width=120,
-                        format="%.1f",
-                    )
-                dpg.add_text(
-                    "  How often a new block of loop commands is scheduled.",
-                    color=(160, 170, 190, 255),
+                uplink_dur = ui.number(
+                    "Uplink Pass Duration (minutes)",
+                    value=15.0,
+                    min=0.1,
+                    max=60.0,
+                    format="%.1f",
+                ).classes("w-64")
+                uplink_dur.tooltip(
+                    "Fine to overestimate the duration by a few minutes."
                 )
 
-                dpg.add_spacer(height=6)
-                with dpg.group(horizontal=True):  # pyright: ignore[reportGeneralTypeIssues]
-                    dpg.add_text("Time between commands in a loop block (s):")
-                    dpg.add_input_float(
-                        tag="cmd_interval",
-                        default_value=2.0,
-                        min_value=0.1,
-                        max_value=600.0,
-                        width=120,
+            with ui.expansion("SatNOGS Observations", value=True).classes("w-full"):
+                with ui.row().classes("items-center"):
+                    sat_id_input = ui.input(
+                        "Satellite NORAD ID", value="69015", placeholder="e.g. 69015"
+                    ).classes("w-40")
+                    next_hours_input = ui.number(
+                        "Fetch next (hrs after uplink)",
+                        value=3.0,
+                        min=0.1,
+                        max=720.0,
                         format="%.1f",
-                    )
-                dpg.add_text(
-                    "  tsexec spacing between consecutive commands within one block.",
-                    color=(160, 170, 190, 255),
+                    ).classes("w-56")
+                    fetch_btn = ui.button("Fetch Observations")
+                    stop_fetch_btn = ui.button("Stop", color="negative")
+                    stop_fetch_btn.set_visibility(False)
+                    fetch_spinner = ui.spinner(size="lg")
+                    fetch_spinner.set_visibility(False)
+
+                ui.label("Select the observations to target with downlinks.").classes(
+                    "text-gray-400"
                 )
 
-                dpg.add_spacer(height=6)
-                with dpg.group(horizontal=True):  # pyright: ignore[reportGeneralTypeIssues]
-                    dpg.add_text("Priority Command Injection Interval: ")
-                    dpg.add_input_int(
-                        tag="priority_interval",
-                        default_value=50,
-                        min_value=1,
-                        max_value=10000,
-                        width=120,
-                    )
-                dpg.add_text(
-                    "  Insert priority commands every N loop commands.",
-                    color=(160, 170, 190, 255),
+                obs_table = ui.table(
+                    columns=OBS_TABLE_COLUMNS,
+                    rows=[],
+                    row_key="id",
+                    selection="multiple",
+                ).classes("w-full")
+                obs_table.props("dense bordered separator=cell")
+
+                with ui.row().classes("items-center"):
+                    obs_count_text = ui.label("").classes("text-gray-400")
+                    select_all_btn = ui.button("Select All")
+                    deselect_all_btn = ui.button("Deselect All")
+
+            with ui.expansion("Timing & Output", value=True).classes("w-full"):
+                block_interval = ui.number(
+                    "Time between loop command blocks (s)",
+                    value=20.0,
+                    min=0.1,
+                    max=3600.0,
+                    format="%.1f",
+                ).classes("w-72")
+                ui.label(
+                    "How often a new block of loop commands is scheduled."
+                ).classes("text-gray-400 text-sm")
+
+                cmd_interval = ui.number(
+                    "Time between commands in a loop block (s)",
+                    value=2.0,
+                    min=0.1,
+                    max=600.0,
+                    format="%.1f",
+                ).classes("w-72")
+                ui.label(
+                    "tsexec spacing between consecutive commands within one block."
+                ).classes("text-gray-400 text-sm")
+
+                priority_interval = ui.number(
+                    "Priority Command Injection Interval",
+                    value=50,
+                    min=1,
+                    max=10000,
+                    format="%.0f",
+                ).classes("w-72")
+                ui.label("Insert priority commands every N loop commands.").classes(
+                    "text-gray-400 text-sm"
                 )
 
         # ==================================================
         # TAB 2 - COMMANDS
         # ==================================================
-        with dpg.tab(label="Commands"):  # pyright: ignore[reportGeneralTypeIssues]
-            dpg.add_spacer(height=8)
-
-            with dpg.collapsing_header(
-                label="Loop Commands  (executed repeatedly during each pass)",
-                default_open=True,
-            ):  # pyright: ignore[reportGeneralTypeIssues]
-                dpg.add_spacer(height=4)
-                dpg.add_text(
+        with ui.tab_panel(commands_tab):
+            with ui.expansion(
+                "Loop Commands  (executed repeatedly during each pass)", value=True
+            ).classes("w-full"):
+                ui.label(
                     "Enter one command per line.  Format:  command_name(arg1,arg2)\n"
-                    "The tssent / tsexec tags are generated automatically.",
-                    color=(160, 170, 190, 255),
-                )
-                dpg.add_spacer(height=4)
-                dpg.add_input_text(
-                    tag="loop_cmds_input",
-                    multiline=True,
-                    height=200,
-                    width=-1,
-                    default_value=(
-                        "\n".join(  # noqa: FLY002
+                    "The tssent / tsexec tags are generated automatically."
+                ).classes("text-gray-400 whitespace-pre-line")
+                loop_cmds_input = (
+                    ui.textarea(
+                        value="\n".join(  # noqa: FLY002
                             [
                                 "CTS1+core_system_stats()!",
                                 "CTS1+get_all_system_thermal_info()!",
                             ]
                         )
-                    ),
+                    )
+                    .classes("w-full font-mono")
+                    .props("rows=8")
                 )
 
-            dpg.add_spacer(height=10)
-
-            with dpg.collapsing_header(
-                label=(
-                    "Priority Commands  "
-                    "(injected every N commands with the SAME tssent each time)"
-                ),
-                default_open=True,
-            ):  # pyright: ignore[reportGeneralTypeIssues]
-                dpg.add_spacer(height=4)
-                dpg.add_text(
-                    """
-Enter one command per line.
-Optionally append  @tsexec=<ms>  for a fixed execution time, or omit for immediate (0).
-Each priority command keeps its first tssent so the satellite de-duplicates.""".strip(),
-                    color=(160, 170, 190, 255),
-                )
-                dpg.add_spacer(height=4)
-                dpg.add_input_text(
-                    tag="priority_cmds_input",
-                    multiline=True,
-                    height=140,
-                    width=-1,
-                    default_value=(
-                        "\n".join(  # noqa: FLY002
+            with ui.expansion(
+                "Priority Commands  (injected every N commands with the SAME "
+                "tssent each time)",
+                value=True,
+            ).classes("w-full"):
+                ui.label(
+                    "Enter one command per line.\n"
+                    "Optionally append  @tsexec=<ms>  for a fixed execution time, "
+                    "or omit for immediate (0).\n"
+                    "Each priority command keeps its first tssent so the "
+                    "satellite de-duplicates."
+                ).classes("text-gray-400 whitespace-pre-line")
+                priority_cmds_input = (
+                    ui.textarea(
+                        value="\n".join(  # noqa: FLY002
                             [
                                 "CTS1+config_set_int_var(TCMD_require_unique_tssent,1)!",
                                 "CTS1+obc_set_stm32_sysclk_to_hse()!",
                             ]
                         )
-                    ),
+                    )
+                    .classes("w-full font-mono")
+                    .props("rows=6")
                 )
 
         # ==================================================
         # TAB 3 - GENERATE / PREVIEW
         # ==================================================
-        with dpg.tab(label="Generate"):  # pyright: ignore[reportGeneralTypeIssues]
-            dpg.add_spacer(height=8)
+        with ui.tab_panel(generate_tab):
+            with ui.row().classes("items-center"):
+                generate_btn = ui.button("Generate Command Agenda")
+                status_text = ui.label("")
+                download_btn = ui.button("Download Agenda File", color="positive")
+                download_btn.set_visibility(False)
 
-            with dpg.group(horizontal=True):  # pyright: ignore[reportGeneralTypeIssues]
-                dpg.add_button(
-                    label="  Generate Command Agenda  ",
-                    callback=generate_agenda,
-                    height=36,
-                )
-                dpg.add_spacer(width=20)
-                dpg.add_text("", tag="status_text")
+            ui.separator()
+            ui.label("Preview:").classes("text-gray-400")
+            preview_text = ui.textarea(value="(generate agenda to see preview)")
+            preview_text.props("readonly rows=25").classes("w-full font-mono")
 
-            dpg.add_spacer(height=10)
-            dpg.add_separator()
-            dpg.add_spacer(height=6)
-            dpg.add_text("Preview:", color=(160, 170, 190, 255))
-            dpg.add_spacer(height=4)
-            dpg.add_input_text(
-                tag="preview_text",
-                multiline=True,
-                readonly=True,
-                height=-1,
-                width=-1,
-                default_value="(generate agenda to see preview)",
+    # -----------------------------------------------------------
+    # CALLBACKS
+    # -----------------------------------------------------------
+
+    def set_status(msg: str, css_class: str = "text-white") -> None:
+        status_text.text = msg
+        status_text.classes(replace=f"{css_class}")
+
+    def _update_obs_count() -> None:
+        total = len(obs_table.rows)
+        selected = len(obs_table.selected)
+        obs_count_text.text = f"{total} fetched, {selected} selected"
+
+    def _on_selection_change() -> None:
+        _update_obs_count()
+
+    obs_table.on("selection", _on_selection_change)
+
+    def get_float(element: ui.number, default: float = 0.0) -> float:
+        try:
+            return float(element.value)  # pyright: ignore[reportArgumentType]
+        except (TypeError, ValueError):
+            return default
+
+    def get_int(element: ui.number, default: int = 0) -> int:
+        try:
+            return int(element.value)  # pyright: ignore[reportArgumentType]
+        except (TypeError, ValueError):
+            return default
+
+    def get_str(element: ui.input | ui.textarea) -> str:
+        return str(element.value or "").strip()
+
+    def _select_all() -> None:
+        obs_table.selected = list(obs_table.rows)
+        _update_obs_count()
+
+    def _deselect_all() -> None:
+        obs_table.selected = []
+        _update_obs_count()
+
+    select_all_btn.on_click(_select_all)
+    deselect_all_btn.on_click(_deselect_all)
+
+    async def fetch_observations() -> None:
+        if session.fetching:
+            return
+
+        sat_id = get_str(sat_id_input)
+        if not sat_id:
+            set_status("[!] Enter a SatNOGS satellite ID first.", "text-yellow-400")
+            return
+
+        try:
+            uplink_start_dt = parse_iso(get_str(uplink_start))
+        except Exception:  # noqa: BLE001
+            set_status(
+                "[x] Invalid 'Start of Uplink Pass'. "
+                "Use ISO format with timezone: 2024-05-01T12:00:00-07:00",
+                "text-red-400",
             )
+            return
 
-    dpg.create_viewport(
-        title="CTS-SAT-1 Command Agenda Generator",
-        width=1220,
-        height=840,
-        min_width=900,
-        min_height=600,
-    )
-    dpg.setup_dearpygui()
-    dpg.show_viewport()
-    dpg.set_primary_window("main_window", value=True)
-    dpg.start_dearpygui()
-    dpg.destroy_context()
+        uplink_end_dt = uplink_start_dt + timedelta(minutes=get_float(uplink_dur, 15.0))
+        next_hours = get_float(next_hours_input, 6.0)
+        start_lt_filter = uplink_start_dt + timedelta(hours=next_hours)
+
+        session.fetch_stop = threading.Event()
+        session.fetching = True
+        session.observations = []
+        obs_table.rows = []
+        obs_table.selected = []
+        _update_obs_count()
+
+        set_status("Fetching observations from SatNOGS...", "text-blue-300")
+        fetch_btn.set_visibility(False)
+        stop_fetch_btn.set_visibility(True)
+        fetch_spinner.set_visibility(True)
+
+        stopped = False
+        try:
+            async for page in _fetch_pages(
+                sat_id, uplink_end_dt, start_lt_filter, session.fetch_stop
+            ):
+                session.observations.extend(page)
+                session.observations.sort(key=lambda o: parse_iso(o["start"]))
+
+                for obs in page:
+                    row = _make_obs_row(obs, uplink_end_dt)
+                    obs_table.rows.append(row)
+                obs_table.rows.sort(key=lambda r: parse_iso(r["start"]))
+                # Select newly-fetched observations by default, like the
+                # original dpg checkbox-defaults-to-True behaviour.
+                obs_table.selected = list(obs_table.rows)
+                obs_table.update()
+                _update_obs_count()
+
+                set_status(
+                    f"Fetching... {len(session.observations)} so far",
+                    "text-blue-300",
+                )
+                if session.fetch_stop.is_set():
+                    stopped = True
+                    break
+
+            if stopped:
+                set_status(
+                    f"[stop] Stopped. {len(session.observations)} observations loaded.",
+                    "text-yellow-400",
+                )
+            else:
+                set_status(
+                    f"[ok] Loaded {len(session.observations)} future observations.",
+                    "text-green-400",
+                )
+        except Exception as exc:  # noqa: BLE001
+            set_status(f"[x] Fetch error: {exc}", "text-red-400")
+        finally:
+            session.fetching = False
+            fetch_btn.set_visibility(True)
+            stop_fetch_btn.set_visibility(False)
+            fetch_spinner.set_visibility(False)
+
+    def _stop_fetch() -> None:
+        session.fetch_stop.set()
+
+    fetch_btn.on_click(fetch_observations)
+    stop_fetch_btn.on_click(_stop_fetch)
+
+    def generate_agenda() -> None:
+        try:
+            uplink_start_dt = parse_iso(get_str(uplink_start))
+        except Exception:  # noqa: BLE001
+            set_status(
+                "[x] Invalid 'Start of Uplink Pass'. "
+                "Use ISO format with timezone: 2024-05-01T12:00:00-07:00",
+                "text-red-400",
+            )
+            return
+
+        loop_cmds = [
+            c.strip() for c in get_str(loop_cmds_input).splitlines() if c.strip()
+        ]
+        priority_cmds = [
+            c.strip() for c in get_str(priority_cmds_input).splitlines() if c.strip()
+        ]
+        # obs_table.selected rows already contain the raw SatNOGS fields
+        # (start/end/station_lat/...) layered with the display fields.
+        selected_obs = list(obs_table.selected)
+
+        params = AgendaParams(
+            uplink_start_dt=uplink_start_dt,
+            uplink_dur_min=get_float(uplink_dur, 10.0),
+            block_interval_sec=get_float(block_interval, 20.0),
+            cmd_interval_sec=get_float(cmd_interval, 2.0),
+            priority_interval=get_int(priority_interval, 50),
+            sat_id=get_str(sat_id_input),
+            next_hours=get_float(next_hours_input, 6.0),
+            loop_cmds=loop_cmds,
+            priority_cmds=priority_cmds,
+            observations=selected_obs,
+        )
+
+        try:
+            output_lines = build_agenda(params)
+        except ValueError as exc:
+            set_status(f"[x] {exc}", "text-red-400")
+            download_btn.set_visibility(False)
+            return
+
+        session.generated_commands = output_lines
+        preview_text.value = "\n".join(output_lines)
+        total_cmd_count = sum(
+            1 for line in output_lines if line.strip() and not line.startswith("#")
+        )
+        set_status(f"[ok] Generated {total_cmd_count} commands.", "text-green-400")
+        download_btn.set_visibility(True)
+
+    generate_btn.on_click(generate_agenda)
+
+    def download_agenda() -> None:
+        if not session.generated_commands:
+            return
+        content = "\n".join(session.generated_commands)
+        timestamp = datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%SZ")
+        ui.download(content.encode(), f"cts-sat1-agenda-{timestamp}.txt")
+
+    download_btn.on_click(download_agenda)
+
+    _update_obs_count()
 
 
 def main() -> None:
     load_dotenv()
+    ui.run(title="CTS-SAT-1 Command Agenda Generator", dark=True, reload=False)
 
-    build_gui()
 
-
-if __name__ == "__main__":
+if __name__ in {"__main__", "__mp_main__"}:
     main()
