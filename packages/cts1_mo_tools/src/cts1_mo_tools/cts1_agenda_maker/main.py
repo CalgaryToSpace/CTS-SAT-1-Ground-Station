@@ -9,6 +9,7 @@ telecommands, and produces a time-stamped command agenda file.
 # NiceGUI doesn't support pyright strict very well.
 
 import asyncio
+import collections
 import contextlib
 import functools
 import re
@@ -189,7 +190,7 @@ def build_agenda(params: AgendaParams) -> list[str]:  # noqa: C901, PLR0912, PLR
     output_lines.append(
         f"# Observation fetch window end: {params.next_hours} hrs after uplink"
     )
-    output_lines.append(f"# Generated at: {datetime.now().isoformat()}")  # noqa: DTZ005
+    output_lines.append(f"# Generated at: {datetime.now(tz=UTC).isoformat()}")
     output_lines.append(f"# Valid observations: {len(valid_obs)}")
     output_lines.append(
         f"# Time between loop command blocks: {params.block_interval_sec:.1f} s"
@@ -437,35 +438,55 @@ def _make_obs_row(
     return row
 
 
-def _build_coverage_series(observations: list[dict[str, Any]]) -> list[list[float]]:
-    """Build a strictly-stepped [timestamp_ms, concurrent_count] series.
+def _build_coverage_series(observations: list[dict[str, Any]]) -> list[list[Any]]:
+    """Build a strictly-stepped [timestamp_ms, concurrent_count, top_countries]
+    series.
 
     Each observation contributes a +1 event at AOS and a -1 event at LOS.
-    Every event is emitted as two points sharing the same x (the count
+    Every event is emitted as two points sharing the same x (the state
     just before, then just after), so a plain straight-line series draws
     vertical jumps at event times and flat horizontal runs in between --
     no reliance on ECharts' own step interpolation.
+
+    Each point's third element is a human-readable summary of the up-to-5
+    most frequent ground station countries among the observations active
+    at that instant, for display in the chart tooltip.
     """
-    events: list[tuple[datetime, int]] = []
+    events: list[tuple[datetime, int, str | None]] = []
     for obs in observations:
         start_dt = parse_iso(obs["start"])
         end_dt = parse_iso(obs["end"])
 
-        events.append((start_dt, 1))
-        events.append((end_dt, -1))
+        country: str | None = None
+        with contextlib.suppress(Exception):
+            country = _lat_lon_to_country(obs["station_lat"], obs["station_lng"])
+
+        events.append((start_dt, 1, country))
+        events.append((end_dt, -1, country))
 
     if not events:
         return []
 
     events.sort(key=lambda e: e[0])
 
-    points: list[list[float]] = []
+    active_countries: collections.Counter[str] = collections.Counter()
+
+    def _top_countries_summary() -> str:
+        if not active_countries:
+            return "(none)"
+        return ", ".join(f"{name} ({n})" for name, n in active_countries.most_common(5))
+
+    points: list[list[Any]] = []
     count = 0
-    for t, delta in events:
+    for t, delta, country in events:
         ts_ms = t.timestamp() * 1000
-        points.append([ts_ms, count])
+        points.append([ts_ms, count, _top_countries_summary()])
+        if country is not None:
+            active_countries[country] += delta
+            if active_countries[country] <= 0:
+                del active_countries[country]
         count += delta
-        points.append([ts_ms, count])
+        points.append([ts_ms, count, _top_countries_summary()])
     return points
 
 
@@ -633,8 +654,10 @@ async def index() -> None:  # noqa: C901, PLR0915
                                 "${pad(d.getMonth() + 1)}-${pad(d.getDate())} "
                                 "${pad(d.getHours())}:${pad(d.getMinutes())}:"
                                 "${pad(d.getSeconds())} Local`;"
+                                "  const countries = p.value[2] ?? '';"
                                 "  return `Observations active: ${p.value[1]}"
-                                "<br/>${utc}<br/>${local}`;"
+                                "<br/>${utc}<br/>${local}"
+                                "<br/>Station countries: ${countries}`;"
                                 "}"
                             ),
                         },
