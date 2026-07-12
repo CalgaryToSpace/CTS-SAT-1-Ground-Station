@@ -635,6 +635,9 @@ async def index() -> None:  # noqa: C901, PLR0915
                             "name": "Observations",
                             "minInterval": 1,
                             "min": 0,
+                            # Cap y-scale. 8 observations means "definitely covered",
+                            # no need to indicate even more above 8.
+                            "max": 8,
                         },
                         "tooltip": {
                             "trigger": "axis",
