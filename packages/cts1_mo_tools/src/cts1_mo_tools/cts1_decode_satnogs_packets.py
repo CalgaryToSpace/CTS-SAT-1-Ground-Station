@@ -7,8 +7,8 @@ CSV format (pipe-delimited):
   timestamp | hex_payload | observation_id | ground_station
 """
 
-import datetime
 import struct
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +24,8 @@ FRIENDLY_MESSAGE_SIZE = 42  # COMMS_BEACON_FRIENDLY_MESSAGE_SIZE
 END_MESSAGE_SIZE = 4  # "END\0"
 
 AX100_DOWNLINK_MAX_BYTES_SIZE = 200
+
+MAX_VALID_EPOCH_MS = int(datetime(2100, 1, 1, 1, 1, 1, tzinfo=UTC).timestamp() * 1000)
 
 FIXED_FMT = (
     "<"
@@ -228,12 +230,17 @@ def decode_beacon_basic_packet(payload: bytes) -> dict[str, Any]:
     end_ok = end_raw == b"END\x00"
     sat_name = rf["satellite_name"].decode("ascii", errors="replace").rstrip("\x00")
     epoch_ms = rf["unix_epoch_time_ms"]
-    utc_time = (
-        datetime.datetime.fromtimestamp(epoch_ms / 1000.0, datetime.UTC).isoformat()
-        + "Z"
-        if epoch_ms
-        else None
-    )
+
+    if epoch_ms <= 0 or epoch_ms > MAX_VALID_EPOCH_MS:
+        utc_time = None
+    else:
+        utc_time = (
+            datetime.fromtimestamp(
+                epoch_ms / 1000.0,
+                UTC,
+            ).isoformat()
+            + "Z"
+        )
 
     data = {
         "packet_type": e(PACKET_TYPE_MAP, rf["packet_type"]),
