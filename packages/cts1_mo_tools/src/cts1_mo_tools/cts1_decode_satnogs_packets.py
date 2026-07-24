@@ -541,6 +541,20 @@ SQLITE_PACKETS_QUERY = """
     WHERE rs_errs >= 0
 """
 
+SQLITE_SENT_TCMD_QUERY = """
+    SELECT
+        id,
+        ts_sent_ms,
+        tsexec_ms,
+        command_text,
+        tx_freq_hz,
+        tx_gain_db,
+        source_tool,
+        source_run,
+        ts_transmitted
+    FROM sent_tcmd
+"""
+
 
 def encode_csp_header(  # noqa: PLR0913
     *, prio: int, src: int, dst: int, dport: int, sport: int, flags: int
@@ -621,11 +635,49 @@ def load_packets_from_sqlite(input_sqlite: Path) -> pl.DataFrame:
     return df
 
 
+def load_sent_tcmd_from_sqlite(input_sqlite: Path) -> pl.DataFrame:
+    """Load uplinked telecommands from a SQLite database's "sent_tcmd" table.
+
+    These rows aren't decoded from a received hex payload -- they record
+    telecommands as they were sent -- so they're tagged with packet_type
+    "TCMD_UPLINK" and merged in alongside the decoded downlink packets.
+    """
+    logger.info(f"Reading sent_tcmd from: {input_sqlite}")
+
+    with sqlite3.connect(input_sqlite) as conn:
+        rows = conn.execute(SQLITE_SENT_TCMD_QUERY).fetchall()
+
+    df = pl.DataFrame(
+        rows,
+        schema=[
+            "tcmd_uplink_id",
+            "tcmd_uplink_ts_sent_ms",
+            "tcmd_uplink_tsexec_ms",
+            "tcmd_uplink_command_text",
+            "tcmd_uplink_tx_freq_hz",
+            "tcmd_uplink_tx_gain_db",
+            "tcmd_uplink_source_tool",
+            "tcmd_uplink_source_run",
+            "tcmd_uplink_ts_transmitted",
+        ],
+        orient="row",
+    ).with_columns(
+        packet_type=pl.lit("TCMD_UPLINK"),
+        received_timestamp=pl.col("tcmd_uplink_ts_transmitted"),
+        observation_id=pl.lit(None, dtype=pl.Int64),
+        ground_station=pl.lit(None, dtype=pl.String),
+    )
+
+    logger.info(f"Read: {len(df)} sent_tcmd rows")
+    return df
+
+
 def decode_to_csv(
     df: pl.DataFrame,
     output_csv: Path,
     *,
     sort_setting: Literal["no_sort", "by_timestamp"],
+    df_extra: pl.DataFrame | None = None,
 ) -> None:
     """Decode CTS-SAT-1 packets already loaded into a dataframe."""
     # Create a separate dataframe of decoded packets.
@@ -655,8 +707,11 @@ def decode_to_csv(
     )
     del df_decoded
 
-    # Add a general "as decoded message" column for logs, telecommand responses, and
-    # bulk file transfers.
+    if df_extra is not None and len(df_extra) > 0:
+        df = pl.concat([df, df_extra], how="diagonal_relaxed")
+
+    # Add a general "as decoded message" column for logs, telecommand responses,
+    # bulk file transfers, and uplinked telecommands.
     df = df.with_columns(
         general_message=pl.coalesce(
             pl.col("log_message"),
@@ -667,6 +722,7 @@ def decode_to_csv(
                 ),
                 return_dtype=pl.String,
             ),
+            pl.col("tcmd_uplink_command_text"),
         )
     )
 
@@ -749,6 +805,7 @@ def run(
         msg = "Provide exactly one of --input-csv or --input-sqlite."
         raise ValueError(msg)
 
+    df_extra = None
     if input_csv is not None:
         input_path = input_csv
         df = load_packets_from_csv(input_csv)
@@ -756,6 +813,7 @@ def run(
         assert input_sqlite is not None
         input_path = input_sqlite
         df = load_packets_from_sqlite(input_sqlite)
+        df_extra = load_sent_tcmd_from_sqlite(input_sqlite)
 
     if output_csv is not None:
         output_csv_path = output_csv
@@ -768,6 +826,7 @@ def run(
         df,
         output_csv=output_csv_path,
         sort_setting="by_timestamp" if input_sqlite else "no_sort",
+        df_extra=df_extra,
     )
 
 
