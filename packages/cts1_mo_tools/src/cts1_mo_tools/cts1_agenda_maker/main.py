@@ -19,8 +19,9 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, assert_never
 
+import polars as pl
+import polars_reverse_geocode
 import pycountry
-import reverse_geocoder  # pyright: ignore[reportMissingTypeStubs]
 from dotenv import load_dotenv
 from nicegui import ui
 
@@ -97,10 +98,24 @@ def format_timedelta(delta: timedelta) -> str:
     return str(delta)
 
 
-@functools.lru_cache(maxsize=2500)  # Important for GUI performance.
+@functools.lru_cache(maxsize=2500)
 def _lat_lon_to_country(latitude: float, longitude: float) -> str | None:
-    gs_geocode = reverse_geocoder.search((latitude, longitude))  # pyright: ignore[reportUnknownMemberType,reportUnknownVariableType]
-    gs_country_obj = pycountry.countries.get(alpha_2=gs_geocode[0].get("cc"))  # pyright: ignore[reportUnknownMemberType,reportUnknownArgumentType]
+    df_row = pl.DataFrame({"lat": [latitude], "lon": [longitude]}).select(
+        polars_reverse_geocode.find_closest_country(
+            lat=pl.col("lat"),
+            long=pl.col("lon"),
+            cache_mode="cache_forever",
+        )
+    )
+    country_code = df_row.item()
+    gs_country_obj = pycountry.countries.get(alpha_2=country_code)
+    return gs_country_obj.name if gs_country_obj else None
+
+
+@functools.lru_cache(maxsize=2500)
+def _country_code_to_country_name(country_code: str) -> str | None:
+
+    gs_country_obj = pycountry.countries.get(alpha_2=country_code)
     return gs_country_obj.name if gs_country_obj else None
 
 

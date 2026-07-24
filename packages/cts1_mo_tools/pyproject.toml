@@ -13,7 +13,7 @@ dependencies = [
     "dearpygui",
     "requests",
     "python-dotenv",
-    "reverse-geocoder>=1.5.1",
+    "polars-reverse-geocode>=0.8.1",
     "pycountry>=26.2.16",
     "nicegui>=3.14.0",
 ]
