@@ -1,16 +1,21 @@
 """
 CTS-SAT-1 Packet Decoder (from SatNOGS data).
 
-Decodes COMMS_*_packet_t structs from the SatNOGS-style CSV export.
+Decodes COMMS_*_packet_t structs from either a SatNOGS-style CSV export or a
+SQLite database of received packets.
 
 CSV format (pipe-delimited):
   timestamp | hex_payload | observation_id | ground_station
+
+SQLite format: a "packet" table with (at least) "ts_received", "payload",
+"rs_errs", and "session_dir" columns.
 """
 
+import sqlite3
 import struct
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, assert_never
 
 import polars as pl
 import tyro
@@ -501,8 +506,8 @@ def decode_packet_safe(hex_str: str) -> dict[str, Any] | None:
 # -- Main ---------------------------------------------------------------------
 
 
-def decode_to_csv(input_csv: Path, output_csv: Path) -> None:
-    """Decode CTS-SAT-1 packets from a SatNOGS-style pipe-delimited CSV."""
+def load_packets_from_csv(input_csv: Path) -> pl.DataFrame:
+    """Load received packets from a SatNOGS-style pipe-delimited CSV."""
     logger.info(f"Reading: {input_csv}")
 
     df = pl.read_csv(
@@ -518,7 +523,111 @@ def decode_to_csv(input_csv: Path, output_csv: Path) -> None:
     )
 
     logger.info(f"Read: {len(df)} rows")
+    return df
 
+
+SQLITE_PACKETS_QUERY = """
+    SELECT
+        ts_received,
+        lower(hex(payload)) AS payload_hex,
+        session_dir,
+        csp_src,
+        csp_dst,
+        csp_dport,
+        csp_sport,
+        csp_prio,
+        csp_flags
+    FROM packet
+    WHERE rs_errs >= 0
+"""
+
+
+def encode_csp_header(  # noqa: PLR0913
+    *, prio: int, src: int, dst: int, dport: int, sport: int, flags: int
+) -> bytes:
+    """Encode a CSP 1.x header (4 bytes, network/big-endian byte order).
+
+    Bit layout (MSB to LSB): prio(2) src(5) dst(5) dport(6) sport(6) flags(8),
+    where "flags" is the reserved/hmac/xtea/rdp/crc bits, packed as one byte.
+    """
+    value = (
+        (prio & 0x3) << 30
+        | (src & 0x1F) << 25
+        | (dst & 0x1F) << 20
+        | (dport & 0x3F) << 14
+        | (sport & 0x3F) << 8
+        | (flags & 0xFF)
+    )
+    return struct.pack(">I", value)
+
+
+def load_packets_from_sqlite(input_sqlite: Path) -> pl.DataFrame:
+    """Load received packets from a SQLite database's "packet" table.
+
+    The stored ``payload`` blob excludes the CSP header, so the header is
+    re-encoded from the ``csp_*`` columns and prepended to each row's hex.
+
+    ``session_dir`` looks like "/FrontierSat/satnogs_archive/14391497"; the
+    trailing integer is the SatNOGS observation ID.
+    """
+    logger.info(f"Reading: {input_sqlite}")
+
+    with sqlite3.connect(input_sqlite) as conn:
+        rows = conn.execute(SQLITE_PACKETS_QUERY).fetchall()
+
+    records = [
+        {
+            "received_timestamp": ts_received,
+            "hex_payload": (
+                encode_csp_header(
+                    prio=csp_prio,
+                    src=csp_src,
+                    dst=csp_dst,
+                    dport=csp_dport,
+                    sport=csp_sport,
+                    flags=csp_flags,
+                ).hex()
+                + payload_hex
+            ),
+            "session_dir": session_dir,
+        }
+        for (
+            ts_received,
+            payload_hex,
+            session_dir,
+            csp_src,
+            csp_dst,
+            csp_dport,
+            csp_sport,
+            csp_prio,
+            csp_flags,
+        ) in rows
+    ]
+
+    df = pl.DataFrame(
+        records,
+        schema=["received_timestamp", "hex_payload", "session_dir"],
+    ).with_columns(
+        observation_id=(
+            pl.col("session_dir")
+            .str.extract(r"(\d+)/?$", 1)
+            .cast(pl.Int64, strict=False)
+        ),
+        ground_station=pl.lit(None, dtype=pl.String),
+    )
+    df = df.drop("session_dir")
+
+    logger.info(f"Read: {len(df)} rows")
+    return df
+
+
+def decode_to_csv(
+    df: pl.DataFrame,
+    output_csv: Path,
+    *,
+    sort_setting: Literal["no_sort", "by_timestamp"],
+) -> None:
+    """Decode CTS-SAT-1 packets already loaded into a dataframe."""
     # Create a separate dataframe of decoded packets.
     decoded_packets: dict[str, dict[str, Any]] = {
         # Keys: hex_str, Vals: decoded packet
@@ -592,6 +701,14 @@ def decode_to_csv(input_csv: Path, output_csv: Path) -> None:
         *end_cols,
     )
 
+    if sort_setting == "by_timestamp":
+        df = df.sort("received_timestamp", descending=True)
+        logger.debug("Sorted by received_timestamp")
+    elif sort_setting == "no_sort":
+        logger.debug("Not sorted")
+    else:
+        assert_never(sort_setting)
+
     if output_csv:
         df.write_csv(output_csv)
         logger.info(f"  CSV  → {output_csv}")
@@ -615,19 +732,43 @@ def decode_to_csv(input_csv: Path, output_csv: Path) -> None:
     logger.info(f"Packet type summary: {df_summary}")
 
 
-def run(input_csv: Path, output_csv: Path | None = None) -> None:
-    """Decode CTS-SAT-1 packets from a SatNOGS-style pipe-delimited CSV.
+def run(
+    input_csv: Path | None = None,
+    input_sqlite: Path | None = None,
+    output_csv: Path | None = None,
+) -> None:
+    """Decode CTS-SAT-1 packets from a SatNOGS-style pipe-delimited CSV or a
+    SQLite database of received packets.
+
+    Provide exactly one of ``input_csv`` or ``input_sqlite``.
 
     If ``output_csv`` is not given, the decoded packets will be written to a new
-    file with the same stem as ``input_csv`` but with "-decoded" appended.
+    file with the same stem as the input file but with "-decoded" appended.
     """
+    if (input_csv is None) == (input_sqlite is None):
+        msg = "Provide exactly one of --input-csv or --input-sqlite."
+        raise ValueError(msg)
+
+    if input_csv is not None:
+        input_path = input_csv
+        df = load_packets_from_csv(input_csv)
+    else:
+        assert input_sqlite is not None
+        input_path = input_sqlite
+        df = load_packets_from_sqlite(input_sqlite)
 
     if output_csv is not None:
         output_csv_path = output_csv
     else:
-        output_csv_path = input_csv.with_stem(input_csv.stem + "-decoded")
+        output_csv_path = input_path.with_stem(
+            input_path.stem + "-decoded"
+        ).with_suffix(".csv")
 
-    decode_to_csv(input_csv, output_csv=output_csv_path)
+    decode_to_csv(
+        df,
+        output_csv=output_csv_path,
+        sort_setting="by_timestamp" if input_sqlite else "no_sort",
+    )
 
 
 def main() -> None:
