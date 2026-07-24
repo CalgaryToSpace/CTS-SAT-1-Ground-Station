@@ -206,6 +206,13 @@ def e(mapping: dict[int, str], value: int) -> str:
     return mapping.get(value, f"UNKNOWN({value})")
 
 
+def epoch_ms_to_iso_z(epoch_ms: int | None) -> str | None:
+    """Convert a Unix epoch (milliseconds) to an ISO-8601 UTC string, or None."""
+    if epoch_ms is None or epoch_ms <= 0 or epoch_ms > MAX_VALID_EPOCH_MS:
+        return None
+    return datetime.fromtimestamp(epoch_ms / 1000.0, UTC).isoformat() + "Z"
+
+
 # -- Decoders -----------------------------------------------------------------
 
 
@@ -235,17 +242,7 @@ def decode_beacon_basic_packet(payload: bytes) -> dict[str, Any]:
     end_ok = end_raw == b"END\x00"
     sat_name = rf["satellite_name"].decode("ascii", errors="replace").rstrip("\x00")
     epoch_ms = rf["unix_epoch_time_ms"]
-
-    if epoch_ms <= 0 or epoch_ms > MAX_VALID_EPOCH_MS:
-        utc_time = None
-    else:
-        utc_time = (
-            datetime.fromtimestamp(
-                epoch_ms / 1000.0,
-                UTC,
-            ).isoformat()
-            + "Z"
-        )
+    utc_time = epoch_ms_to_iso_z(epoch_ms)
 
     data = {
         "packet_type": e(PACKET_TYPE_MAP, rf["packet_type"]),
@@ -641,6 +638,12 @@ def load_sent_tcmd_from_sqlite(input_sqlite: Path) -> pl.DataFrame:
     These rows aren't decoded from a received hex payload -- they record
     telecommands as they were sent -- so they're tagged with packet_type
     "TCMD_UPLINK" and merged in alongside the decoded downlink packets.
+
+    Additionally, for every row with a known execution time (``tsexec_ms``),
+    a second virtual "TCMD_UPLINK_EXEC" row is emitted at that execution
+    timestamp. Identical commands that were uplinked (and executed) more than
+    once collapse to a single TCMD_UPLINK_EXEC row, keyed on
+    (command text, execution timestamp).
     """
     logger.info(f"Reading sent_tcmd from: {input_sqlite}")
 
@@ -668,7 +671,25 @@ def load_sent_tcmd_from_sqlite(input_sqlite: Path) -> pl.DataFrame:
         ground_station=pl.lit(None, dtype=pl.String),
     )
 
-    logger.info(f"Read: {len(df)} sent_tcmd rows")
+    df_exec = (
+        df.filter(pl.col("tcmd_uplink_tsexec_ms").is_not_null())
+        .unique(
+            subset=["tcmd_uplink_command_text", "tcmd_uplink_tsexec_ms"],
+            keep="first",
+        )
+        .with_columns(
+            packet_type=pl.lit("TCMD_UPLINK_EXEC"),
+            received_timestamp=pl.col("tcmd_uplink_tsexec_ms").map_elements(
+                epoch_ms_to_iso_z, return_dtype=pl.String
+            ),
+        )
+    )
+
+    df = pl.concat([df, df_exec], how="vertical")
+
+    logger.info(
+        f"Read: {len(df)} sent_tcmd rows (incl. {len(df_exec)} TCMD_UPLINK_EXEC rows)"
+    )
     return df
 
 
