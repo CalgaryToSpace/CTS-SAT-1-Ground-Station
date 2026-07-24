@@ -679,8 +679,18 @@ def load_sent_tcmd_from_sqlite(input_sqlite: Path) -> pl.DataFrame:
         )
         .with_columns(
             packet_type=pl.lit("TCMD_UPLINK_EXEC"),
-            received_timestamp=pl.col("tcmd_uplink_tsexec_ms").map_elements(
-                epoch_ms_to_iso_z, return_dtype=pl.String
+            # If the reported exec time precedes the send time (clock skew /
+            # bad onboard clock at exec time), fall back to the send time.
+            received_timestamp=(
+                pl.when(
+                    pl.col("tcmd_uplink_tsexec_ms") < pl.col("tcmd_uplink_ts_sent_ms")
+                )
+                .then(pl.col("tcmd_uplink_ts_transmitted"))
+                .otherwise(
+                    pl.col("tcmd_uplink_tsexec_ms").map_elements(
+                        epoch_ms_to_iso_z, return_dtype=pl.String
+                    )
+                )
             ),
         )
     )
