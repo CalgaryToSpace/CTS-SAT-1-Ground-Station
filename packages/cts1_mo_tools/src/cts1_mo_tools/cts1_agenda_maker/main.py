@@ -514,7 +514,7 @@ async def _fetch_pages(
     """Async generator that drives the blocking SatNOGS iterator in a
     background thread and yields pages back on the event loop."""
     loop = asyncio.get_running_loop()
-    queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+    queue: asyncio.Queue[tuple[Literal["page", "done", "error"], Any]] = asyncio.Queue()
 
     def worker() -> None:
         try:
@@ -540,6 +540,8 @@ async def _fetch_pages(
             return
         elif kind == "error":
             raise payload
+        else:
+            assert_never(kind)
 
 
 # -------------------------------------------------------------

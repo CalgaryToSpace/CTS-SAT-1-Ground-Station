@@ -28,10 +28,11 @@ def _next_url_from_headers(headers: Any) -> str | None:
 
 def iter_future_observation_pages(
     norad_cat_id: str,
+    *,
     start_gt_filter: datetime | None = None,
     start_lt_filter: datetime | None = None,
     end_gt_filter: datetime | None = None,
-    page_size: int = 20,
+    page_size: int = 100,
 ) -> Iterator[list[dict[str, Any]]]:
     """Yield pages of future observations one at a time, following cursor pagination.
 
@@ -46,9 +47,7 @@ def iter_future_observation_pages(
         start_gt_filter: Optional lower bound on observation start time.
         start_lt_filter: Optional upper bound on observation start time.
         end_gt_filter: Optional lower bound on observation end time (``end__gt``).
-        page_size: Observations per page. Kept small (rather than the API's
-            max of 100) so callers streaming pages to a UI get frequent,
-            fast-arriving chunks instead of a long wait per page.
+        page_size: Max observations per page requested.
     """
     url: str | None = f"{SATNOGS_BASE}/observations/"
     params: dict[str, Any] = {
