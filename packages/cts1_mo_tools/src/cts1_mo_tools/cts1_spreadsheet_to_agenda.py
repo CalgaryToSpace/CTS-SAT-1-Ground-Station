@@ -5,21 +5,15 @@ import re
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
+from typing import Any
 
 import openpyxl
+import polars as pl
 import tyro
 
 DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 
 _TIME_FORMATS = ("%H:%M:%S", "%H:%M")
-
-
-@dataclass
-class Args:
-    input_file: Path
-    output_file: Path = Path("agenda_output.txt")
-    seed: int | None = None
-    readable: bool = False  # Human-readable copy with tssent/tsexec decoded to UTC.
 
 
 # ---------------------------------------------------------------------
@@ -404,33 +398,72 @@ def build_agenda(
     return lines
 
 
+def build_summary_comment(rows: list[dict[str, Any]]) -> str:
+    """Render a dataframe preview of the input file's commands, commented out
+    with a leading "#" on every line so it can be prepended to the agenda.
+    """
+    df = pl.DataFrame(rows)
+
+    df = df.drop([col for col in df.columns if len(col.strip()) <= 1])
+
+    df = df.with_columns(
+        # Shorten the Telecommand column.
+        pl.col("Telecommand").str.strip_prefix("CTS1+").str.strip_suffix("!")
+    )
+
+    with pl.Config(
+        tbl_rows=-1,  # Show all rows.
+        tbl_cols=-1,  # Show all columns.
+        tbl_width_chars=400,  # Allow table to be extra wide.
+        tbl_hide_dataframe_shape=True,  # Hide the row/column count prefix.
+        fmt_str_lengths=180,  # Allow each column up to 180 characters.
+    ):
+        table_text = str(df)
+
+    output_comment = "\n".join(f"# {line}" for line in table_text.splitlines())
+
+    output_comment += "\n\n"
+
+    return output_comment
+
+
 # ---------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------
 
 
-def main() -> None:
-    args = tyro.cli(Args)
+def spreadsheet_file_to_agenda_file(
+    input_file: Path,
+    output_file: Path = Path("agenda_output.txt"),
+    seed: int | None = None,
+    *,
+    readable: bool = False,
+) -> None:
+    if seed is not None:
+        random.seed(seed)
 
-    if args.seed is not None:
-        random.seed(args.seed)
-
-    mission_date, mission_start, rows = load_sheet(args.input_file)
+    mission_date, mission_start, rows = load_sheet(input_file)
 
     agenda = build_agenda(mission_date, mission_start, rows)
 
-    args.output_file.write_text("\n".join(agenda), encoding="utf-8")
+    summary_comment = build_summary_comment(rows)
 
-    print(f"Generated {len(agenda)} commands → {args.output_file}")  # noqa: T201
+    output_file.write_text(summary_comment + "\n" + "\n".join(agenda), encoding="utf-8")
 
-    if args.readable:
-        readable_path = args.output_file.with_name(
-            f"{args.output_file.stem}_readable{args.output_file.suffix}"
-        )
+    print(f"Generated {len(agenda)} commands → {output_file}")  # noqa: T201
+
+    if readable:
+        readable_path = output_file.with_stem(f"{output_file.stem}_readable")
         readable_lines = [annotate_readable(line) for line in agenda]
-        readable_path.write_text("\n".join(readable_lines), encoding="utf-8")
+        readable_path.write_text(
+            summary_comment + "\n" + "\n".join(readable_lines), encoding="utf-8"
+        )
 
         print(f"Saved readable version → {readable_path}")  # noqa: T201
+
+
+def main() -> None:
+    tyro.cli(spreadsheet_file_to_agenda_file)
 
 
 if __name__ == "__main__":
