@@ -621,6 +621,29 @@ def load_packets_from_sqlite(input_sqlite: Path) -> pl.DataFrame:
     return df
 
 
+def _bulk_data_hex_to_general_message(hex_str: str) -> str:
+    """Render bulk downlink data as text, or a placeholder if it looks like binary data.
+
+    Bulk file downlinks (eg. images, firmware) are not text, so naively decoding them as
+    UTF-8 produces a wall of replacement characters in the CSV. Detect that case with a
+    printable-character heuristic and substitute a short placeholder instead.
+    """
+    data_bytes = bytes.fromhex(hex_str)
+    if not data_bytes:
+        return ""
+
+    try:
+        text = data_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        return f"<BINARY DATA: {len(data_bytes)} bytes>"
+
+    printable_count = sum(1 for char in text if char.isprintable() or char in "\n\r\t")
+    if printable_count / len(text) < 0.85:  # noqa: PLR2004
+        return f"<BINARY DATA: {len(data_bytes)} bytes>"
+
+    return text
+
+
 def decode_to_csv(
     df: pl.DataFrame,
     output_csv: Path,
@@ -662,9 +685,7 @@ def decode_to_csv(
             pl.col("log_message"),
             pl.col("tcmd_response_text"),
             pl.col("bulk_data_hex").map_elements(
-                lambda hex_str: bytes.fromhex(hex_str).decode(
-                    "utf-8", errors="replace"
-                ),
+                _bulk_data_hex_to_general_message,
                 return_dtype=pl.String,
             ),
         )
