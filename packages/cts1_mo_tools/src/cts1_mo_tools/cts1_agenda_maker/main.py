@@ -18,6 +18,7 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, assert_never
+from zoneinfo import ZoneInfo
 
 import polars as pl
 import polars_reverse_geocode
@@ -34,6 +35,7 @@ COMMAND_PREFIX = "CTS1+"
 COMMAND_SUFFIX = "!"
 VERY_EVIL_COMMAND_SUBSTRING = ")!@"  # Causes suffix tags to be ignored.
 TSSENT_INCREMENT_MS = 1000
+PROJECT_TZ = ZoneInfo("America/Edmonton")
 
 # -------------------------------------------------------------
 # HELPERS (framework-independent -- unchanged from the dpg version)
@@ -994,8 +996,14 @@ async def index() -> None:  # noqa: C901, PLR0915
         if not session.generated_commands:
             return
         content = "\n".join(session.generated_commands)
-        timestamp = datetime.now(tz=UTC).strftime("%Y%m%dT%H%M%SZ")
-        ui.download(content.encode(), f"cts-sat1-agenda-{timestamp}.txt")
+        try:
+            uplink_start_dt = parse_iso(get_str(uplink_start))
+        except Exception:  # noqa: BLE001
+            uplink_start_dt = datetime.now(tz=UTC)
+        filename = uplink_start_dt.astimezone(PROJECT_TZ).strftime(
+            "%Y-%m-%d-T%H%ML_agenda.txt"
+        )
+        ui.download(content.encode(), filename)
 
     download_btn.on_click(download_agenda)
 
