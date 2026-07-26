@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "tyro",
-    "polars",
+    "polars[rtcompat]",
     "loguru",
     "openpyxl",
     "ordered-set",
