@@ -438,7 +438,25 @@ def spreadsheet_file_to_agenda_file(
     seed: int | None = None,
     *,
     readable: bool = False,
+    summary_table: bool = True,
 ) -> None:
+    """Generate an agenda file from a spreadsheet.
+
+    Parameters
+    ----------
+    input_file : Path
+        The path to the spreadsheet file.
+    output_file : Path, default=Path("agenda_output.txt")
+        The path to the output file.
+    seed : int | None, default=None
+        The random seed to use. If None, a random seed will be used.
+    readable : bool, default=False
+        Whether to generate a readable version of the agenda, in addition to the normal
+        agenda.
+    summary_table : bool
+        Whether to include a summary table of the commands in the output file as a
+        comment.
+    """
     if seed is not None:
         random.seed(seed)
 
@@ -446,10 +464,10 @@ def spreadsheet_file_to_agenda_file(
 
     agenda = build_agenda(mission_date, mission_start, rows)
 
-    summary_comment = build_summary_comment(rows)
+    summary_comment = build_summary_comment(rows) + "\n\n" if summary_table else ""
 
     output_file.write_text(
-        summary_comment + "\n" + "\n".join(agenda) + "\n",
+        summary_comment + "\n".join(agenda) + "\n",
         encoding="utf-8",
     )
 
@@ -459,7 +477,7 @@ def spreadsheet_file_to_agenda_file(
         readable_path = output_file.with_stem(f"{output_file.stem}_readable")
         readable_lines = [annotate_readable(line) for line in agenda]
         readable_path.write_text(
-            summary_comment + "\n" + "\n".join(readable_lines) + "\n",
+            summary_comment + "\n".join(readable_lines) + "\n",
             encoding="utf-8",
         )
 
