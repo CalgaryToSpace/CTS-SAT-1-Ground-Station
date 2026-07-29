@@ -34,6 +34,7 @@ def send_file_to_tcmd_file(  # noqa: C901, PLR0913, PLR0915
     tssent_interval_ms: int = 1000,
     tsexec_start_val: int | str | None = None,
     tsexec_interval_ms: int = 30_000,
+    hash_count: int = 30,
     mode: Literal[
         "bulk_uplink_b64", "bulk_uplink_hex", "write_file_hex"
     ] = "bulk_uplink_b64",
@@ -132,8 +133,8 @@ def send_file_to_tcmd_file(  # noqa: C901, PLR0913, PLR0915
     if use_bulk_uplink:
         emit("CTS1+comms_bulk_uplink_close_file()")
 
-    # Repeat this 5 times for a better chance of data transfer.
-    for _ in range(5):
+    # Repeat this `hash_count` times for a better chance of data transfer.
+    for _ in range(hash_count):
         emit(f"CTS1+fs_read_file_sha256_hash_json({satellite_file},0,0)")
 
     hash_on_disk = hashlib.sha256(file_bytes).hexdigest()
