@@ -16,21 +16,25 @@ Usage (uv):
 from __future__ import annotations
 
 __all__: list[str] = [
+    "Args",
     "CoverageWindow",
     "ObsInterval",
     "build_coverage_windows",
+    "export_tsv",
     "fetch_all_observations",
     "format_detail",
     "format_summary",
 ]
 
-import argparse
 import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any, Final, Literal
+from pathlib import Path
+from typing import Annotated, Any, Final, Literal, TypeAlias
 
+import polars as pl
 import requests
+import tyro
 from loguru import logger
 
 from .cts1_agenda_maker.satnogs_data import iter_future_observation_pages
@@ -41,8 +45,8 @@ from .cts1_agenda_maker.satnogs_data import iter_future_observation_pages
 
 _COL_WIDTH: Final[int] = 80
 
-SortOrder = Literal["time", "stations"]
-ObsStatus = Literal["future", "good", "bad", "unknown", "failed"]
+SortOrder: TypeAlias = Literal["time", "stations"]
+ObsStatus: TypeAlias = Literal["future", "good", "bad", "unknown", "failed"]
 
 # ---------------------------------------------------------------------------
 # Internal types
@@ -145,12 +149,10 @@ def fetch_all_observations(
     Raises:
         requests.HTTPError: On a non-2xx API response.
     """
-    # iter_future_observation_pages only supports "future" status; for other
-    # statuses we would need a different helper, so log a warning.
     if status != "future":
         logger.warning(
-            f"satnogs_data.iter_future_observation_pages only queries 'future' "
-            f"observations; ignoring requested status={status!r}."
+            f"iter_future_observation_pages only queries 'future' observations; "
+            f"ignoring requested status={status!r}."
         )
 
     obs: list[dict[str, Any]] = []
@@ -200,8 +202,39 @@ class CoverageWindow:
 
     @property
     def station_count(self) -> int:
-        """Number of distinct ground stations active within this window."""
+        """Total distinct ground station IDs appearing anywhere in this window.
+        This counts unique stations across the *whole* window duration, not
+        the maximum active at any single moment.
+        """
         return len({iv.ground_station_id for iv in self.observations})
+
+    @property
+    def peak_simultaneous_stations(self) -> int:
+        """Maximum number of stations active at exactly the same instant.
+
+        Uses a sweep-line over the individual observation intervals.  Events at
+        the same timestamp are processed ends-before-starts so that a pass
+        ending at T and a new pass starting at T are *not* counted as
+        overlapping.
+
+        Returns:
+            Peak simultaneous count (0 for an empty window).
+        """
+        if not self.observations:
+            return 0
+
+        events: list[tuple[datetime, int]] = []
+        for iv in self.observations:
+            events.append((iv.start, 1))
+            events.append((iv.end, -1))
+        # -1 sorts before +1 at the same timestamp → end processed before start
+        events.sort(key=lambda e: (e[0], e[1]))
+
+        peak = current = 0
+        for _, delta in events:
+            current += delta
+            peak = max(peak, current)
+        return peak
 
     @property
     def obs_ids(self) -> list[int | str]:
@@ -209,14 +242,14 @@ class CoverageWindow:
         return [iv.observation_id for iv in self.observations]
 
     def format_start(self) -> str:
-        """Full UTC start string, e.g. ``'2026-07-11T06:08:25Z'``."""
-        return self.start.strftime("%Y-%m-%dT%H:%M:%SZ")
+        """Full UTC start string, e.g. ``'2026-07-11T06:08:25'``."""
+        return self.start.strftime("%Y-%m-%dT%H:%M:%S")
 
     def format_end(self, *, short: bool = True) -> str:
-        """UTC end string, shortened to ``HH:MM:SSZ`` when on the same UTC date."""
+        """UTC end string, shortened to ``HH:MM:SS`` when on the same UTC date."""
         if short and self.start.date() == self.end.date():
-            return self.end.strftime("%H:%M:%SZ")
-        return self.end.strftime("%Y-%m-%dT%H:%M:%SZ")
+            return self.end.strftime("%H:%M:%S")
+        return self.end.strftime("%Y-%m-%dT%H:%M:%S")
 
 
 def build_coverage_windows(
@@ -277,6 +310,21 @@ def _divider(char: str = "─") -> str:
     return char * _COL_WIDTH
 
 
+def _filter_and_sort(
+    windows: list[CoverageWindow],
+    *,
+    sort_by: SortOrder,
+    min_stations: int,
+) -> list[CoverageWindow]:
+    """Return windows that meet min_stations, ordered by sort_by."""
+    filtered = [w for w in windows if w.peak_simultaneous_stations >= min_stations]
+    if sort_by == "stations":
+        filtered.sort(key=lambda w: (-w.peak_simultaneous_stations, w.start))
+    else:
+        filtered.sort(key=lambda w: w.start)
+    return filtered
+
+
 def format_summary(
     windows: list[CoverageWindow],
     *,
@@ -284,60 +332,58 @@ def format_summary(
     min_stations: int = 1,
     show_obs_ids: bool = False,
 ) -> str:
-    """Format merged coverage windows as a human-readable summary table.
+    """Format merged coverage windows as a polars table.
 
     Args:
         windows:       Merged CoverageWindow objects to display.
-        sort_by:       ``"time"`` for chronological order; ``"stations"`` for
+        sort_by:       ``"time"`` for chronological; ``"stations"`` for
                        descending station count (ties broken chronologically).
-        min_stations:  Exclude windows with fewer than this many stations.
-        show_obs_ids:  Append contributing observation IDs to each output line.
+        min_stations:  Exclude windows below this peak simultaneous count.
+        show_obs_ids:  Append an ``Obs IDs`` column to the table.
 
     Returns:
         Multi-line formatted string, ready for :func:`print`.
     """
-    filtered = [w for w in windows if w.station_count >= min_stations]
+    filtered = _filter_and_sort(windows, sort_by=sort_by, min_stations=min_stations)
     if not filtered:
         return "(no coverage windows match the filter criteria)"
 
-    if sort_by == "stations":
-        filtered.sort(key=lambda w: (-w.station_count, w.start))
-    else:
-        filtered.sort(key=lambda w: w.start)
+    rows: list[dict[str, str | int]] = []
+    for w in filtered:
+        row: dict[str, str | int] = {
+            "Stations": w.station_count,
+            "Start (UTC)": w.format_start(),
+            "End (UTC)": w.format_end(),
+            "Duration": w.duration_str,
+        }
+        if show_obs_ids:
+            row["Obs IDs"] = ", ".join(str(i) for i in w.obs_ids)
+        rows.append(row)
+
+    df = pl.DataFrame(rows)
 
     total_coverage: timedelta = sum((w.duration for w in filtered), timedelta())
-    max_stations = max(w.station_count for w in filtered)
-
-    lines: list[str] = [
-        _divider("═"),
-        "Combined SatNOGS Coverage Windows (overlapping passes merged, UTC)",
-        _divider("─"),
-    ]
-    for w in filtered:
-        station_label = (
-            f"{w.station_count:>3} station{'s' if w.station_count != 1 else ' '}"
-        )
-        line = (
-            f"  {station_label}  |  "
-            f"{w.format_start()} → {w.format_end()}  |  "
-            f"Duration: {w.duration_str}"
-        )
-        if show_obs_ids:
-            line += f"  (Obs: {', '.join(str(i) for i in w.obs_ids)})"
-        lines.append(line)
-
     total_sec = int(total_coverage.total_seconds())
-    lines += [
-        _divider("─"),
-        (
-            f"  {len(filtered)} window(s)  |  "
-            f"Total coverage: "
-            f"{total_sec // 3600}h {(total_sec % 3600) // 60}m {total_sec % 60}s  |  "
-            f"Max simultaneous stations: {max_stations}"
-        ),
-        _divider("═"),
-    ]
-    return "\n".join(lines)
+    max_peak = max(w.peak_simultaneous_stations for w in filtered)
+
+    with pl.Config(
+        tbl_hide_dataframe_shape=True,
+        tbl_hide_column_data_types=True,
+        tbl_cell_alignment="CENTER",
+        tbl_rows=-1,
+        tbl_cols=-1,
+    ):
+        table_str = str(df)
+
+    footer = (
+        f"  {len(filtered)} window(s)  |  "
+        f"Total coverage: "
+        f"{total_sec // 3600}h {(total_sec % 3600) // 60}m {total_sec % 60}s  |  "
+        f"{max_peak} simultaneous station(s)"
+    )
+    return (
+        f"Combined SatNOGS Coverage Windows (UTC)\n{_divider()}\n{table_str}\n{footer}"
+    )
 
 
 def format_detail(
@@ -355,7 +401,9 @@ def format_detail(
         Multi-line formatted string, ready for :func:`print`.
     """
     if sort_by == "stations":
-        sorted_windows = sorted(windows, key=lambda w: (-w.station_count, w.start))
+        sorted_windows = sorted(
+            windows, key=lambda w: (-w.peak_simultaneous_stations, w.start)
+        )
     else:
         sorted_windows = sorted(windows, key=lambda w: w.start)
 
@@ -363,7 +411,7 @@ def format_detail(
 
     for idx, w in enumerate(sorted_windows, start=1):
         lines.append(
-            f"Window {idx:>3}  |  {w.station_count} station(s)  |  "
+            f"Window {idx:>3}  |  up to {w.peak_simultaneous_stations} stn (peak)  |  "
             f"{w.format_start()} → {w.format_end()}  |  {w.duration_str}"
         )
         for iv in sorted(w.observations, key=lambda o: o.start):
@@ -379,109 +427,98 @@ def format_detail(
     return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
+def export_tsv(
+    windows: list[CoverageWindow],
+    *,
+    sort_by: SortOrder = "time",
+    min_stations: int = 1,
+    output_path: str = "output/satnogs.tsv",
+) -> None:
+    """Export coverage windows as a TSV file for spreadsheet import.
 
-
-def _parse_dt_arg(value: str) -> datetime:
-    """argparse type converter for ISO 8601 datetime strings or the literal ``'now'``.
-
-    Raises:
-        argparse.ArgumentTypeError: If the string cannot be parsed.
+    Args:
+        windows: Coverage windows to export.
+        sort_by: Sort order applied before writing rows.
+        min_stations: Minimum station count to include.
+        output_path: Destination TSV file path.
     """
-    if value.lower() == "now":
-        return datetime.now(tz=UTC)
-    try:
-        return _parse_iso(value)
-    except ValueError as exc:
-        msg = (
-            f"Cannot parse datetime {value!r}: {exc}. "
-            "Use ISO 8601 with timezone, e.g. 2026-07-10T00:00:00Z"
-        )
-        raise argparse.ArgumentTypeError(msg) from exc
+    filtered = _filter_and_sort(
+        windows,
+        sort_by=sort_by,
+        min_stations=min_stations,
+    )
+
+    if not filtered:
+        logger.warning("No coverage windows match the filter criteria.")
+        return
+
+    rows: list[dict[str, str | int]] = [
+        {
+            "total_stations": w.station_count,
+            "window_start_utc": w.format_start(),
+            "window_end_utc": w.format_end(),
+            "duration": w.duration_str,
+        }
+        for w in filtered
+    ]
+
+    df = pl.DataFrame(rows)
+
+    output_file = Path(output_path)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    df.write_csv(
+        output_file,
+        separator="\t",
+    )
+
+    logger.info(f"Saved SatNOGS TSV file: {output_path}")
 
 
-def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="cts1_satnogs_interval",
-        description=(
-            "Fetch SatNOGS observations for a satellite and display merged "
-            "coverage windows with station counts."
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__,
-    )
-    parser.add_argument(
-        "norad_id",
-        metavar="NORAD_ID",
-        help="NORAD catalog ID of the satellite (e.g. 69015 for CTS-SAT-1).",
-    )
-    parser.add_argument(
-        "--start",
-        metavar="ISO_DATETIME",
-        type=_parse_dt_arg,
-        default=None,
-        help=(
-            "Start of the search window (ISO 8601 with timezone, or 'now'). "
-            "Default is now."
-        ),
-    )
-    parser.add_argument(
-        "--end",
-        metavar="ISO_DATETIME",
-        type=_parse_dt_arg,
-        default=None,
-        help="End of the search window. Mutually exclusive with --hours.",
-    )
-    parser.add_argument(
-        "--hours",
-        metavar="N",
-        type=float,
-        default=24.0,
-        help=(
-            "Search N hours ahead from --start (default: 24). Ignored when --end is set"
-        ),
-    )
-    parser.add_argument(
-        "--sort",
-        choices=("time", "stations"),
-        default="time",
-        dest="sort_by",
-        help=(
-            "Sort by 'time' (chronological, default) or "
-            "'stations' (descending station count)."
-        ),
-    )
-    parser.add_argument(
-        "--min-stations",
-        metavar="N",
-        type=int,
-        default=1,
-        help="Only show windows with at least N stations (default: 1).",
-    )
-    parser.add_argument(
-        "--detail",
-        action="store_true",
-        help="Also print a per-observation breakdown under each window.",
-    )
-    parser.add_argument(
-        "--obs-ids",
-        action="store_true",
-        help="Append contributing observation IDs to each summary line.",
-    )
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Enable debug logging (shows API page URLs).",
-    )
-    return parser
+# ---------------------------------------------------------------------------
+# CLI  (tyro reads field docstrings as --help text)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class Args:
+    """Fetch SatNOGS observations and summarise overlapping coverage windows."""
+
+    norad_id: Annotated[str, tyro.conf.Positional]
+    """NORAD catalog ID of the satellite (e.g. 69015 for CTS-SAT-1)."""
+
+    start: str | None = None
+    """Start of the search window (ISO 8601 + timezone). Defaults to now."""
+
+    end: str | None = None
+    """End of the search window (ISO 8601 + timezone). Mutually exclusive with
+    --hours."""
+
+    hours: float = 24.0
+    """Hours ahead to search from --start. Ignored when --end is provided."""
+
+    sort: SortOrder = "time"
+    """Sort by 'time' (chronological) or 'stations' (descending peak simultaneous)."""
+
+    min_stations: int = 1
+    """Omit windows whose peak simultaneous station count is below this threshold."""
+
+    detail: bool = False
+    """Print a per-observation breakdown after the summary table."""
+
+    obs_ids: bool = False
+    """Add an Obs IDs column to the summary table."""
+
+    tsv: bool = False
+    """Export coverage windows to output/satnogs.tsv."""
+
+    debug: bool = False
+    """Enable debug logging (shows API page URLs)."""
 
 
 def main() -> None:
-    """Entry point: parse arguments, fetch observations, and print coverage summary."""
-    parser = _build_parser()
-    args = parser.parse_args()
+    """Entry point: parse CLI, fetch observations, print coverage summary."""
+    args = tyro.cli(Args)
 
     logger.remove()
     logger.add(
@@ -490,9 +527,13 @@ def main() -> None:
         format="<green>{time:HH:mm:ss}</green> | <level>{level:<8}</level> | {message}",
     )
 
-    start_dt: datetime = args.start if args.start is not None else datetime.now(tz=UTC)
-    end_dt: datetime = (
-        args.end if args.end is not None else start_dt + timedelta(hours=args.hours)
+    start_dt = (
+        _parse_iso(args.start) if args.start is not None else datetime.now(tz=UTC)
+    )
+    end_dt = (
+        _parse_iso(args.end)
+        if args.end is not None
+        else start_dt + timedelta(hours=args.hours)
     )
 
     if end_dt <= start_dt:
@@ -500,7 +541,7 @@ def main() -> None:
         sys.exit(1)
 
     total_hours = (end_dt - start_dt).total_seconds() / 3600
-    sort_by: SortOrder = args.sort_by
+    sort_by: SortOrder = args.sort
     logger.info(
         f"Fetching future observations for NORAD {args.norad_id} "
         f"over {total_hours:.1f}h window"
@@ -527,12 +568,28 @@ def main() -> None:
     windows = build_coverage_windows(observations)
     logger.info(f"Merged into {len(windows)} coverage window(s).")
 
+    if args.tsv:
+        export_tsv(
+            windows,
+            sort_by=sort_by,
+            min_stations=args.min_stations,
+        )
+
     print(  # noqa: T201
-        f"\n{format_summary(windows, sort_by=sort_by, min_stations=args.min_stations, show_obs_ids=args.obs_ids)}"  # noqa: E501
+        f"""\n{
+            format_summary(
+                windows,
+                sort_by=sort_by,
+                min_stations=args.min_stations,
+                show_obs_ids=args.obs_ids,
+            )
+        }"""
     )
 
     if args.detail:
-        filtered = [w for w in windows if w.station_count >= args.min_stations]
+        filtered = [
+            w for w in windows if w.peak_simultaneous_stations >= args.min_stations
+        ]
         print(f"\n{format_detail(filtered, sort_by=sort_by)}")  # noqa: T201
 
 
