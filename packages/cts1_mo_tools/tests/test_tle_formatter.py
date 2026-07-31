@@ -1,5 +1,6 @@
+import pytest
 from unittest.mock import patch, Mock
-from cts1_mo_tools.cts1_tle_formatter import fetch_tle
+from cts1_mo_tools.cts1_tle_formatter import fetch_tle, parse_tle
 
 
 # ---------------------------------------------------------------------
@@ -36,3 +37,17 @@ def test_fetch_tle_http_error(mock_get: Mock):
     mock_get.return_value = mock_response
 
     assert fetch_tle() is None
+    
+# ---------------------------------------------------------------------
+# parse_tle(text: str) tests
+# ---------------------------------------------------------------------
+'''CelesTrak returned < 3 lines test'''
+def test_parse_tle_raises_error_if_not_three_lines() -> None:
+    invalid_tle = (
+        "FRONTIERSAT\n"
+        "1 69015U 24001A"
+    )
+
+    with pytest.raises(ValueError, match="Expected a 3-line TLE"):
+        parse_tle(invalid_tle)
+        
