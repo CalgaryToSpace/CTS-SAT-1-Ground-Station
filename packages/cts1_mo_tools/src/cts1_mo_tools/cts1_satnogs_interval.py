@@ -11,6 +11,7 @@ Usage (uv):
     uv run cts1_satnogs_interval 69015 \\
         --start 2026-07-10T00:00:00Z --end 2026-07-12T00:00:00Z
     uv run cts1_satnogs_interval 69015 --sort stations --min-stations 3
+    uv run cts1_satnogs_interval 69015 --hours 6 --sort stations --tsv
 """
 
 from __future__ import annotations
