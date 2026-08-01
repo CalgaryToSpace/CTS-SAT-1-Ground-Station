@@ -329,14 +329,6 @@ class TestDecodeBeaconBasic:
         result = self._valid(friendly_message=b"Hello\x00garbage")
         assert result["friendly_message"] == "Hello"
 
-    def test_end_sentinel_ok(self) -> None:
-        result = self._valid(end_sentinel=b"END\x00")
-        assert result["end_sentinel_ok"] is True
-
-    def test_end_sentinel_bad(self) -> None:
-        result = self._valid(end_sentinel=b"BAD\x00")
-        assert result["end_sentinel_ok"] is False
-
     def test_enum_fields_resolved(self) -> None:
         result = self._valid(
             active_rf_switch_control_mode=1,

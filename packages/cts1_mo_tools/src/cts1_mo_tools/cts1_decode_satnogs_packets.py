@@ -437,12 +437,6 @@ def decode_beacon_basic_packet(payload: bytes) -> dict[str, Any]:
     rf = dict(zip(BEACON_FIELD_NAMES, vals, strict=True))
     fm_raw = payload[BEACON_FIXED_SIZE : BEACON_FIXED_SIZE + FRIENDLY_MESSAGE_SIZE]
     friendly = fm_raw.split(b"\x00")[0].decode("utf-8", errors="replace")
-    end_raw = payload[
-        BEACON_FIXED_SIZE + FRIENDLY_MESSAGE_SIZE : BEACON_FIXED_SIZE
-        + FRIENDLY_MESSAGE_SIZE
-        + END_MESSAGE_SIZE
-    ]
-    end_ok = end_raw == b"END\x00"
     sat_name = rf["satellite_name"].decode("ascii", errors="replace").rstrip("\x00")
     epoch_ms = rf["unix_epoch_time_ms"]
 
@@ -525,7 +519,6 @@ def decode_beacon_basic_packet(payload: bytes) -> dict[str, Any]:
         "gnss_rx_mode": e(GNSS_RX_MODE_MAP, rf["gnss_rx_mode_enum"]),
         # Friendly
         "friendly_message": friendly,
-        "end_sentinel_ok": end_ok,
     }
 
     return data  # noqa: RET504
