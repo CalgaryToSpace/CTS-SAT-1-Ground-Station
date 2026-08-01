@@ -442,14 +442,10 @@ class TestDecodeAdcsCurrentState1:
 
     def test_all_zero_modes(self) -> None:
         result = decode_adcs_current_state_1(_make_adcs_state_bytes())
-        assert result["adcs_attitude_estimation_mode_enum"] == 0
-        assert result["adcs_attitude_estimation_mode"] == "No attitude estimation"
-        assert result["adcs_control_mode_enum"] == 0
-        assert result["adcs_control_mode"] == "No control"
-        assert result["adcs_run_mode_enum"] == 0
-        assert result["adcs_run_mode"] == "Off"
-        assert result["adcs_asgp4_mode_enum"] == 0
-        assert result["adcs_asgp4_mode"] == "Off"
+        assert result["adcs_attitude_estimation_mode"] == "0 - No attitude estimation"
+        assert result["adcs_control_mode"] == "0 - No control"
+        assert result["adcs_run_mode"] == "0 - Off"
+        assert result["adcs_asgp4_mode"] == "0 - Off"
 
     def test_max_valid_modes(self) -> None:
         result = decode_adcs_current_state_1(
@@ -457,13 +453,16 @@ class TestDecodeAdcsCurrentState1:
                 estim_mode=7, control_mode=15, run_mode=3, asgp4_mode=3
             )
         )
-        assert result["adcs_attitude_estimation_mode"] == "User Coded Estimation Mode"
+        assert (
+            result["adcs_attitude_estimation_mode"]
+            == "7 - User Coded Estimation Mode"
+        )
         assert (
             result["adcs_control_mode"]
-            == "Target-tracking yaw-only wheel control mode"
+            == "15 - Target-tracking yaw-only wheel control mode"
         )
-        assert result["adcs_run_mode"] == "Simulation"
-        assert result["adcs_asgp4_mode"] == "Augment"
+        assert result["adcs_run_mode"] == "3 - Simulation"
+        assert result["adcs_asgp4_mode"] == "3 - Augment"
 
     def test_status_bits_individually(self) -> None:
         result = decode_adcs_current_state_1(
@@ -603,12 +602,9 @@ class TestDecodeBeaconExtended:
         # bits: estim_mode=1, control_mode=2 -> byte0 = (2<<4)|1 = 0x21
         # run_mode=3, asgp4_mode=0 -> byte1 low nibble = 0x03
         result = self._valid(adcs_current_state_1=bytes([0x21, 0x03, 0, 0, 0, 0]))
-        assert result["adcs_attitude_estimation_mode_enum"] == 1
-        assert result["adcs_attitude_estimation_mode"] == "MEMS rate sensing"
-        assert result["adcs_control_mode_enum"] == 2
-        assert result["adcs_control_mode"] == "Y-Thomson spin"
-        assert result["adcs_run_mode_enum"] == 3
-        assert result["adcs_run_mode"] == "Simulation"
+        assert result["adcs_attitude_estimation_mode"] == "1 - MEMS rate sensing"
+        assert result["adcs_control_mode"] == "2 - Y-Thomson spin"
+        assert result["adcs_run_mode"] == "3 - Simulation"
         assert result["adcs_errors"] == "[]"
         assert result["adcs_flags"] == "[]"
 

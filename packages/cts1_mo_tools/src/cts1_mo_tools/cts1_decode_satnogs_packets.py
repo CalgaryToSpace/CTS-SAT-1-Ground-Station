@@ -362,6 +362,11 @@ def e(mapping: dict[int, str], value: int) -> str:
     return mapping.get(value, f"UNKNOWN({value})")
 
 
+def e_numbered(mapping: dict[int, str], value: int) -> str:
+    """Like `e()`, but merges the number in, e.g. "2 - Y-Thomson spin"."""
+    return f"{value} - {e(mapping, value)}"
+
+
 def decode_adcs_current_state_1(raw: bytes) -> dict[str, Any]:
     """Decode the 6-byte ADCS Current State telemetry frame (ID 132, frame 1).
 
@@ -391,14 +396,10 @@ def decode_adcs_current_state_1(raw: bytes) -> dict[str, Any]:
     flags = [name for bit_num, name in ADCS_FLAG_BITS if bit(bit_num)]
 
     return {
-        "adcs_attitude_estimation_mode_enum": estim_mode,
-        "adcs_attitude_estimation_mode": e(ADCS_ESTIM_MODE_MAP, estim_mode),
-        "adcs_control_mode_enum": control_mode,
-        "adcs_control_mode": e(ADCS_CONTROL_MODE_MAP, control_mode),
-        "adcs_run_mode_enum": run_mode,
-        "adcs_run_mode": e(ADCS_RUN_MODE_MAP, run_mode),
-        "adcs_asgp4_mode_enum": asgp4_mode,
-        "adcs_asgp4_mode": e(ADCS_ASGP4_MODE_MAP, asgp4_mode),
+        "adcs_attitude_estimation_mode": e_numbered(ADCS_ESTIM_MODE_MAP, estim_mode),
+        "adcs_control_mode": e_numbered(ADCS_CONTROL_MODE_MAP, control_mode),
+        "adcs_run_mode": e_numbered(ADCS_RUN_MODE_MAP, run_mode),
+        "adcs_asgp4_mode": e_numbered(ADCS_ASGP4_MODE_MAP, asgp4_mode),
         "adcs_cubecontrol_signal_enabled": bit(12),
         "adcs_cubecontrol_motor_enabled": bit(13),
         "adcs_cubesense1_enabled": bit(14),
