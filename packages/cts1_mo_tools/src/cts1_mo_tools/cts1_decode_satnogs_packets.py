@@ -323,6 +323,22 @@ ADCS_CONTROL_MODE_MAP = {
 ADCS_RUN_MODE_MAP = {0: "Off", 1: "Enabled", 2: "Triggered", 3: "Simulation"}
 ADCS_ASGP4_MODE_MAP = {0: "Off", 1: "Trigger", 2: "Background", 3: "Augment"}
 
+# ADCS Current State (Telemetry ID 132, frame 1), offset 12-22: single-bit BOOL
+# "... Enabled" fields (hardware/electronics enabled statuses).
+ADCS_ENABLED_BITS: list[tuple[int, str]] = [
+    (12, "CUBECONTROL_SIGNAL"),
+    (13, "CUBECONTROL_MOTOR"),
+    (14, "CUBESENSE1"),
+    (15, "CUBESENSE2"),
+    (16, "CUBEWHEEL1"),
+    (17, "CUBEWHEEL2"),
+    (18, "CUBEWHEEL3"),
+    (19, "CUBESTAR"),
+    (20, "GPS_RECEIVER"),
+    (21, "GPS_LNA_POWER"),
+    (22, "MOTOR_DRIVER"),
+]
+
 # ADCS Current State (Telemetry ID 132, frame 1), offset 12-47: single-bit BOOL
 # fields explicitly named "... Error" (comms errors, out-of-range detections).
 ADCS_ERROR_BITS: list[tuple[int, str]] = [
@@ -376,7 +392,8 @@ def decode_adcs_current_state_1(raw: bytes) -> dict[str, Any]:
       bits 8-9:   ADCS Run Mode (ENUM, see ADCS_RUN_MODE_MAP)
       bits 10-11: ASGP4 Mode (ENUM, see ADCS_ASGP4_MODE_MAP)
       bits 12-47: single-bit BOOL flags (enabled statuses, comms/range errors,
-                  overcurrent detections); see ADCS_ERROR_BITS / ADCS_FLAG_BITS.
+                  overcurrent detections); see ADCS_ENABLED_BITS / ADCS_ERROR_BITS
+                  / ADCS_FLAG_BITS.
     """
     if len(raw) != 6:  # noqa: PLR2004
         msg = f"adcs_current_state_1 must be 6 bytes, got {len(raw)}"
@@ -392,6 +409,7 @@ def decode_adcs_current_state_1(raw: bytes) -> dict[str, Any]:
     run_mode = (value >> 8) & 0x3
     asgp4_mode = (value >> 10) & 0x3
 
+    enabled = [name for bit_num, name in ADCS_ENABLED_BITS if bit(bit_num)]
     errors = [name for bit_num, name in ADCS_ERROR_BITS if bit(bit_num)]
     flags = [name for bit_num, name in ADCS_FLAG_BITS if bit(bit_num)]
 
@@ -400,17 +418,7 @@ def decode_adcs_current_state_1(raw: bytes) -> dict[str, Any]:
         "adcs_control_mode": e_numbered(ADCS_CONTROL_MODE_MAP, control_mode),
         "adcs_run_mode": e_numbered(ADCS_RUN_MODE_MAP, run_mode),
         "adcs_asgp4_mode": e_numbered(ADCS_ASGP4_MODE_MAP, asgp4_mode),
-        "adcs_cubecontrol_signal_enabled": bit(12),
-        "adcs_cubecontrol_motor_enabled": bit(13),
-        "adcs_cubesense1_enabled": bit(14),
-        "adcs_cubesense2_enabled": bit(15),
-        "adcs_cubewheel1_enabled": bit(16),
-        "adcs_cubewheel2_enabled": bit(17),
-        "adcs_cubewheel3_enabled": bit(18),
-        "adcs_cubestar_enabled": bit(19),
-        "adcs_gps_receiver_enabled": bit(20),
-        "adcs_gps_lna_power_enabled": bit(21),
-        "adcs_motor_driver_enabled": bit(22),
+        "adcs_enabled": json.dumps(enabled),
         "adcs_sun_above_local_horizon": bit(23),
         "adcs_errors": json.dumps(errors),
         "adcs_flags": json.dumps(flags),

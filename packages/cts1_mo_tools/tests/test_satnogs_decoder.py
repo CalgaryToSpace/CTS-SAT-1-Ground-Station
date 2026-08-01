@@ -4,6 +4,7 @@ from typing import Any
 
 import pytest
 from cts1_mo_tools.cts1_decode_satnogs_packets import (
+    ADCS_ENABLED_BITS,
     ADCS_ERROR_BITS,
     ADCS_FLAG_BITS,
     BEACON_EXTENDED_TOTAL_STRUCT_SIZE,
@@ -464,32 +465,32 @@ class TestDecodeAdcsCurrentState1:
         assert result["adcs_run_mode"] == "3 - Simulation"
         assert result["adcs_asgp4_mode"] == "3 - Augment"
 
-    def test_status_bits_individually(self) -> None:
+    def test_enabled_json_list_single(self) -> None:
         result = decode_adcs_current_state_1(
-            _make_adcs_state_bytes(bit_indices_set=(12, 23))
+            _make_adcs_state_bytes(bit_indices_set=(12,))
         )
-        assert result["adcs_cubecontrol_signal_enabled"] is True
-        assert result["adcs_sun_above_local_horizon"] is True
-        assert result["adcs_cubecontrol_motor_enabled"] is False
-        assert result["adcs_cubesense1_enabled"] is False
+        assert json.loads(result["adcs_enabled"]) == ["CUBECONTROL_SIGNAL"]
 
-    def test_all_status_bits_false_by_default(self) -> None:
+    def test_enabled_json_list_multiple_preserves_order(self) -> None:
+        result = decode_adcs_current_state_1(
+            _make_adcs_state_bytes(bit_indices_set=(22, 12, 19))
+        )
+        assert json.loads(result["adcs_enabled"]) == [
+            "CUBECONTROL_SIGNAL",
+            "CUBESTAR",
+            "MOTOR_DRIVER",
+        ]
+
+    def test_enabled_json_list_empty_by_default(self) -> None:
         result = decode_adcs_current_state_1(_make_adcs_state_bytes())
-        for key in (
-            "adcs_cubecontrol_signal_enabled",
-            "adcs_cubecontrol_motor_enabled",
-            "adcs_cubesense1_enabled",
-            "adcs_cubesense2_enabled",
-            "adcs_cubewheel1_enabled",
-            "adcs_cubewheel2_enabled",
-            "adcs_cubewheel3_enabled",
-            "adcs_cubestar_enabled",
-            "adcs_gps_receiver_enabled",
-            "adcs_gps_lna_power_enabled",
-            "adcs_motor_driver_enabled",
-            "adcs_sun_above_local_horizon",
-        ):
-            assert result[key] is False
+        assert json.loads(result["adcs_enabled"]) == []
+
+    def test_sun_above_local_horizon_is_separate_bool(self) -> None:
+        result = decode_adcs_current_state_1(
+            _make_adcs_state_bytes(bit_indices_set=(23,))
+        )
+        assert result["adcs_sun_above_local_horizon"] is True
+        assert json.loads(result["adcs_enabled"]) == []
 
     def test_errors_json_list_single(self) -> None:
         result = decode_adcs_current_state_1(
@@ -519,25 +520,31 @@ class TestDecodeAdcsCurrentState1:
         ]
         assert json.loads(result["adcs_errors"]) == []
 
-    def test_errors_and_flags_independent_of_status_bits(self) -> None:
-        # Setting an error/flag bit should not affect unrelated status bits.
+    def test_errors_and_flags_independent_of_enabled_bits(self) -> None:
+        # Setting an error/flag bit should not affect unrelated enabled bits.
         result = decode_adcs_current_state_1(
             _make_adcs_state_bytes(bit_indices_set=(24, 33))
         )
-        assert result["adcs_cubecontrol_signal_enabled"] is False
+        assert json.loads(result["adcs_enabled"]) == []
         assert json.loads(result["adcs_errors"]) == ["CUBESENSE1_COMMS_ERROR"]
         assert json.loads(result["adcs_flags"]) == ["CAM1_SRAM_OVERCURRENT"]
 
-    def test_no_overlap_between_error_and_flag_bits(self) -> None:
+    def test_no_overlap_between_enabled_error_and_flag_bits(self) -> None:
+        enabled_offsets = {i for i, _ in ADCS_ENABLED_BITS}
         error_offsets = {i for i, _ in ADCS_ERROR_BITS}
         flag_offsets = {i for i, _ in ADCS_FLAG_BITS}
+        assert enabled_offsets.isdisjoint(error_offsets)
+        assert enabled_offsets.isdisjoint(flag_offsets)
         assert error_offsets.isdisjoint(flag_offsets)
 
-    def test_all_36_status_flag_bits_accounted_for(self) -> None:
-        status_offsets = set(range(12, 24))
+    def test_all_36_bit_offsets_accounted_for(self) -> None:
+        enabled_offsets = {i for i, _ in ADCS_ENABLED_BITS}
         error_offsets = {i for i, _ in ADCS_ERROR_BITS}
         flag_offsets = {i for i, _ in ADCS_FLAG_BITS}
-        all_offsets = status_offsets | error_offsets | flag_offsets
+        sun_above_horizon_offset = {23}
+        all_offsets = (
+            enabled_offsets | error_offsets | flag_offsets | sun_above_horizon_offset
+        )
         assert all_offsets == set(range(12, 48))
         assert len(all_offsets) == 36
 
