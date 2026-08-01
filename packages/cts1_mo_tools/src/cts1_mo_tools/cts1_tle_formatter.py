@@ -2,7 +2,7 @@ import requests
 from dataclasses import dataclass
 from decimal import Decimal
 
-'''
+"""
 Script to fetch FrontierSat TLE from CelesTrak, and format it into the CTS1+adcs_set_sgp4_orbit_params telecommand.
 
 To run from this file:
@@ -14,13 +14,15 @@ To run from CLI:
 
 Debugging:
 If unable to run script due to 'missing requests module', then run 'uv sync'
-'''
+"""
+
 
 @dataclass
 class TLE:
     name: str
     line1: str
     line2: str
+
 
 @dataclass
 class TelecommandParams:
@@ -61,13 +63,15 @@ def fetch_tle() -> str | None:
     except requests.exceptions.RequestException as e:
         print(f"An error occurred while connecting to CelesTrak: {e}")
         return None
-    
+
+
 def convert_to_telecommand(tle_text: str) -> str:
     """Convert raw TLE text into the CTS telecommand."""
 
     tle = parse_tle(tle_text)
     params = extract_orbit_parameters(tle)
     return format_telecommand(params)
+
 
 def parse_tle(text: str) -> TLE:
     """Parse raw TLE text into a TLE object."""
@@ -91,9 +95,8 @@ def extract_orbit_parameters(tle: TLE) -> TelecommandParams:
     line2 = tle.line2.split()
 
     # Convert TLE drag term (e.g. 36581-3 -> 0.00036581)
-    initial_drag_term = (
-        Decimal("0." + line1[6][:5])
-        * (Decimal(10) ** int(line1[6][5:]))
+    initial_drag_term = Decimal("0." + line1[6][:5]) * (
+        Decimal(10) ** int(line1[6][5:])
     )
 
     return TelecommandParams(
@@ -139,7 +142,6 @@ def main():
     print("\n--- FINAL FORMATTED TELECOMMAND ---")
     print(telecommand)
     print()
-
 
 
 if __name__ == "__main__":

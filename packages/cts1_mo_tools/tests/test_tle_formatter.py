@@ -1,12 +1,19 @@
 import pytest
 from unittest.mock import patch, Mock
-from cts1_mo_tools.cts1_tle_formatter import fetch_tle, parse_tle, extract_orbit_parameters, TLE
+from cts1_mo_tools.cts1_tle_formatter import (
+    fetch_tle,
+    parse_tle,
+    extract_orbit_parameters,
+    TLE,
+)
 
 
 # ---------------------------------------------------------------------
 # fetch_tle() tests
 # ---------------------------------------------------------------------
-'''Tests that "No GP data found" in tle_data is handled'''
+"""Tests that "No GP data found" in tle_data is handled"""
+
+
 @patch("cts1_mo_tools.cts1_tle_formatter.requests.get")
 def test_fetch_tle_no_data(mock_get: Mock):
     mock_response = Mock()
@@ -16,8 +23,11 @@ def test_fetch_tle_no_data(mock_get: Mock):
     mock_get.return_value = mock_response
 
     assert fetch_tle() is None
-    
-'''Tests that empty tle_data is handled'''
+
+
+"""Tests that empty tle_data is handled"""
+
+
 @patch("cts1_mo_tools.cts1_tle_formatter.requests.get")
 def test_fetch_tle_empty_response(mock_get: Mock):
     mock_response = Mock()
@@ -28,7 +38,10 @@ def test_fetch_tle_empty_response(mock_get: Mock):
 
     assert fetch_tle() is None
 
-'''Tests Connection Error'''
+
+"""Tests Connection Error"""
+
+
 @patch("cts1_mo_tools.cts1_tle_formatter.requests.get")
 def test_fetch_tle_http_error(mock_get: Mock):
     mock_response = Mock()
@@ -37,26 +50,27 @@ def test_fetch_tle_http_error(mock_get: Mock):
     mock_get.return_value = mock_response
 
     assert fetch_tle() is None
-    
-    
+
+
 # ---------------------------------------------------------------------
 # parse_tle(text: str) tests
 # ---------------------------------------------------------------------
-'''Test that CelesTrak returns 3 lines'''
+"""Test that CelesTrak returns 3 lines"""
+
+
 def test_parse_tle_raises_error_if_not_three_lines() -> None:
-    invalid_tle = (
-        "FRONTIERSAT\n"
-        "1 69015U 24001A"
-    )
+    invalid_tle = "FRONTIERSAT\n1 69015U 24001A"
 
     with pytest.raises(ValueError, match="Expected a 3-line TLE"):
         parse_tle(invalid_tle)
-        
-        
+
+
 # ---------------------------------------------------------------------
 # extract_orbit_parameters(tle: TLE) tests
-# --------------------------------------------------------------------- 
-'''Test that eccentricity is converted to the correct format'''
+# ---------------------------------------------------------------------
+"""Test that eccentricity is converted to the correct format"""
+
+
 def test_extract_orbit_parameters_converts_eccentricity() -> None:
     tle = TLE(
         name="TEST",
@@ -67,8 +81,11 @@ def test_extract_orbit_parameters_converts_eccentricity() -> None:
     result = extract_orbit_parameters(tle)
 
     assert result.eccentricity == "0.0001000"
-    
-'''Test that drag term is converted to the correct format'''
+
+
+"""Test that drag term is converted to the correct format"""
+
+
 @pytest.mark.parametrize(
     "drag_value, expected",
     [
