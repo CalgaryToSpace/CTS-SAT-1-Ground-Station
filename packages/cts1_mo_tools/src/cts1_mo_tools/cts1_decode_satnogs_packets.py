@@ -11,6 +11,7 @@ SQLite format: a "packet" table with (at least) "ts_received", "payload",
 "rs_errs", and "session_dir" columns.
 """
 
+import json
 import sqlite3
 import struct
 from datetime import UTC, datetime
@@ -290,9 +291,129 @@ MPI_STOP_REASON_MAP = {
 }
 GNSS_RX_MODE_MAP = {0: "COMMAND_MODE", 1: "FIREHOSE_MODE", 2: "DISABLED"}
 
+# ADCS Current State (Telemetry ID 132, frame 1) enum maps.
+ADCS_ESTIM_MODE_MAP = {
+    0: "No attitude estimation",
+    1: "MEMS rate sensing",
+    2: "Magnetometer rate filter",
+    3: "Magnetometer rate filter with pitch estimation",
+    4: "Magnetometer and Fine-sun TRIAD algorithm",
+    5: "Full-state EKF",
+    6: "MEMS gyro EKF",
+    7: "User Coded Estimation Mode",
+}
+ADCS_CONTROL_MODE_MAP = {
+    0: "No control",
+    1: "Detumbling control",
+    2: "Y-Thomson spin",
+    3: "Y-Wheel momentum stabilized - Initial Pitch Acquisition",
+    4: "Y-Wheel momentum stabilized - Steady State",
+    5: "XYZ-Wheel control",
+    6: "Rwheel sun tracking control",
+    7: "Rwheel target tracking control",
+    8: "Very Fast-spin Detumbling control (10Hz)",
+    9: "Fast-spin Detumbling control",
+    10: "User Specific Control Mode 1",
+    11: "User Specific Control Mode 2",
+    12: "Stop R-wheels",
+    13: "User Coded Control Mode",
+    14: "Sun-tracking yaw- or roll-only wheel control mode",
+    15: "Target-tracking yaw-only wheel control mode",
+}
+ADCS_RUN_MODE_MAP = {0: "Off", 1: "Enabled", 2: "Triggered", 3: "Simulation"}
+ADCS_ASGP4_MODE_MAP = {0: "Off", 1: "Trigger", 2: "Background", 3: "Augment"}
+
+# ADCS Current State (Telemetry ID 132, frame 1), offset 12-47: single-bit BOOL
+# fields explicitly named "... Error" (comms errors, out-of-range detections).
+ADCS_ERROR_BITS: list[tuple[int, str]] = [
+    (24, "CUBESENSE1_COMMS_ERROR"),
+    (25, "CUBESENSE2_COMMS_ERROR"),
+    (26, "CUBECONTROL_SIGNAL_COMMS_ERROR"),
+    (27, "CUBECONTROL_MOTOR_COMMS_ERROR"),
+    (28, "CUBEWHEEL1_COMMS_ERROR"),
+    (29, "CUBEWHEEL2_COMMS_ERROR"),
+    (30, "CUBEWHEEL3_COMMS_ERROR"),
+    (31, "CUBESTAR_COMMS_ERROR"),
+    (32, "MAGNETOMETER_RANGE_ERROR"),
+    (35, "CAM1_SENSOR_BUSY_ERROR"),
+    (36, "CAM1_SENSOR_DETECTION_ERROR"),
+    (37, "SUN_SENSOR_RANGE_ERROR"),
+    (40, "CAM2_SENSOR_BUSY_ERROR"),
+    (41, "CAM2_SENSOR_DETECTION_ERROR"),
+    (42, "NADIR_SENSOR_RANGE_ERROR"),
+    (43, "RATE_SENSOR_RANGE_ERROR"),
+    (44, "WHEEL_SPEED_RANGE_ERROR"),
+    (45, "COARSE_SUN_SENSOR_ERROR"),
+    (46, "STAR_TRACKER_MATCH_ERROR"),
+]
+
+# Same offset range: single-bit BOOL fields for "overcurrent detected" conditions
+# (not named "... Error" in the spec, kept as a separate "flags" bucket).
+ADCS_FLAG_BITS: list[tuple[int, str]] = [
+    (33, "CAM1_SRAM_OVERCURRENT"),
+    (34, "CAM1_3V3_OVERCURRENT"),
+    (38, "CAM2_SRAM_OVERCURRENT"),
+    (39, "CAM2_3V3_OVERCURRENT"),
+    (47, "STAR_TRACKER_OVERCURRENT"),
+]
+
 
 def e(mapping: dict[int, str], value: int) -> str:
     return mapping.get(value, f"UNKNOWN({value})")
+
+
+def decode_adcs_current_state_1(raw: bytes) -> dict[str, Any]:
+    """Decode the 6-byte ADCS Current State telemetry frame (ID 132, frame 1).
+
+    Bit layout (48 bits total, byte order little-endian):
+      bits 0-3:   Attitude Estimation Mode (ENUM, see ADCS_ESTIM_MODE_MAP)
+      bits 4-7:   Control Mode (ENUM, see ADCS_CONTROL_MODE_MAP)
+      bits 8-9:   ADCS Run Mode (ENUM, see ADCS_RUN_MODE_MAP)
+      bits 10-11: ASGP4 Mode (ENUM, see ADCS_ASGP4_MODE_MAP)
+      bits 12-47: single-bit BOOL flags (enabled statuses, comms/range errors,
+                  overcurrent detections); see ADCS_ERROR_BITS / ADCS_FLAG_BITS.
+    """
+    if len(raw) != 6:  # noqa: PLR2004
+        msg = f"adcs_current_state_1 must be 6 bytes, got {len(raw)}"
+        raise ValueError(msg)
+
+    value = int.from_bytes(raw, "little")
+
+    def bit(i: int) -> bool:
+        return bool((value >> i) & 1)
+
+    estim_mode = value & 0xF
+    control_mode = (value >> 4) & 0xF
+    run_mode = (value >> 8) & 0x3
+    asgp4_mode = (value >> 10) & 0x3
+
+    errors = [name for bit_num, name in ADCS_ERROR_BITS if bit(bit_num)]
+    flags = [name for bit_num, name in ADCS_FLAG_BITS if bit(bit_num)]
+
+    return {
+        "adcs_attitude_estimation_mode_enum": estim_mode,
+        "adcs_attitude_estimation_mode": e(ADCS_ESTIM_MODE_MAP, estim_mode),
+        "adcs_control_mode_enum": control_mode,
+        "adcs_control_mode": e(ADCS_CONTROL_MODE_MAP, control_mode),
+        "adcs_run_mode_enum": run_mode,
+        "adcs_run_mode": e(ADCS_RUN_MODE_MAP, run_mode),
+        "adcs_asgp4_mode_enum": asgp4_mode,
+        "adcs_asgp4_mode": e(ADCS_ASGP4_MODE_MAP, asgp4_mode),
+        "adcs_cubecontrol_signal_enabled": bit(12),
+        "adcs_cubecontrol_motor_enabled": bit(13),
+        "adcs_cubesense1_enabled": bit(14),
+        "adcs_cubesense2_enabled": bit(15),
+        "adcs_cubewheel1_enabled": bit(16),
+        "adcs_cubewheel2_enabled": bit(17),
+        "adcs_cubewheel3_enabled": bit(18),
+        "adcs_cubestar_enabled": bit(19),
+        "adcs_gps_receiver_enabled": bit(20),
+        "adcs_gps_lna_power_enabled": bit(21),
+        "adcs_motor_driver_enabled": bit(22),
+        "adcs_sun_above_local_horizon": bit(23),
+        "adcs_errors": json.dumps(errors),
+        "adcs_flags": json.dumps(flags),
+    }
 
 
 # -- Decoders -----------------------------------------------------------------
@@ -576,8 +697,8 @@ def decode_beacon_extended_packet(payload: bytes) -> dict[str, Any]:
         # GNSS
         "gnss_uart_interrupt_enabled": bool(rf["gnss_uart_interrupt_enabled"]),
         "gnss_rx_mode": e(GNSS_RX_MODE_MAP, rf["gnss_rx_mode_enum"]),
-        # ADCS (state/status bitfield internals not decoded yet; raw bytes only)
-        "adcs_current_state_1_hex": ef["adcs_current_state_1"].hex(),
+        # ADCS
+        **decode_adcs_current_state_1(ef["adcs_current_state_1"]),
         "adcs_raw_css_1": ef["adcs_raw_css_1"],
         "adcs_raw_css_2": ef["adcs_raw_css_2"],
         "adcs_raw_css_3": ef["adcs_raw_css_3"],

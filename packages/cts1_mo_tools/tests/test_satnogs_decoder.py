@@ -1,8 +1,11 @@
+import json
 import struct
 from typing import Any
 
 import pytest
 from cts1_mo_tools.cts1_decode_satnogs_packets import (
+    ADCS_ERROR_BITS,
+    ADCS_FLAG_BITS,
     BEACON_EXTENDED_TOTAL_STRUCT_SIZE,
     BEACON_FIXED_SIZE,
     BEACON_TOTAL_STRUCT_SIZE,
@@ -17,6 +20,7 @@ from cts1_mo_tools.cts1_decode_satnogs_packets import (
     PACKET_TYPE_MAP_INV,
     TCMD_RESPONSE_HEADER_FMT,
     TCMD_RESPONSE_HEADER_SIZE,
+    decode_adcs_current_state_1,
     decode_beacon_basic_packet,
     decode_beacon_extended_packet,
     decode_beacon_peripheral_packet,
@@ -420,6 +424,134 @@ class TestDecodeBeaconPeripheral:
 
 
 # ---------------------------------------------------------------------------
+# Tests for decode_adcs_current_state_1
+# ---------------------------------------------------------------------------
+
+
+def _make_adcs_state_bytes(
+    *,
+    estim_mode: int = 0,
+    control_mode: int = 0,
+    run_mode: int = 0,
+    asgp4_mode: int = 0,
+    bit_indices_set: tuple[int, ...] = (),
+) -> bytes:
+    """Build a 6-byte ADCS Current State frame from field values + bit offsets."""
+    value = estim_mode | (control_mode << 4) | (run_mode << 8) | (asgp4_mode << 10)
+    for i in bit_indices_set:
+        value |= 1 << i
+    return value.to_bytes(6, "little")
+
+
+class TestDecodeAdcsCurrentState1:
+    def test_wrong_length_raises(self) -> None:
+        with pytest.raises(ValueError, match="must be 6 bytes"):
+            decode_adcs_current_state_1(b"\x00" * 5)
+
+    def test_all_zero_modes(self) -> None:
+        result = decode_adcs_current_state_1(_make_adcs_state_bytes())
+        assert result["adcs_attitude_estimation_mode_enum"] == 0
+        assert result["adcs_attitude_estimation_mode"] == "No attitude estimation"
+        assert result["adcs_control_mode_enum"] == 0
+        assert result["adcs_control_mode"] == "No control"
+        assert result["adcs_run_mode_enum"] == 0
+        assert result["adcs_run_mode"] == "Off"
+        assert result["adcs_asgp4_mode_enum"] == 0
+        assert result["adcs_asgp4_mode"] == "Off"
+
+    def test_max_valid_modes(self) -> None:
+        result = decode_adcs_current_state_1(
+            _make_adcs_state_bytes(
+                estim_mode=7, control_mode=15, run_mode=3, asgp4_mode=3
+            )
+        )
+        assert result["adcs_attitude_estimation_mode"] == "User Coded Estimation Mode"
+        assert (
+            result["adcs_control_mode"]
+            == "Target-tracking yaw-only wheel control mode"
+        )
+        assert result["adcs_run_mode"] == "Simulation"
+        assert result["adcs_asgp4_mode"] == "Augment"
+
+    def test_status_bits_individually(self) -> None:
+        result = decode_adcs_current_state_1(
+            _make_adcs_state_bytes(bit_indices_set=(12, 23))
+        )
+        assert result["adcs_cubecontrol_signal_enabled"] is True
+        assert result["adcs_sun_above_local_horizon"] is True
+        assert result["adcs_cubecontrol_motor_enabled"] is False
+        assert result["adcs_cubesense1_enabled"] is False
+
+    def test_all_status_bits_false_by_default(self) -> None:
+        result = decode_adcs_current_state_1(_make_adcs_state_bytes())
+        for key in (
+            "adcs_cubecontrol_signal_enabled",
+            "adcs_cubecontrol_motor_enabled",
+            "adcs_cubesense1_enabled",
+            "adcs_cubesense2_enabled",
+            "adcs_cubewheel1_enabled",
+            "adcs_cubewheel2_enabled",
+            "adcs_cubewheel3_enabled",
+            "adcs_cubestar_enabled",
+            "adcs_gps_receiver_enabled",
+            "adcs_gps_lna_power_enabled",
+            "adcs_motor_driver_enabled",
+            "adcs_sun_above_local_horizon",
+        ):
+            assert result[key] is False
+
+    def test_errors_json_list_single(self) -> None:
+        result = decode_adcs_current_state_1(
+            _make_adcs_state_bytes(bit_indices_set=(24,))
+        )
+        assert json.loads(result["adcs_errors"]) == ["CUBESENSE1_COMMS_ERROR"]
+        assert json.loads(result["adcs_flags"]) == []
+
+    def test_errors_json_list_multiple_preserves_order(self) -> None:
+        result = decode_adcs_current_state_1(
+            _make_adcs_state_bytes(bit_indices_set=(46, 24, 32))
+        )
+        assert json.loads(result["adcs_errors"]) == [
+            "CUBESENSE1_COMMS_ERROR",
+            "MAGNETOMETER_RANGE_ERROR",
+            "STAR_TRACKER_MATCH_ERROR",
+        ]
+
+    def test_flags_json_list(self) -> None:
+        result = decode_adcs_current_state_1(
+            _make_adcs_state_bytes(bit_indices_set=(33, 34, 47))
+        )
+        assert json.loads(result["adcs_flags"]) == [
+            "CAM1_SRAM_OVERCURRENT",
+            "CAM1_3V3_OVERCURRENT",
+            "STAR_TRACKER_OVERCURRENT",
+        ]
+        assert json.loads(result["adcs_errors"]) == []
+
+    def test_errors_and_flags_independent_of_status_bits(self) -> None:
+        # Setting an error/flag bit should not affect unrelated status bits.
+        result = decode_adcs_current_state_1(
+            _make_adcs_state_bytes(bit_indices_set=(24, 33))
+        )
+        assert result["adcs_cubecontrol_signal_enabled"] is False
+        assert json.loads(result["adcs_errors"]) == ["CUBESENSE1_COMMS_ERROR"]
+        assert json.loads(result["adcs_flags"]) == ["CAM1_SRAM_OVERCURRENT"]
+
+    def test_no_overlap_between_error_and_flag_bits(self) -> None:
+        error_offsets = {i for i, _ in ADCS_ERROR_BITS}
+        flag_offsets = {i for i, _ in ADCS_FLAG_BITS}
+        assert error_offsets.isdisjoint(flag_offsets)
+
+    def test_all_36_status_flag_bits_accounted_for(self) -> None:
+        status_offsets = set(range(12, 24))
+        error_offsets = {i for i, _ in ADCS_ERROR_BITS}
+        flag_offsets = {i for i, _ in ADCS_FLAG_BITS}
+        all_offsets = status_offsets | error_offsets | flag_offsets
+        assert all_offsets == set(range(12, 48))
+        assert len(all_offsets) == 36
+
+
+# ---------------------------------------------------------------------------
 # Tests for decode_beacon_extended_packet
 # ---------------------------------------------------------------------------
 
@@ -475,9 +607,18 @@ class TestDecodeBeaconExtended:
         assert result["eps_total_avg_net_battery_power_W"] == -1.5
         assert result["eps_total_avg_power_distributed_W"] == 2.5
 
-    def test_adcs_current_state_1_hex(self) -> None:
-        result = self._valid(adcs_current_state_1=b"\xde\xad\xbe\xef\x01\x02")
-        assert result["adcs_current_state_1_hex"] == "deadbeef0102"
+    def test_adcs_current_state_1_decoded_fields_merged_in(self) -> None:
+        # bits: estim_mode=1, control_mode=2 -> byte0 = (2<<4)|1 = 0x21
+        # run_mode=3, asgp4_mode=0 -> byte1 low nibble = 0x03
+        result = self._valid(adcs_current_state_1=bytes([0x21, 0x03, 0, 0, 0, 0]))
+        assert result["adcs_attitude_estimation_mode_enum"] == 1
+        assert result["adcs_attitude_estimation_mode"] == "MEMS rate sensing"
+        assert result["adcs_control_mode_enum"] == 2
+        assert result["adcs_control_mode"] == "Y-Thomson spin"
+        assert result["adcs_run_mode_enum"] == 3
+        assert result["adcs_run_mode"] == "Simulation"
+        assert result["adcs_errors"] == "[]"
+        assert result["adcs_flags"] == "[]"
 
     def test_adcs_raw_css_passthrough(self) -> None:
         result = self._valid(adcs_raw_css_1=12, adcs_raw_css_9=99)
