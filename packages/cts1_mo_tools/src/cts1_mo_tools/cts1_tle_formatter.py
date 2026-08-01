@@ -2,6 +2,17 @@ import requests
 from dataclasses import dataclass
 from decimal import Decimal
 
+'''
+Script to fetch FrontierSat TLE from CelesTrak, and format it into the CTS1+adcs_set_sgp4_orbit_params telecommand.
+
+To run from this file:
+1) Click the play button on the top right to run the python file
+
+To run from CLI:
+1) In the terminal, navigate to the .../CTS-SAT-1-Ground-Station/packages/cts1_mo_tools/src/cts1_mo_tools folder
+2) Run 'python cts1_tle_formatter.py'
+'''
+
 @dataclass
 class TLE:
     name: str
