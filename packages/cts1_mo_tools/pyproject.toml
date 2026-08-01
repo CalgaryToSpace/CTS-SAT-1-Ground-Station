@@ -24,6 +24,7 @@ cts1_decode_satnogs_packets = "cts1_mo_tools.cts1_decode_satnogs_packets:main"
 cts1_agenda_maker = "cts1_mo_tools.cts1_agenda_maker.main:main"
 cts1_make_bulk_uplink_agenda = "cts1_mo_tools.cts1_make_bulk_uplink_agenda:main"
 cts1_spreadsheet_to_agenda = "cts1_mo_tools.cts1_spreadsheet_to_agenda:main"
+cts1_satnogs_interval = "cts1_mo_tools.cts1_satnogs_interval:main"
 
 [dependency-groups]
 dev = [

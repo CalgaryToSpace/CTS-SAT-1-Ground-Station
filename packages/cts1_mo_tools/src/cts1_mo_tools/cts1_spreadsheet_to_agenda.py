@@ -412,6 +412,7 @@ def build_summary_comment(rows: list[dict[str, Any]]) -> str:
     )
 
     with pl.Config(
+        ascii_tables=True,
         tbl_rows=-1,  # Show all rows.
         tbl_cols=-1,  # Show all columns.
         tbl_width_chars=400,  # Allow table to be extra wide.

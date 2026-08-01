@@ -1,3 +1,7 @@
+# Output and input file directories
+input/
+output/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
