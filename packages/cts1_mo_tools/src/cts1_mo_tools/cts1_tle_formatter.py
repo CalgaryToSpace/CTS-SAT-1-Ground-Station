@@ -11,6 +11,9 @@ To run from this file:
 To run from CLI:
 1) In the terminal, navigate to the .../CTS-SAT-1-Ground-Station/packages/cts1_mo_tools/src/cts1_mo_tools folder
 2) Run 'python cts1_tle_formatter.py'
+
+Debugging:
+If unable to run script due to 'missing requests module', then run 'uv sync'
 '''
 
 @dataclass
