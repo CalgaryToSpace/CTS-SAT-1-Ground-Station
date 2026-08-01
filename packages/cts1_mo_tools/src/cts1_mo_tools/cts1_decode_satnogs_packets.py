@@ -113,6 +113,94 @@ BEACON_FIELD_NAMES = [
     "gnss_rx_mode_enum",
 ]
 
+# COMMS_beacon_extended_packet_t (beacon v2) adds these fields after the shared
+# fixed part + friendly_message + end_message (here called end_version_number,
+# e.g. " X2\0" for this packet version).
+EXTENDED_FMT = (
+    "<"
+    "B"  # obc_active_oscillator_MHz
+    "h"  # obc_adc_battery_voltage_mV      (signed)
+    "b"  # mpi_last_temperature_C          (signed)
+    "h"  # eps_pcu_ch0_volt_in_mppt_mV     (signed)
+    "h"  # eps_pcu_ch0_curr_in_mppt_mA     (signed)
+    "h"  # eps_pcu_ch0_curr_ou_mppt_mA     (signed)
+    "h"  # eps_pcu_ch1_volt_in_mppt_mV     (signed)
+    "h"  # eps_pcu_ch1_curr_in_mppt_mA     (signed)
+    "h"  # eps_pcu_ch1_curr_ou_mppt_mA     (signed)
+    "h"  # eps_pcu_ch2_volt_in_mppt_mV     (signed)
+    "h"  # eps_pcu_ch2_curr_in_mppt_mA     (signed)
+    "h"  # eps_pcu_ch2_curr_ou_mppt_mA     (signed)
+    "h"  # eps_pcu_ch3_volt_in_mppt_mV     (signed)
+    "h"  # eps_pcu_ch3_curr_in_mppt_mA     (signed)
+    "h"  # eps_pcu_ch3_curr_ou_mppt_mA     (signed)
+    "H"  # eps_battery_pack_status_bitfield
+    "h"  # eps_total_avg_net_battery_power_cW  (signed)
+    "h"  # eps_total_avg_power_distributed_cW  (signed)
+    "6s"  # adcs_current_state_1 (raw bytes; contents not yet decoded)
+    "B"  # adcs_raw_css_1
+    "B"  # adcs_raw_css_2
+    "B"  # adcs_raw_css_3
+    "B"  # adcs_raw_css_4
+    "B"  # adcs_raw_css_5
+    "B"  # adcs_raw_css_6
+    "B"  # adcs_raw_css_7
+    "B"  # adcs_raw_css_9
+    "h"  # adcs_magnetic_field_x_T_en8     (signed)
+    "h"  # adcs_magnetic_field_y_T_en8     (signed)
+    "h"  # adcs_magnetic_field_z_T_en8     (signed)
+    "H"  # adcs_angular_rate_norm_cdeg_per_sec
+    "h"  # adcs_estimated_rate_x_cdeg_per_sec  (signed)
+    "h"  # adcs_estimated_rate_y_cdeg_per_sec  (signed)
+    "h"  # adcs_estimated_rate_z_cdeg_per_sec  (signed)
+    "h"  # adcs_estimated_roll_angle_cdeg  (signed)
+    "h"  # adcs_estimated_pitch_angle_cdeg (signed)
+    "h"  # adcs_estimated_yaw_angle_cdeg   (signed)
+)
+EXTENDED_FIXED_SIZE = struct.calcsize(EXTENDED_FMT)
+BEACON_EXTENDED_TOTAL_STRUCT_SIZE = (
+    BEACON_FIXED_SIZE + FRIENDLY_MESSAGE_SIZE + END_MESSAGE_SIZE + EXTENDED_FIXED_SIZE
+)  # 198 bytes
+
+EXTENDED_FIELD_NAMES = [
+    "obc_active_oscillator_MHz",
+    "obc_adc_battery_voltage_mV",
+    "mpi_last_temperature_C",
+    "eps_pcu_ch0_volt_in_mppt_mV",
+    "eps_pcu_ch0_curr_in_mppt_mA",
+    "eps_pcu_ch0_curr_ou_mppt_mA",
+    "eps_pcu_ch1_volt_in_mppt_mV",
+    "eps_pcu_ch1_curr_in_mppt_mA",
+    "eps_pcu_ch1_curr_ou_mppt_mA",
+    "eps_pcu_ch2_volt_in_mppt_mV",
+    "eps_pcu_ch2_curr_in_mppt_mA",
+    "eps_pcu_ch2_curr_ou_mppt_mA",
+    "eps_pcu_ch3_volt_in_mppt_mV",
+    "eps_pcu_ch3_curr_in_mppt_mA",
+    "eps_pcu_ch3_curr_ou_mppt_mA",
+    "eps_battery_pack_status_bitfield",
+    "eps_total_avg_net_battery_power_cW",
+    "eps_total_avg_power_distributed_cW",
+    "adcs_current_state_1",
+    "adcs_raw_css_1",
+    "adcs_raw_css_2",
+    "adcs_raw_css_3",
+    "adcs_raw_css_4",
+    "adcs_raw_css_5",
+    "adcs_raw_css_6",
+    "adcs_raw_css_7",
+    "adcs_raw_css_9",
+    "adcs_magnetic_field_x_T_en8",
+    "adcs_magnetic_field_y_T_en8",
+    "adcs_magnetic_field_z_T_en8",
+    "adcs_angular_rate_norm_cdeg_per_sec",
+    "adcs_estimated_rate_x_cdeg_per_sec",
+    "adcs_estimated_rate_y_cdeg_per_sec",
+    "adcs_estimated_rate_z_cdeg_per_sec",
+    "adcs_estimated_roll_angle_cdeg",
+    "adcs_estimated_pitch_angle_cdeg",
+    "adcs_estimated_yaw_angle_cdeg",
+]
+
 # COMMS_tcmd_response_packet_t layout (after the CSP header):
 #   uint8_t  packet_type        1
 #   uint64_t ts_sent            8
@@ -146,6 +234,7 @@ PACKET_TYPE_MAP = {
     0x03: "LOG_MESSAGE",
     0x04: "TCMD_RESPONSE",
     0x10: "BULK_FILE_DOWNLINK",
+    0x20: "BEACON_EXTENDED",
 }
 PACKET_TYPE_MAP_INV = {v: k for k, v in PACKET_TYPE_MAP.items()}
 RF_SWITCH_CONTROL_MODE_MAP = {
@@ -321,6 +410,214 @@ def decode_beacon_basic_packet(payload: bytes) -> dict[str, Any]:
     return data  # noqa: RET504
 
 
+def decode_beacon_extended_packet(payload: bytes) -> dict[str, Any]:
+    """Decode a COMMS_beacon_extended_packet_t payload (CSP header already stripped).
+
+    Layout: the same fixed part + friendly_message + end_message as
+    BEACON_BASIC, followed by additional beacon v2 fields (EPS per-channel
+    solar data, and ADCS data). The ADCS state/status bitfield
+    (``adcs_current_state_1``) is surfaced as raw hex; its internals are not
+    decoded yet.
+    """
+    if len(payload) < BEACON_EXTENDED_TOTAL_STRUCT_SIZE:
+        msg = (
+            f"Too short for BEACON_EXTENDED: {len(payload)} bytes "
+            f"(need {BEACON_EXTENDED_TOTAL_STRUCT_SIZE})"
+        )
+        raise ValueError(msg)
+
+    vals = struct.unpack_from(FIXED_FMT, payload, 0)
+
+    if vals[0] != PACKET_TYPE_MAP_INV["BEACON_EXTENDED"]:
+        msg = f"Unexpected packet_type byte for BEACON_EXTENDED: {vals[0]:#04x}"
+        raise ValueError(msg)
+
+    rf = dict(zip(BEACON_FIELD_NAMES, vals, strict=True))
+
+    fm_raw = payload[BEACON_FIXED_SIZE : BEACON_FIXED_SIZE + FRIENDLY_MESSAGE_SIZE]
+    friendly = fm_raw.split(b"\x00")[0].decode("utf-8", errors="replace")
+
+    end_offset = BEACON_FIXED_SIZE + FRIENDLY_MESSAGE_SIZE
+    end_raw = payload[end_offset : end_offset + END_MESSAGE_SIZE]
+    end_version_number = end_raw.split(b"\x00")[0].decode("utf-8", errors="replace")
+
+    ext_offset = end_offset + END_MESSAGE_SIZE
+    ext_vals = struct.unpack_from(EXTENDED_FMT, payload, ext_offset)
+    ef = dict(zip(EXTENDED_FIELD_NAMES, ext_vals, strict=True))
+
+    sat_name = rf["satellite_name"].decode("ascii", errors="replace").rstrip("\x00")
+    epoch_ms = rf["unix_epoch_time_ms"]
+
+    if epoch_ms <= 0 or epoch_ms > MAX_VALID_EPOCH_MS:
+        utc_time = None
+    else:
+        utc_time = (
+            datetime.fromtimestamp(
+                epoch_ms / 1000.0,
+                UTC,
+            ).isoformat()
+            + "Z"
+        )
+
+    data = {
+        "packet_type": e(PACKET_TYPE_MAP, rf["packet_type"]),
+        # Identity
+        "satellite_name": sat_name,
+        # RF switch
+        "active_rf_switch_antenna": rf["active_rf_switch_antenna"],
+        "active_rf_switch_control_mode": e(
+            RF_SWITCH_CONTROL_MODE_MAP, rf["active_rf_switch_control_mode"]
+        ),
+        # Timing
+        "uptime_ms": rf["uptime_ms"],
+        "uptime_sec": round(rf["uptime_ms"] / 1000, 3),
+        "duration_since_last_uplink_ms": rf["duration_since_last_uplink_ms"],
+        "unix_epoch_time_ms": epoch_ms,
+        "utc_time": utc_time,
+        "last_time_sync_source": e(
+            TIME_SYNC_SOURCE_MAP, rf["last_time_sync_source_enum"]
+        ),
+        # OBC
+        "is_fs_mounted": bool(rf["is_fs_mounted"]),
+        "total_tcmd_queued_count": rf["total_tcmd_queued_count"],
+        "pending_queued_tcmd_count": rf["pending_queued_tcmd_count"],
+        "total_beacon_count_since_boot": rf["total_beacon_count_since_boot"],
+        "reboot_reason": e(STM32_RESET_CAUSE_MAP, rf["reboot_reason"]),
+        "obc_temperature_C": round(rf["obc_temperature_cC"] / 100.0, 2),
+        "obc_active_oscillator_MHz": ef["obc_active_oscillator_MHz"],
+        "obc_adc_battery_voltage_V": round(
+            ef["obc_adc_battery_voltage_mV"] / 1000.0, 3
+        ),
+        # EPS
+        "eps_mode": e(EPS_MODE_MAP, rf["eps_mode_enum"]),
+        "eps_reset_cause": e(EPS_RESET_CAUSE_MAP, rf["eps_reset_cause_enum"]),
+        "eps_uptime_sec": rf["eps_uptime_sec"],
+        "eps_error_code": rf["eps_error_code"],
+        "eps_battery_voltage_V": round(rf["eps_battery_voltage_mV"] / 1000.0, 3),
+        "eps_battery_percent": rf["eps_battery_percent"],
+        "eps_battery_temperature_0_C": round(
+            rf["eps_battery_temperature_0_cC"] / 100.0, 2
+        ),
+        "eps_battery_temperature_1_C": round(
+            rf["eps_battery_temperature_1_cC"] / 100.0, 2
+        ),
+        "eps_total_fault_count": rf["eps_total_fault_count"],
+        "eps_enabled_channels_bitfield": f"0x{rf['eps_enabled_channels_bitfield']:08X}",
+        "eps_total_pcu_power_input_W": round(
+            rf["eps_total_pcu_power_input_cW"] / 100.0, 2
+        ),
+        "eps_total_pcu_power_output_W": round(
+            rf["eps_total_pcu_power_output_cW"] / 100.0, 2
+        ),
+        "eps_total_avg_pcu_power_input_W": round(
+            rf["eps_total_avg_pcu_power_input_cW"] / 100.0, 2
+        ),
+        "eps_total_avg_pcu_power_output_W": round(
+            rf["eps_total_avg_pcu_power_output_cW"] / 100.0, 2
+        ),
+        "eps_battery_pack_status_bitfield": (
+            f"0x{ef['eps_battery_pack_status_bitfield']:04X}"
+        ),
+        "eps_total_avg_net_battery_power_W": round(
+            ef["eps_total_avg_net_battery_power_cW"] / 100.0, 2
+        ),
+        "eps_total_avg_power_distributed_W": round(
+            ef["eps_total_avg_power_distributed_cW"] / 100.0, 2
+        ),
+        # EPS per-channel PCU (instantaneous solar panel measurements)
+        "eps_pcu_ch0_volt_in_mppt_V": round(
+            ef["eps_pcu_ch0_volt_in_mppt_mV"] / 1000.0, 3
+        ),
+        "eps_pcu_ch0_curr_in_mppt_A": round(
+            ef["eps_pcu_ch0_curr_in_mppt_mA"] / 1000.0, 3
+        ),
+        "eps_pcu_ch0_curr_ou_mppt_A": round(
+            ef["eps_pcu_ch0_curr_ou_mppt_mA"] / 1000.0, 3
+        ),
+        "eps_pcu_ch1_volt_in_mppt_V": round(
+            ef["eps_pcu_ch1_volt_in_mppt_mV"] / 1000.0, 3
+        ),
+        "eps_pcu_ch1_curr_in_mppt_A": round(
+            ef["eps_pcu_ch1_curr_in_mppt_mA"] / 1000.0, 3
+        ),
+        "eps_pcu_ch1_curr_ou_mppt_A": round(
+            ef["eps_pcu_ch1_curr_ou_mppt_mA"] / 1000.0, 3
+        ),
+        "eps_pcu_ch2_volt_in_mppt_V": round(
+            ef["eps_pcu_ch2_volt_in_mppt_mV"] / 1000.0, 3
+        ),
+        "eps_pcu_ch2_curr_in_mppt_A": round(
+            ef["eps_pcu_ch2_curr_in_mppt_mA"] / 1000.0, 3
+        ),
+        "eps_pcu_ch2_curr_ou_mppt_A": round(
+            ef["eps_pcu_ch2_curr_ou_mppt_mA"] / 1000.0, 3
+        ),
+        "eps_pcu_ch3_volt_in_mppt_V": round(
+            ef["eps_pcu_ch3_volt_in_mppt_mV"] / 1000.0, 3
+        ),
+        "eps_pcu_ch3_curr_in_mppt_A": round(
+            ef["eps_pcu_ch3_curr_in_mppt_mA"] / 1000.0, 3
+        ),
+        "eps_pcu_ch3_curr_ou_mppt_A": round(
+            ef["eps_pcu_ch3_curr_ou_mppt_mA"] / 1000.0, 3
+        ),
+        # CTS1 state
+        "cts1_operation_state": e(CTS1_OPERATION_STATE_MAP, rf["cts1_operation_state"]),
+        "rbf_pin_state": e(RBF_STATE_MAP, rf["rbf_pin_state"]),
+        # MPI
+        "mpi_rx_mode": e(MPI_RX_MODE_MAP, rf["mpi_rx_mode_enum"]),
+        "mpi_transceiver_state": e(
+            MPI_TRANSCEIVER_STATE_MAP, rf["mpi_transceiver_state_enum"]
+        ),
+        "mpi_last_reason_for_stopping": e(
+            MPI_STOP_REASON_MAP, rf["mpi_last_reason_for_stopping_enum"]
+        ),
+        "mpi_last_temperature_C": ef["mpi_last_temperature_C"],
+        # GNSS
+        "gnss_uart_interrupt_enabled": bool(rf["gnss_uart_interrupt_enabled"]),
+        "gnss_rx_mode": e(GNSS_RX_MODE_MAP, rf["gnss_rx_mode_enum"]),
+        # ADCS (state/status bitfield internals not decoded yet; raw bytes only)
+        "adcs_current_state_1_hex": ef["adcs_current_state_1"].hex(),
+        "adcs_raw_css_1": ef["adcs_raw_css_1"],
+        "adcs_raw_css_2": ef["adcs_raw_css_2"],
+        "adcs_raw_css_3": ef["adcs_raw_css_3"],
+        "adcs_raw_css_4": ef["adcs_raw_css_4"],
+        "adcs_raw_css_5": ef["adcs_raw_css_5"],
+        "adcs_raw_css_6": ef["adcs_raw_css_6"],
+        "adcs_raw_css_7": ef["adcs_raw_css_7"],
+        "adcs_raw_css_9": ef["adcs_raw_css_9"],
+        "adcs_magnetic_field_x_uT": round(ef["adcs_magnetic_field_x_T_en8"] * 0.01, 2),
+        "adcs_magnetic_field_y_uT": round(ef["adcs_magnetic_field_y_T_en8"] * 0.01, 2),
+        "adcs_magnetic_field_z_uT": round(ef["adcs_magnetic_field_z_T_en8"] * 0.01, 2),
+        "adcs_angular_rate_norm_deg_per_sec": round(
+            ef["adcs_angular_rate_norm_cdeg_per_sec"] * 0.01, 2
+        ),
+        "adcs_estimated_rate_x_deg_per_sec": round(
+            ef["adcs_estimated_rate_x_cdeg_per_sec"] * 0.01, 2
+        ),
+        "adcs_estimated_rate_y_deg_per_sec": round(
+            ef["adcs_estimated_rate_y_cdeg_per_sec"] * 0.01, 2
+        ),
+        "adcs_estimated_rate_z_deg_per_sec": round(
+            ef["adcs_estimated_rate_z_cdeg_per_sec"] * 0.01, 2
+        ),
+        "adcs_estimated_roll_angle_deg": round(
+            ef["adcs_estimated_roll_angle_cdeg"] * 0.01, 2
+        ),
+        "adcs_estimated_pitch_angle_deg": round(
+            ef["adcs_estimated_pitch_angle_cdeg"] * 0.01, 2
+        ),
+        "adcs_estimated_yaw_angle_deg": round(
+            ef["adcs_estimated_yaw_angle_cdeg"] * 0.01, 2
+        ),
+        # Friendly
+        "friendly_message": friendly,
+        "end_version_number": end_version_number,
+    }
+
+    return data  # noqa: RET504
+
+
 def decode_beacon_peripheral_packet(payload: bytes) -> dict[str, Any]:
     """Decode a COMMS_PACKET_TYPE_BEACON_PERIPHERAL payload.
 
@@ -461,6 +758,7 @@ _PACKET_DECODERS = {
     0x03: decode_log_message_packet,
     0x04: decode_tcmd_response_packet,
     0x10: decode_bulk_file_downlink_packet,
+    0x20: decode_beacon_extended_packet,
 }
 
 

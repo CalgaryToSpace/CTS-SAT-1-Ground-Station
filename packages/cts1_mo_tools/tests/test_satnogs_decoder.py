@@ -3,12 +3,14 @@ from typing import Any
 
 import pytest
 from cts1_mo_tools.cts1_decode_satnogs_packets import (
+    BEACON_EXTENDED_TOTAL_STRUCT_SIZE,
     BEACON_FIXED_SIZE,
     BEACON_TOTAL_STRUCT_SIZE,
     BULK_DOWNLINK_HEADER_FMT,
     BULK_DOWNLINK_HEADER_SIZE,
     CSP_HEADER_SIZE,
     END_MESSAGE_SIZE,
+    EXTENDED_FMT,
     FIXED_FMT,
     FRIENDLY_MESSAGE_SIZE,
     PACKET_TYPE_MAP,
@@ -16,6 +18,7 @@ from cts1_mo_tools.cts1_decode_satnogs_packets import (
     TCMD_RESPONSE_HEADER_FMT,
     TCMD_RESPONSE_HEADER_SIZE,
     decode_beacon_basic_packet,
+    decode_beacon_extended_packet,
     decode_beacon_peripheral_packet,
     decode_bulk_file_downlink_packet,
     decode_log_message_packet,
@@ -112,6 +115,100 @@ def _make_beacon_payload(  # noqa: PLR0913
     )
     fm = friendly_message.ljust(FRIENDLY_MESSAGE_SIZE, b"\x00")[:FRIENDLY_MESSAGE_SIZE]
     return fixed + fm + end_sentinel
+
+
+def _make_extended_payload(  # noqa: PLR0913
+    *,
+    packet_type: int = 0x20,
+    friendly_message: bytes = b"Hello from CTS-SAT-1",
+    end_version_number: bytes = b" X2\x00",
+    obc_active_oscillator_MHz: int = 25,  # noqa: N803
+    obc_adc_battery_voltage_mV: int = 7400,  # noqa: N803
+    mpi_last_temperature_C: int = -99,  # noqa: N803
+    eps_pcu_ch0_volt_in_mppt_mV: int = 5000,  # noqa: N803
+    eps_pcu_ch0_curr_in_mppt_mA: int = 100,  # noqa: N803
+    eps_pcu_ch0_curr_ou_mppt_mA: int = 90,  # noqa: N803
+    eps_pcu_ch1_volt_in_mppt_mV: int = 5000,  # noqa: N803
+    eps_pcu_ch1_curr_in_mppt_mA: int = 100,  # noqa: N803
+    eps_pcu_ch1_curr_ou_mppt_mA: int = 90,  # noqa: N803
+    eps_pcu_ch2_volt_in_mppt_mV: int = 5000,  # noqa: N803
+    eps_pcu_ch2_curr_in_mppt_mA: int = 100,  # noqa: N803
+    eps_pcu_ch2_curr_ou_mppt_mA: int = 90,  # noqa: N803
+    eps_pcu_ch3_volt_in_mppt_mV: int = 5000,  # noqa: N803
+    eps_pcu_ch3_curr_in_mppt_mA: int = 100,  # noqa: N803
+    eps_pcu_ch3_curr_ou_mppt_mA: int = 90,  # noqa: N803
+    eps_battery_pack_status_bitfield: int = 0x8000,
+    eps_total_avg_net_battery_power_cW: int = -50,  # noqa: N803
+    eps_total_avg_power_distributed_cW: int = 300,  # noqa: N803
+    adcs_current_state_1: bytes = b"\x01\x02\x03\x04\x05\x06",
+    adcs_raw_css_1: int = 10,
+    adcs_raw_css_2: int = 20,
+    adcs_raw_css_3: int = 30,
+    adcs_raw_css_4: int = 40,
+    adcs_raw_css_5: int = 50,
+    adcs_raw_css_6: int = 60,
+    adcs_raw_css_7: int = 70,
+    adcs_raw_css_9: int = 90,
+    adcs_magnetic_field_x_T_en8: int = 100,  # noqa: N803
+    adcs_magnetic_field_y_T_en8: int = -100,  # noqa: N803
+    adcs_magnetic_field_z_T_en8: int = 200,  # noqa: N803
+    adcs_angular_rate_norm_cdeg_per_sec: int = 150,
+    adcs_estimated_rate_x_cdeg_per_sec: int = 10,
+    adcs_estimated_rate_y_cdeg_per_sec: int = -10,
+    adcs_estimated_rate_z_cdeg_per_sec: int = 20,
+    adcs_estimated_roll_angle_cdeg: int = 500,
+    adcs_estimated_pitch_angle_cdeg: int = -500,
+    adcs_estimated_yaw_angle_cdeg: int = 1000,
+    **beacon_kwargs: Any,
+) -> bytes:
+    """Build a valid BEACON_EXTENDED payload (no CSP header)."""
+    basic = _make_beacon_payload(
+        packet_type=packet_type,
+        friendly_message=friendly_message,
+        end_sentinel=end_version_number,
+        **beacon_kwargs,
+    )
+    extended = struct.pack(
+        EXTENDED_FMT,
+        obc_active_oscillator_MHz,
+        obc_adc_battery_voltage_mV,
+        mpi_last_temperature_C,
+        eps_pcu_ch0_volt_in_mppt_mV,
+        eps_pcu_ch0_curr_in_mppt_mA,
+        eps_pcu_ch0_curr_ou_mppt_mA,
+        eps_pcu_ch1_volt_in_mppt_mV,
+        eps_pcu_ch1_curr_in_mppt_mA,
+        eps_pcu_ch1_curr_ou_mppt_mA,
+        eps_pcu_ch2_volt_in_mppt_mV,
+        eps_pcu_ch2_curr_in_mppt_mA,
+        eps_pcu_ch2_curr_ou_mppt_mA,
+        eps_pcu_ch3_volt_in_mppt_mV,
+        eps_pcu_ch3_curr_in_mppt_mA,
+        eps_pcu_ch3_curr_ou_mppt_mA,
+        eps_battery_pack_status_bitfield,
+        eps_total_avg_net_battery_power_cW,
+        eps_total_avg_power_distributed_cW,
+        adcs_current_state_1,
+        adcs_raw_css_1,
+        adcs_raw_css_2,
+        adcs_raw_css_3,
+        adcs_raw_css_4,
+        adcs_raw_css_5,
+        adcs_raw_css_6,
+        adcs_raw_css_7,
+        adcs_raw_css_9,
+        adcs_magnetic_field_x_T_en8,
+        adcs_magnetic_field_y_T_en8,
+        adcs_magnetic_field_z_T_en8,
+        adcs_angular_rate_norm_cdeg_per_sec,
+        adcs_estimated_rate_x_cdeg_per_sec,
+        adcs_estimated_rate_y_cdeg_per_sec,
+        adcs_estimated_rate_z_cdeg_per_sec,
+        adcs_estimated_roll_angle_cdeg,
+        adcs_estimated_pitch_angle_cdeg,
+        adcs_estimated_yaw_angle_cdeg,
+    )
+    return basic + extended
 
 
 def _make_tcmd_payload(  # noqa: PLR0913
@@ -320,6 +417,134 @@ class TestDecodeBeaconPeripheral:
         result = decode_beacon_peripheral_packet(b"")
         assert result["packet_type"] == "BEACON_PERIPHERAL"
         assert result["raw_payload_hex"] == ""
+
+
+# ---------------------------------------------------------------------------
+# Tests for decode_beacon_extended_packet
+# ---------------------------------------------------------------------------
+
+
+class TestDecodeBeaconExtended:
+    def _valid(self, **kwargs: Any) -> dict[str, Any]:
+        return decode_beacon_extended_packet(_make_extended_payload(**kwargs))
+
+    def test_packet_type_label(self) -> None:
+        result = self._valid()
+        assert result["packet_type"] == "BEACON_EXTENDED"
+
+    def test_shared_fields_still_decoded(self) -> None:
+        # Sanity check that the shared basic-beacon fields still come through.
+        result = self._valid(satellite_name=b"CTS1", uptime_ms=90_000)
+        assert result["satellite_name"] == "CTS1"
+        assert result["uptime_sec"] == 90.0
+
+    def test_end_version_number(self) -> None:
+        result = self._valid(end_version_number=b" X2\x00")
+        assert result["end_version_number"] == " X2"
+
+    def test_obc_fields(self) -> None:
+        result = self._valid(
+            obc_active_oscillator_MHz=16, obc_adc_battery_voltage_mV=7500
+        )
+        assert result["obc_active_oscillator_MHz"] == 16
+        assert result["obc_adc_battery_voltage_V"] == 7.5
+
+    def test_mpi_last_temperature_inactive_passthrough(self) -> None:
+        result = self._valid(mpi_last_temperature_C=-99)
+        assert result["mpi_last_temperature_C"] == -99
+
+    def test_eps_pcu_channel_conversion(self) -> None:
+        result = self._valid(
+            eps_pcu_ch0_volt_in_mppt_mV=5250,
+            eps_pcu_ch0_curr_in_mppt_mA=1200,
+            eps_pcu_ch0_curr_ou_mppt_mA=-800,
+        )
+        assert result["eps_pcu_ch0_volt_in_mppt_V"] == 5.25
+        assert result["eps_pcu_ch0_curr_in_mppt_A"] == 1.2
+        assert result["eps_pcu_ch0_curr_ou_mppt_A"] == -0.8
+
+    def test_eps_battery_pack_status_bitfield_hex(self) -> None:
+        result = self._valid(eps_battery_pack_status_bitfield=0x1234)
+        assert result["eps_battery_pack_status_bitfield"] == "0x1234"
+
+    def test_eps_avg_power_conversion(self) -> None:
+        result = self._valid(
+            eps_total_avg_net_battery_power_cW=-150,
+            eps_total_avg_power_distributed_cW=250,
+        )
+        assert result["eps_total_avg_net_battery_power_W"] == -1.5
+        assert result["eps_total_avg_power_distributed_W"] == 2.5
+
+    def test_adcs_current_state_1_hex(self) -> None:
+        result = self._valid(adcs_current_state_1=b"\xde\xad\xbe\xef\x01\x02")
+        assert result["adcs_current_state_1_hex"] == "deadbeef0102"
+
+    def test_adcs_raw_css_passthrough(self) -> None:
+        result = self._valid(adcs_raw_css_1=12, adcs_raw_css_9=99)
+        assert result["adcs_raw_css_1"] == 12
+        assert result["adcs_raw_css_9"] == 99
+
+    def test_adcs_magnetic_field_conversion(self) -> None:
+        result = self._valid(
+            adcs_magnetic_field_x_T_en8=1000,
+            adcs_magnetic_field_y_T_en8=-500,
+            adcs_magnetic_field_z_T_en8=0,
+        )
+        assert result["adcs_magnetic_field_x_uT"] == 10.0
+        assert result["adcs_magnetic_field_y_uT"] == -5.0
+        assert result["adcs_magnetic_field_z_uT"] == 0.0
+
+    def test_adcs_angular_rate_norm_conversion(self) -> None:
+        result = self._valid(adcs_angular_rate_norm_cdeg_per_sec=250)
+        assert result["adcs_angular_rate_norm_deg_per_sec"] == 2.5
+
+    def test_adcs_estimated_rate_conversion(self) -> None:
+        result = self._valid(
+            adcs_estimated_rate_x_cdeg_per_sec=100,
+            adcs_estimated_rate_y_cdeg_per_sec=-100,
+            adcs_estimated_rate_z_cdeg_per_sec=0,
+        )
+        assert result["adcs_estimated_rate_x_deg_per_sec"] == 1.0
+        assert result["adcs_estimated_rate_y_deg_per_sec"] == -1.0
+        assert result["adcs_estimated_rate_z_deg_per_sec"] == 0.0
+
+    def test_adcs_estimated_angle_conversion(self) -> None:
+        result = self._valid(
+            adcs_estimated_roll_angle_cdeg=9000,
+            adcs_estimated_pitch_angle_cdeg=-4500,
+            adcs_estimated_yaw_angle_cdeg=18000,
+        )
+        assert result["adcs_estimated_roll_angle_deg"] == 90.0
+        assert result["adcs_estimated_pitch_angle_deg"] == -45.0
+        assert result["adcs_estimated_yaw_angle_deg"] == 180.0
+
+    def test_too_short_raises(self) -> None:
+        short = b"\x20" * (BEACON_EXTENDED_TOTAL_STRUCT_SIZE - 1)
+        with pytest.raises(ValueError, match="Too short"):
+            decode_beacon_extended_packet(short)
+
+    def test_wrong_packet_type_raises(self) -> None:
+        payload = _make_extended_payload(packet_type=0x01)
+        with pytest.raises(ValueError, match="Unexpected packet_type"):
+            decode_beacon_extended_packet(payload)
+
+    def test_total_struct_size_constant(self) -> None:
+        assert len(_make_extended_payload()) == BEACON_EXTENDED_TOTAL_STRUCT_SIZE
+
+    def test_total_struct_size_is_198(self) -> None:
+        # Matches the firmware blob's _Static_assert(sizeof(...) == 198).
+        assert BEACON_EXTENDED_TOTAL_STRUCT_SIZE == 198
+
+    def test_extra_bytes_ignored(self) -> None:
+        payload = _make_extended_payload() + b"\xff" * 10
+        result = decode_beacon_extended_packet(payload)
+        assert result["packet_type"] == "BEACON_EXTENDED"
+
+    def test_dispatch_via_decode_packet_safe(self) -> None:
+        hex_str = (DUMMY_CSP + _make_extended_payload()).hex()
+        result = decode_packet_safe(hex_str)
+        assert result is not None
+        assert result["packet_type"] == "BEACON_EXTENDED"
 
 
 # ---------------------------------------------------------------------------
@@ -555,6 +780,7 @@ class TestPacketTypeMaps:
             "LOG_MESSAGE",
             "TCMD_RESPONSE",
             "BULK_FILE_DOWNLINK",
+            "BEACON_EXTENDED",
         ):
             assert name in PACKET_TYPE_MAP_INV
 
