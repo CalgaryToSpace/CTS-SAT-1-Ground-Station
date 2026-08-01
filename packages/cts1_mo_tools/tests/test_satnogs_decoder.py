@@ -455,8 +455,7 @@ class TestDecodeAdcsCurrentState1:
             )
         )
         assert (
-            result["adcs_attitude_estimation_mode"]
-            == "7 - User Coded Estimation Mode"
+            result["adcs_attitude_estimation_mode"] == "7 - User Coded Estimation Mode"
         )
         assert (
             result["adcs_control_mode"]
