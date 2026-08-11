@@ -28,10 +28,7 @@ import tyro
 from dotenv import load_dotenv
 from loguru import logger
 
-from cts1_mo_tools.cts1_agenda_maker.satnogs_data import (
-    OBSERVATION_STATUSES,
-    fetch_all_observations,
-)
+from cts1_mo_tools.cts1_agenda_maker.satnogs_data import fetch_all_observations
 
 from . import db
 from .audio import convert_ogg_to_wav, download_audio
@@ -92,7 +89,6 @@ def run(  # noqa: PLR0913
     norad_id: str = "69015",
     db_path: Path = DEFAULT_DB_PATH,
     satcfg: Path = DEFAULT_SATCFG_PATH,
-    statuses: tuple[str, ...] = OBSERVATION_STATUSES,
     page_size: int = 100,
     limit: int | None = None,
     skip_packets: bool = False,
@@ -108,7 +104,7 @@ def run(  # noqa: PLR0913
         limit: Cap the number of observations decoded this run (for testing).
         skip_packets: Only sync raw_observations; skip audio download/decode.
     """
-    logger.info(f"Listing observations for NORAD {norad_id} (statuses={statuses})")
+    logger.info(f"Listing observations for NORAD {norad_id}")
 
     con = db.connect(db_path)
     done: set[tuple[int, str]] = (
@@ -120,7 +116,10 @@ def run(  # noqa: PLR0913
     reached_limit = False
 
     for page in fetch_all_observations(
-        norad_id, statuses=statuses, page_size=page_size
+        norad_id,
+        start_lt_filter=datetime.now(UTC),
+        statuses=None,
+        page_size=page_size,
     ):
         total_observations += len(page)
         db.upsert_observations(con, pl.DataFrame(page, infer_schema_length=None))
