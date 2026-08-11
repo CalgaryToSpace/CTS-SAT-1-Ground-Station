@@ -39,7 +39,7 @@ from .decode_sso_rx_replay import run_sso_rx_replay
 DEFAULT_DB_PATH = Path("output/cts1_processing_pipeline.duckdb")
 
 
-def _process_observation(obs: dict[str, Any], *, satcfg: Path) -> list[dict[str, Any]]:
+def _process_observation(obs: dict[str, Any]) -> list[dict[str, Any]]:
     """Download one observation's audio and run both decoders on it."""
     obs_id = obs["id"]
     audio_url = obs["payload"]
@@ -67,7 +67,7 @@ def _process_observation(obs: dict[str, Any], *, satcfg: Path) -> list[dict[str,
 
         try:
             wav_path = convert_ogg_to_wav(ogg_path)
-            gr_rows = run_gr_satellites(wav_path, satcfg=satcfg)
+            gr_rows = run_gr_satellites(wav_path, satcfg=DEFAULT_SATCFG_PATH)
         except Exception:  # noqa: BLE001
             logger.exception(f"gr_satellites decode failed for observation {obs_id}")
             gr_rows = []
@@ -108,12 +108,10 @@ def _select_candidates(
     return candidates
 
 
-def run(  # noqa: PLR0913
+def run(
     *,
     norad_id: str = "69015",
     db_path: Path = DEFAULT_DB_PATH,
-    satcfg: Path = DEFAULT_SATCFG_PATH,
-    page_size: int = 100,
     limit: int | None = None,
     workers: int = 4,
     skip_packets: bool = False,
@@ -123,7 +121,6 @@ def run(  # noqa: PLR0913
     Args:
         norad_id: NORAD catalog ID of the target satellite.
         db_path: DuckDB database file to write raw_observations/raw_packets to.
-        satcfg: gr_satellites satellite YAML definition.
         page_size: Observations requested per API page.
         limit: Cap the number of observations decoded this run (for testing).
         workers: Number of observations to download/decode concurrently.
@@ -145,7 +142,6 @@ def run(  # noqa: PLR0913
             norad_id,
             start_lt_filter=datetime.now(UTC),
             statuses=None,
-            page_size=page_size,
         ):
             total_observations += len(page)
             observations_df = pl.DataFrame(page, infer_schema_length=None)
@@ -162,8 +158,7 @@ def run(  # noqa: PLR0913
             # Download/decode concurrently (I/O- and subprocess-bound work);
             # DB writes stay on this thread as each result comes back.
             futures = {
-                executor.submit(_process_observation, obs, satcfg=satcfg): obs
-                for obs in candidates
+                executor.submit(_process_observation, obs): obs for obs in candidates
             }
             for future in concurrent.futures.as_completed(futures):
                 obs = futures[future]
@@ -201,9 +196,6 @@ class Args:
     db_path: Path = DEFAULT_DB_PATH
     """DuckDB database file for the raw_observations / raw_packets tables."""
 
-    satcfg: Path = DEFAULT_SATCFG_PATH
-    """gr_satellites satellite YAML definition."""
-
     page_size: int = 100
     """Observations requested per SatNOGS API page."""
 
@@ -235,8 +227,6 @@ def main() -> None:
     run(
         norad_id=args.norad_id,
         db_path=args.db_path,
-        satcfg=args.satcfg,
-        page_size=args.page_size,
         limit=args.limit,
         workers=args.workers,
         skip_packets=args.skip_packets,
