@@ -1,19 +1,21 @@
 from cts1_mo_tools.cts1_processing_pipeline.decode_gr_satellites import (
-    _parse_hexdump_stdout,
+    parse_hexdump_stdout,
 )
-from cts1_mo_tools.cts1_processing_pipeline.decode_sso_rx_replay import _parse_line
+from cts1_mo_tools.cts1_processing_pipeline.decode_sso_rx_replay import (
+    parse_forensics_line,
+)
 
 # ---------------------------------------------------------------------------
 # sso_rx_replay --forensics-report line parsing
 # ---------------------------------------------------------------------------
 
 
-def test_parse_line_frame() -> None:
+def test_parse_forensics_line_frame() -> None:
     line = (
         '{"filename":"sample.ogg","time_in_file_ms":45802.229,'
         '"rssi":-2.1,"rs":-2,"data_base64":"wiKKABCR"}'
     )
-    row = _parse_line(line)
+    row = parse_forensics_line(line)
     assert row == {
         "sso_filename": "sample.ogg",
         "sso_time_in_file_ms": 45802.229,
@@ -24,16 +26,16 @@ def test_parse_line_frame() -> None:
     }
 
 
-def test_parse_line_no_decode() -> None:
-    row = _parse_line('{"filename":"sample.ogg"}')
+def test_parse_forensics_line_no_decode() -> None:
+    row = parse_forensics_line('{"filename":"sample.ogg"}')
     assert row is not None
     assert row["sso_filename"] == "sample.ogg"
     assert row["sso_data_base64"] is None
     assert row["sso_error"] is None
 
 
-def test_parse_line_error() -> None:
-    row = _parse_line(
+def test_parse_forensics_line_error() -> None:
+    row = parse_forensics_line(
         '{"filename":"bad.ogg","error":"could not decode audio file via libsndfile"}'
     )
     assert row is not None
@@ -41,10 +43,10 @@ def test_parse_line_error() -> None:
     assert row["sso_data_base64"] is None
 
 
-def test_parse_line_blank_and_malformed() -> None:
-    assert _parse_line("") is None
-    assert _parse_line("   ") is None
-    assert _parse_line("not json") is None
+def test_parse_forensics_line_blank_and_malformed() -> None:
+    assert parse_forensics_line("") is None
+    assert parse_forensics_line("   ") is None
+    assert parse_forensics_line("not json") is None
 
 
 # ---------------------------------------------------------------------------
@@ -74,7 +76,7 @@ pdu vector contents =
 
 
 def test_parse_hexdump_stdout_extracts_pdu() -> None:
-    rows = _parse_hexdump_stdout(_HEXDUMP_STDOUT)
+    rows = parse_hexdump_stdout(_HEXDUMP_STDOUT)
     assert len(rows) == 1
     row = rows[0]
     assert row["gr_transmitter"] == "9k6 FSK downlink"
@@ -84,4 +86,4 @@ def test_parse_hexdump_stdout_extracts_pdu() -> None:
 
 
 def test_parse_hexdump_stdout_no_pdus() -> None:
-    assert _parse_hexdump_stdout("nothing decoded here\n") == []
+    assert parse_hexdump_stdout("nothing decoded here\n") == []

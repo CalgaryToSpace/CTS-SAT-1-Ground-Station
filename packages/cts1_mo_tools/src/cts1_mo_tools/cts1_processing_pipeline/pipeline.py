@@ -28,18 +28,20 @@ import tyro
 from dotenv import load_dotenv
 from loguru import logger
 
+from cts1_mo_tools.cts1_agenda_maker.satnogs_data import (
+    OBSERVATION_STATUSES,
+    fetch_all_observations,
+)
+
 from . import db
 from .audio import convert_ogg_to_wav, download_audio
 from .decode_gr_satellites import DEFAULT_SATCFG_PATH, run_gr_satellites
 from .decode_sso_rx_replay import run_sso_rx_replay
-from .satnogs_observations import OBSERVATION_STATUSES, fetch_all_observations
 
 DEFAULT_DB_PATH = Path("output/cts1_processing_pipeline.duckdb")
 
 
-def _process_observation(
-    obs: dict[str, Any], *, satcfg: Path
-) -> list[dict[str, Any]]:
+def _process_observation(obs: dict[str, Any], *, satcfg: Path) -> list[dict[str, Any]]:
     """Download one observation's audio and run both decoders on it."""
     obs_id = obs["id"]
     audio_url = obs["payload"]
@@ -107,48 +109,53 @@ def run(  # noqa: PLR0913
         skip_packets: Only sync raw_observations; skip audio download/decode.
     """
     logger.info(f"Listing observations for NORAD {norad_id} (statuses={statuses})")
-    observations = fetch_all_observations(
-        norad_id, statuses=statuses, page_size=page_size
-    )
-    logger.info(f"Fetched {len(observations)} observation(s) total.")
 
     con = db.connect(db_path)
-
-    if observations:
-        obs_df = pl.DataFrame(observations, infer_schema_length=None)
-        db.upsert_observations(con, obs_df)
-
-    if skip_packets:
-        con.close()
-        return
-
-    done = db.already_decoded_pairs(con)
-    to_process = [
-        obs
-        for obs in observations
-        if obs.get("payload")
-        and (obs["id"], "sso_rx_replay") not in done
-        and (obs["id"], "gr_satellites") not in done
-    ]
-    if limit is not None:
-        to_process = to_process[:limit]
-
-    logger.info(
-        f"{len(to_process)} observation(s) have audio and need decoding "
-        f"(of {len(observations)} total, {len(done) // 2} already done)."
+    done: set[tuple[int, str]] = (
+        set() if skip_packets else db.already_decoded_pairs(con)
     )
 
-    all_rows: list[dict[str, Any]] = []
-    for i, obs in enumerate(to_process, start=1):
-        logger.info(f"[{i}/{len(to_process)}] observation {obs['id']}")
-        all_rows.extend(_process_observation(obs, satcfg=satcfg))
+    total_observations = 0
+    total_decoded = 0
+    reached_limit = False
 
-    if all_rows:
-        packets_df = pl.DataFrame(all_rows, infer_schema_length=None)
-        db.append_packets(con, packets_df)
+    for page in fetch_all_observations(
+        norad_id, statuses=statuses, page_size=page_size
+    ):
+        total_observations += len(page)
+        db.upsert_observations(con, pl.DataFrame(page, infer_schema_length=None))
+
+        if skip_packets or reached_limit:
+            continue
+
+        for obs in page:
+            if not obs.get("payload"):
+                continue
+            key_sso, key_gr = (obs["id"], "sso_rx_replay"), (obs["id"], "gr_satellites")
+            if key_sso in done and key_gr in done:
+                continue
+
+            total_decoded += 1
+            logger.info(f"[{total_decoded}] observation {obs['id']}")
+            rows = _process_observation(obs, satcfg=satcfg)
+            if rows:
+                db.append_packets(con, pl.DataFrame(rows, infer_schema_length=None))
+            done.add(key_sso)
+            done.add(key_gr)
+
+            if limit is not None and total_decoded >= limit:
+                # A generator-backed fetch, so breaking here stops pulling
+                # further pages from the API rather than just skipping them.
+                reached_limit = True
+                break
+
+        if reached_limit:
+            break
 
     con.close()
-    logger.info("Done.")
+    logger.info(
+        f"Done. {total_observations} observation(s) listed, {total_decoded} decoded."
+    )
 
 
 @dataclass(frozen=True, slots=True)

@@ -12,7 +12,7 @@ makes it a clean subprocess to shell out to per-observation:
 
 from __future__ import annotations
 
-__all__ = ["run_sso_rx_replay"]
+__all__ = ["parse_forensics_line", "run_sso_rx_replay"]
 
 import json
 import subprocess
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 DECODER_NAME = "sso_rx_replay"
 
 
-def _parse_line(line: str) -> dict[str, Any] | None:
+def parse_forensics_line(line: str) -> dict[str, Any] | None:
     line = line.strip()
     if not line:
         return None
@@ -76,6 +76,8 @@ def run_sso_rx_replay(
             f"sso_rx_replay exited {proc.returncode} on {audio_path}: {proc.stderr}"
         )
 
-    rows = [row for line in proc.stdout.splitlines() if (row := _parse_line(line))]
+    rows = [
+        row for line in proc.stdout.splitlines() if (row := parse_forensics_line(line))
+    ]
     logger.debug(f"sso_rx_replay: {len(rows)} report line(s) for {report_filename}")
     return rows

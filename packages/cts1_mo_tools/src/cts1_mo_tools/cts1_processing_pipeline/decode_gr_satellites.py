@@ -19,7 +19,7 @@ callers should convert with `audio.convert_ogg_to_wav` first.
 
 from __future__ import annotations
 
-__all__ = ["DEFAULT_SATCFG_PATH", "run_gr_satellites"]
+__all__ = ["DEFAULT_SATCFG_PATH", "parse_hexdump_stdout", "run_gr_satellites"]
 
 import re
 import subprocess
@@ -42,7 +42,7 @@ _PDU_BLOCK_RE = re.compile(
 _HEX_LINE_RE = re.compile(r"^[0-9a-f]{4}:((?: [0-9a-f]{2})+)", re.MULTILINE)
 
 
-def _parse_hexdump_stdout(stdout: str) -> list[dict[str, Any]]:
+def parse_hexdump_stdout(stdout: str) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for m in _PDU_BLOCK_RE.finditer(stdout):
         length = int(m.group("length"))
@@ -91,6 +91,6 @@ def run_gr_satellites(
         )
         return []
 
-    rows = _parse_hexdump_stdout(proc.stdout)
+    rows = parse_hexdump_stdout(proc.stdout)
     logger.debug(f"gr_satellites: {len(rows)} PDU(s) for {wav_path}")
     return rows
