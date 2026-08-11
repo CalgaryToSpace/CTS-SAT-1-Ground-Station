@@ -425,11 +425,11 @@ def decode_adcs_current_state_1(raw: bytes) -> dict[str, Any]:
     }
 
 
-def epoch_ms_to_iso_z(epoch_ms: int | None) -> str | None:
+def epoch_ms_to_iso(epoch_ms: int | None) -> str | None:
     """Convert a Unix epoch (milliseconds) to an ISO-8601 UTC string, or None."""
     if epoch_ms is None or epoch_ms <= 0 or epoch_ms > MAX_VALID_EPOCH_MS:
         return None
-    return datetime.fromtimestamp(epoch_ms / 1000.0, UTC).isoformat() + "Z"
+    return datetime.fromtimestamp(epoch_ms / 1000.0, UTC).isoformat()
 
 
 # -- Decoders -----------------------------------------------------------------
@@ -455,7 +455,7 @@ def decode_beacon_basic_packet(payload: bytes) -> dict[str, Any]:
     friendly = fm_raw.split(b"\x00")[0].decode("utf-8", errors="replace")
     sat_name = rf["satellite_name"].decode("ascii", errors="replace").rstrip("\x00")
     epoch_ms = rf["unix_epoch_time_ms"]
-    utc_time = epoch_ms_to_iso_z(epoch_ms)
+    utc_time = epoch_ms_to_iso(epoch_ms)
 
     data = {
         "packet_type": e(PACKET_TYPE_MAP, rf["packet_type"]),
@@ -1132,7 +1132,7 @@ def load_sent_tcmd_from_sqlite(input_sqlite: Path) -> pl.DataFrame:
                 .then(pl.col("tcmd_uplink_ts_transmitted"))
                 .otherwise(
                     pl.col("tcmd_uplink_tsexec_ms").map_elements(
-                        epoch_ms_to_iso_z, return_dtype=pl.String
+                        epoch_ms_to_iso, return_dtype=pl.String
                     )
                 )
             ),
