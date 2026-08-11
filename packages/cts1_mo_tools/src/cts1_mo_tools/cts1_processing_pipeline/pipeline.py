@@ -122,7 +122,8 @@ def run(  # noqa: PLR0913
         page_size=page_size,
     ):
         total_observations += len(page)
-        db.upsert_observations(con, pl.DataFrame(page, infer_schema_length=None))
+        observations_df = pl.DataFrame(page, infer_schema_length=None)
+        db.upsert_observations(con, observations_df)
 
         if skip_packets or reached_limit:
             continue

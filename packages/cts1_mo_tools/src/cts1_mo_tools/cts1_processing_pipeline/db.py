@@ -71,6 +71,75 @@ def _add_missing_columns(
             )
 
 
+def _alter_column_type(
+    con: duckdb.DuckDBPyConnection, table: str, col_name: str, new_type: str
+) -> bool:
+    """Try ALTER COLUMN ... TYPE; return whether it succeeded."""
+    try:
+        con.execute(
+            f"ALTER TABLE {_quote_ident(table)} "
+            f"ALTER COLUMN {_quote_ident(col_name)} TYPE {new_type}"
+        )
+    except duckdb.ConversionException:
+        return False
+    return True
+
+
+def _widen_mismatched_columns(
+    con: duckdb.DuckDBPyConnection, table: str, incoming_view: str
+) -> None:
+    """Widen any existing column that can't hold the incoming batch's type.
+
+    Small per-page/per-observation batches routinely have columns that are
+    entirely NULL (e.g. `payload` is null for most observations); DuckDB
+    infers those as a narrow type (often INTEGER) at CREATE TABLE time, which
+    then fails to hold a later batch's real data of a different type.
+
+    DuckDB's own ALTER COLUMN ... TYPE already knows how to promote sensibly
+    (INTEGER -> BIGINT -> DOUBLE, DATE -> TIMESTAMP, etc.) and simply raises
+    if the existing column's data can't be represented in the new type, so
+    the incoming batch's type is tried first and VARCHAR is only the
+    fallback when that specific promotion isn't representable.
+    """
+    existing_types = {
+        row[1]: row[2]
+        for row in con.execute(f"PRAGMA table_info({_quote_ident(table)})").fetchall()
+    }
+    for col_name, col_type, *_ in con.execute(f"DESCRIBE {incoming_view}").fetchall():
+        existing_type = existing_types.get(col_name)
+        if existing_type is None or existing_type in (col_type, "VARCHAR"):
+            continue
+
+        if _alter_column_type(con, table, col_name, col_type):
+            target_type = col_type
+        else:
+            _alter_column_type(con, table, col_name, "VARCHAR")
+            target_type = "VARCHAR"
+        logger.warning(
+            f"{table}: widened column {col_name!r} from {existing_type} to "
+            f"{target_type} (incoming batch has type {col_type})"
+        )
+
+
+def _insert_with_type_repair(
+    con: duckdb.DuckDBPyConnection, table: str, incoming_view: str
+) -> None:
+    """INSERT INTO ... BY NAME, self-healing on a column-type conflict.
+
+    Retries exactly once after widening the offending column(s) to VARCHAR.
+    """
+    insert_sql = f"INSERT INTO {_quote_ident(table)} BY NAME SELECT * FROM {incoming_view}"  # noqa: S608
+    try:
+        con.execute(insert_sql)
+    except duckdb.ConversionException:
+        logger.warning(
+            f"{table}: column type conflict inserting incoming batch; "
+            f"widening and retrying"
+        )
+        _widen_mismatched_columns(con, table, incoming_view)
+        con.execute(insert_sql)
+
+
 def upsert_observations(
     con: duckdb.DuckDBPyConnection, df: pl.DataFrame, *, key_col: str = "id"
 ) -> None:
@@ -92,9 +161,8 @@ def upsert_observations(
                 f"WHERE {_quote_ident(key_col)} IN "
                 f"(SELECT {_quote_ident(key_col)} FROM _incoming_observations)"
             )
-            con.execute(  # noqa: S608
-                f"INSERT INTO {_quote_ident(RAW_OBSERVATIONS_TABLE)} BY NAME "
-                f"SELECT * FROM _incoming_observations"
+            _insert_with_type_repair(
+                con, RAW_OBSERVATIONS_TABLE, "_incoming_observations"
             )
     finally:
         con.unregister("_incoming_observations")
@@ -116,10 +184,7 @@ def append_packets(con: duckdb.DuckDBPyConnection, df: pl.DataFrame) -> None:
             )
         else:
             _add_missing_columns(con, RAW_PACKETS_TABLE, "_incoming_packets")
-            con.execute(  # noqa: S608
-                f"INSERT INTO {_quote_ident(RAW_PACKETS_TABLE)} BY NAME "
-                f"SELECT * FROM _incoming_packets"
-            )
+            _insert_with_type_repair(con, RAW_PACKETS_TABLE, "_incoming_packets")
     finally:
         con.unregister("_incoming_packets")
 
