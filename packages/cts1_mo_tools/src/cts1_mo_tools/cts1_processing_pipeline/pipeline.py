@@ -17,10 +17,11 @@ from __future__ import annotations
 __all__ = ["Args", "main", "run"]
 
 import concurrent.futures
+import re
 import sys
 import tempfile
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -38,6 +39,46 @@ from .decode_sso_rx_replay import run_sso_rx_replay
 
 DEFAULT_DB_PATH = Path("output/cts1_processing_pipeline.duckdb")
 CHECKPOINT_INTERVAL = 100
+
+_DURATION_RE = re.compile(
+    r"^\s*(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>second|minute|hour|day|week)s?\s*$",
+    re.IGNORECASE,
+)
+_DURATION_UNIT_TO_TIMEDELTA_KWARG = {
+    "second": "seconds",
+    "minute": "minutes",
+    "hour": "hours",
+    "day": "days",
+    "week": "weeks",
+}
+
+
+def _parse_start_filter(value: str) -> datetime:
+    """Parse --start as either a relative duration or an absolute date/datetime.
+
+    A duration like "3 days" or "6 hours" is measured back from now (UTC).
+    Anything else is parsed as ISO 8601 ("2026-08-01" or
+    "2026-08-01T00:00:00Z"); a value with no timezone is treated as UTC.
+
+    Raises:
+        ValueError: If `value` matches neither form.
+    """
+    m = _DURATION_RE.match(value)
+    if m:
+        amount = float(m.group("value"))
+        kwarg = _DURATION_UNIT_TO_TIMEDELTA_KWARG[m.group("unit").lower()]
+        return datetime.now(UTC) - timedelta(**{kwarg: amount})
+
+    try:
+        dt = datetime.fromisoformat(value.strip())
+    except ValueError as exc:
+        msg = (
+            f"Could not parse --start={value!r}; expected a duration like "
+            f"'3 days' or an ISO 8601 date/datetime."
+        )
+        raise ValueError(msg) from exc
+
+    return dt.astimezone(UTC) if dt.tzinfo else dt.replace(tzinfo=UTC)
 
 
 def _process_observation(obs: dict[str, Any]) -> list[dict[str, Any]]:
@@ -109,25 +150,33 @@ def _select_candidates(
     return candidates
 
 
-def run(
+def run(  # noqa: C901
     *,
     norad_id: str = "69015",
     db_path: Path = DEFAULT_DB_PATH,
+    start: str | None = None,
     limit: int | None = None,
     workers: int = 4,
-    skip_packets: bool = False,
 ) -> None:
     """Run the pipeline once.
 
     Args:
         norad_id: NORAD catalog ID of the target satellite.
         db_path: DuckDB database file to write raw_observations/raw_packets to.
+        start: Only pull observations starting after this point: a duration
+            like "3 days" (relative to now) or an ISO 8601 date/datetime.
+            None means no lower bound (full history).
         page_size: Observations requested per API page.
         limit: Cap the number of observations decoded this run (for testing).
         workers: Number of observations to download/decode concurrently.
-        skip_packets: Only sync raw_observations; skip audio download/decode.
     """
     logger.info(f"Listing observations for NORAD {norad_id}")
+
+    start_gt = _parse_start_filter(start) if start is not None else None
+    if start_gt is not None:
+        logger.info(
+            f"  Filtering to observations starting after {start_gt.isoformat()}"
+        )
 
     total_observations = 0
     total_decoded = 0
@@ -138,13 +187,12 @@ def run(
         db.connect(db_path) as con,
         concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor,
     ):
-        done: set[tuple[int, str]] = (
-            set() if skip_packets else db.already_decoded_pairs(con)
-        )
+        done: set[tuple[int, str]] = db.already_decoded_pairs(con)
 
         try:
             for page in fetch_all_observations(
                 norad_id,
+                start_gt_filter=start_gt,
                 start_lt_filter=datetime.now(UTC),
                 statuses=None,
             ):
@@ -160,7 +208,7 @@ def run(
                     con.execute("CHECKPOINT")
                     since_checkpoint = 0
 
-                if skip_packets or reached_limit:
+                if reached_limit:
                     continue
 
                 remaining = None if limit is None else limit - total_decoded
@@ -196,14 +244,13 @@ def run(
                     # skipping them.
                     reached_limit = True
                     break
+
         except KeyboardInterrupt:
             # Worker threads block inside subprocess.run()-style calls, which
             # a signal can't interrupt from here — kill the children so those
             # threads unblock, then let the executor's own __exit__ join them
             # (fast now that nothing is left running) instead of hanging.
-            logger.warning(
-                "Interrupted; terminating in-flight downloads/decodes..."
-            )
+            logger.warning("Interrupted; terminating in-flight downloads/decodes...")
             _subprocess_registry.terminate_all()
             executor.shutdown(wait=True, cancel_futures=True)
             raise
@@ -223,6 +270,11 @@ class Args:
     db_path: Path = DEFAULT_DB_PATH
     """DuckDB database file for the raw_observations / raw_packets tables."""
 
+    start: str | None = None
+    """Only pull observations starting after this point: a duration like
+    '3 days' (relative to now) or an ISO 8601 date/datetime. Omit for full
+    history."""
+
     page_size: int = 100
     """Observations requested per SatNOGS API page."""
 
@@ -231,9 +283,6 @@ class Args:
 
     workers: int = 4
     """Number of observations to download/decode concurrently."""
-
-    skip_packets: bool = False
-    """Only sync raw_observations; skip audio download and decoding."""
 
     debug: bool = False
     """Enable debug logging."""
@@ -255,9 +304,9 @@ def main() -> None:
         run(
             norad_id=args.norad_id,
             db_path=args.db_path,
+            start=args.start,
             limit=args.limit,
             workers=args.workers,
-            skip_packets=args.skip_packets,
         )
     except KeyboardInterrupt:
         logger.warning("Interrupted by user; exiting.")
