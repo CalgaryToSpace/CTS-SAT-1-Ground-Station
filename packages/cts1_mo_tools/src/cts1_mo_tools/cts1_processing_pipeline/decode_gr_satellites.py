@@ -22,11 +22,12 @@ from __future__ import annotations
 __all__ = ["DEFAULT_SATCFG_PATH", "parse_hexdump_stdout", "run_gr_satellites"]
 
 import re
-import subprocess
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
+
+from . import _subprocess_registry
 
 DECODER_NAME = "gr_satellites"
 
@@ -73,7 +74,7 @@ def run_gr_satellites(
     Returns:
         One dict per decoded PDU.
     """
-    proc = subprocess.run(  # noqa: S603
+    proc = _subprocess_registry.run_tracked(
         [  # noqa: S607
             "gr_satellites",
             str(satcfg),
@@ -82,7 +83,6 @@ def run_gr_satellites(
             str(wav_path),
         ],
         check=False,
-        capture_output=True,
         text=True,
     )
     if proc.returncode != 0:

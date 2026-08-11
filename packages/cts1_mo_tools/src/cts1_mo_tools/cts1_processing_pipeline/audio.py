@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING
 import requests
 from loguru import logger
 
+from . import _subprocess_registry
+
 if TYPE_CHECKING:
     from pathlib import Path
 
@@ -37,12 +39,12 @@ def convert_ogg_to_wav(ogg_path: Path, wav_path: Path | None = None) -> Path:
     if wav_path is None:
         wav_path = ogg_path.with_suffix(".wav")
     try:
-        subprocess.run(  # noqa: S603
+        _subprocess_registry.run_tracked(
             ["sox", str(ogg_path), str(wav_path)],  # noqa: S607
             check=True,
-            capture_output=True,
         )
     except subprocess.CalledProcessError as exc:
-        logger.error(f"sox failed on {ogg_path}: {exc.stderr.decode(errors='replace')}")
+        stderr = exc.stderr.decode(errors="replace") if exc.stderr else ""
+        logger.error(f"sox failed on {ogg_path}: {stderr}")
         raise
     return wav_path

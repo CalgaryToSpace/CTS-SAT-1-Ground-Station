@@ -15,10 +15,11 @@ from __future__ import annotations
 __all__ = ["parse_forensics_line", "run_sso_rx_replay"]
 
 import json
-import subprocess
 from typing import TYPE_CHECKING, Any
 
 from loguru import logger
+
+from . import _subprocess_registry
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -60,7 +61,7 @@ def run_sso_rx_replay(
     Returns:
         One dict per forensics-report JSON line (frames, no-decode, or error).
     """
-    proc = subprocess.run(  # noqa: S603
+    proc = _subprocess_registry.run_tracked(
         [  # noqa: S607
             "sso_rx_replay",
             str(audio_path),
@@ -68,7 +69,6 @@ def run_sso_rx_replay(
             f"--report-filename={report_filename}",
         ],
         check=False,  # non-zero exit is expected on unreadable audio
-        capture_output=True,
         text=True,
     )
     if proc.returncode not in (0, 1):

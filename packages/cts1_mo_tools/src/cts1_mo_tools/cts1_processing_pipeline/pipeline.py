@@ -31,7 +31,7 @@ from loguru import logger
 
 from cts1_mo_tools.cts1_agenda_maker.satnogs_data import fetch_all_observations
 
-from . import db
+from . import _subprocess_registry, db
 from .audio import convert_ogg_to_wav, download_audio
 from .decode_gr_satellites import DEFAULT_SATCFG_PATH, run_gr_satellites
 from .decode_sso_rx_replay import run_sso_rx_replay
@@ -142,53 +142,71 @@ def run(
             set() if skip_packets else db.already_decoded_pairs(con)
         )
 
-        for page in fetch_all_observations(
-            norad_id,
-            start_lt_filter=datetime.now(UTC),
-            statuses=None,
-        ):
-            total_observations += len(page)
-            since_checkpoint += len(page)
-            observations_df = pl.DataFrame(page, infer_schema_length=None)
-            db.upsert_observations(con, observations_df)
+        try:
+            for page in fetch_all_observations(
+                norad_id,
+                start_lt_filter=datetime.now(UTC),
+                statuses=None,
+            ):
+                total_observations += len(page)
+                since_checkpoint += len(page)
+                observations_df = pl.DataFrame(page, infer_schema_length=None)
+                db.upsert_observations(con, observations_df)
 
-            if since_checkpoint >= CHECKPOINT_INTERVAL:
-                logger.debug(f"Checkpointing after {total_observations} observation(s)")
-                con.execute("CHECKPOINT")
-                since_checkpoint = 0
+                if since_checkpoint >= CHECKPOINT_INTERVAL:
+                    logger.debug(
+                        f"Checkpointing after {total_observations} observation(s)"
+                    )
+                    con.execute("CHECKPOINT")
+                    since_checkpoint = 0
 
-            if skip_packets or reached_limit:
-                continue
+                if skip_packets or reached_limit:
+                    continue
 
-            remaining = None if limit is None else limit - total_decoded
-            candidates = _select_candidates(page, done=done, remaining=remaining)
-            if not candidates:
-                continue
+                remaining = None if limit is None else limit - total_decoded
+                candidates = _select_candidates(page, done=done, remaining=remaining)
+                if not candidates:
+                    continue
 
-            # Download/decode concurrently (I/O- and subprocess-bound work);
-            # DB writes stay on this thread as each result comes back.
-            futures = {
-                executor.submit(_process_observation, obs): obs for obs in candidates
-            }
-            for future in concurrent.futures.as_completed(futures):
-                obs = futures[future]
-                total_decoded += 1
-                logger.info(f"[{total_decoded}] observation {obs['id']}")
-                try:
-                    rows = future.result()
-                except Exception:  # noqa: BLE001
-                    logger.exception(f"Failed processing observation {obs['id']}")
-                    rows = []
-                if rows:
-                    db.append_packets(con, pl.DataFrame(rows, infer_schema_length=None))
-                done.add((obs["id"], "sso_rx_replay"))
-                done.add((obs["id"], "gr_satellites"))
+                # Download/decode concurrently (I/O- and subprocess-bound
+                # work); DB writes stay on this thread as results come back.
+                futures = {
+                    executor.submit(_process_observation, obs): obs
+                    for obs in candidates
+                }
+                for future in concurrent.futures.as_completed(futures):
+                    obs = futures[future]
+                    total_decoded += 1
+                    logger.info(f"[{total_decoded}] observation {obs['id']}")
+                    try:
+                        rows = future.result()
+                    except Exception:  # noqa: BLE001
+                        logger.exception(f"Failed processing observation {obs['id']}")
+                        rows = []
+                    if rows:
+                        db.append_packets(
+                            con, pl.DataFrame(rows, infer_schema_length=None)
+                        )
+                    done.add((obs["id"], "sso_rx_replay"))
+                    done.add((obs["id"], "gr_satellites"))
 
-            if limit is not None and total_decoded >= limit:
-                # A generator-backed fetch, so breaking here stops pulling
-                # further pages from the API rather than just skipping them.
-                reached_limit = True
-                break
+                if limit is not None and total_decoded >= limit:
+                    # A generator-backed fetch, so breaking here stops
+                    # pulling further pages from the API rather than just
+                    # skipping them.
+                    reached_limit = True
+                    break
+        except KeyboardInterrupt:
+            # Worker threads block inside subprocess.run()-style calls, which
+            # a signal can't interrupt from here — kill the children so those
+            # threads unblock, then let the executor's own __exit__ join them
+            # (fast now that nothing is left running) instead of hanging.
+            logger.warning(
+                "Interrupted; terminating in-flight downloads/decodes..."
+            )
+            _subprocess_registry.terminate_all()
+            executor.shutdown(wait=True, cancel_futures=True)
+            raise
 
     logger.info(
         f"Done. {total_observations} observation(s) listed, {total_decoded} decoded."
@@ -233,13 +251,17 @@ def main() -> None:
         format="<green>{time:HH:mm:ss}</green> | <level>{level:<8}</level> | {message}",
     )
 
-    run(
-        norad_id=args.norad_id,
-        db_path=args.db_path,
-        limit=args.limit,
-        workers=args.workers,
-        skip_packets=args.skip_packets,
-    )
+    try:
+        run(
+            norad_id=args.norad_id,
+            db_path=args.db_path,
+            limit=args.limit,
+            workers=args.workers,
+            skip_packets=args.skip_packets,
+        )
+    except KeyboardInterrupt:
+        logger.warning("Interrupted by user; exiting.")
+        sys.exit(130)  # 128 + SIGINT, the conventional shell exit code
 
 
 if __name__ == "__main__":
