@@ -32,18 +32,24 @@ def parse_forensics_line(line: str) -> dict[str, Any] | None:
     if not line:
         return None
     try:
-        obj = json.loads(line)
+        obj: dict[str, Any] = json.loads(line)
     except json.JSONDecodeError:
         logger.warning(f"sso_rx_replay: could not parse forensics line: {line!r}")
         return None
 
+    assert isinstance(obj, dict)
+
+    if set(obj.keys()) == {"filename"}:
+        # SSO quirk where it reports the filename even if there are no frames.
+        return None
+
     return {
-        "sso_filename": obj.get("filename"),
-        "sso_time_in_file_ms": obj.get("time_in_file_ms"),
-        "sso_rssi": obj.get("rssi"),
-        "sso_rs": obj.get("rs"),
-        "sso_data_base64": obj.get("data_base64"),
-        "sso_error": obj.get("error"),
+        "sso_filename": obj["filename"],
+        "sso_time_in_file_ms": obj["time_in_file_ms"],
+        "sso_rssi": obj["rssi"],
+        "sso_rs": obj["rs"],
+        "sso_data_base64": obj["data_base64"],
+        "sso_error": obj.get("error"),  # I don't think this actually really exists.
     }
 
 
@@ -62,7 +68,7 @@ def run_sso_rx_replay(
         One dict per forensics-report JSON line (frames, no-decode, or error).
     """
     proc = _subprocess_registry.run_tracked(
-        [  # noqa: S607
+        [
             "sso_rx_replay",
             str(audio_path),
             "--forensics-report",
