@@ -60,12 +60,10 @@ def _add_missing_columns(
         row[1]
         for row in con.execute(f"PRAGMA table_info({_quote_ident(table)})").fetchall()
     }
-    for col_name, col_type, *_ in con.execute(
-        f"DESCRIBE {incoming_view}"
-    ).fetchall():
+    for col_name, col_type, *_ in con.execute(f"DESCRIBE {incoming_view}").fetchall():
         if col_name not in existing_cols:
             logger.info(f"{table}: adding new column {col_name!r} ({col_type})")
-            con.execute(  # noqa: S608
+            con.execute(
                 f"ALTER TABLE {_quote_ident(table)} "
                 f"ADD COLUMN {_quote_ident(col_name)} {col_type}"
             )
@@ -128,7 +126,9 @@ def _insert_with_type_repair(
 
     Retries exactly once after widening the offending column(s) to VARCHAR.
     """
-    insert_sql = f"INSERT INTO {_quote_ident(table)} BY NAME SELECT * FROM {incoming_view}"  # noqa: S608
+    insert_sql = (
+        f"INSERT INTO {_quote_ident(table)} BY NAME SELECT * FROM {incoming_view}"  # noqa: S608
+    )
     try:
         con.execute(insert_sql)
     except duckdb.ConversionException:
@@ -150,14 +150,14 @@ def upsert_observations(
     con.register("_incoming_observations", df)
     try:
         if not _table_exists(con, RAW_OBSERVATIONS_TABLE):
-            con.execute(  # noqa: S608
-                f"CREATE TABLE {_quote_ident(RAW_OBSERVATIONS_TABLE)} AS "
+            con.execute(
+                f"CREATE TABLE {_quote_ident(RAW_OBSERVATIONS_TABLE)} AS "  # noqa: S608
                 f"SELECT * FROM _incoming_observations"
             )
         else:
             _add_missing_columns(con, RAW_OBSERVATIONS_TABLE, "_incoming_observations")
-            con.execute(  # noqa: S608
-                f"DELETE FROM {_quote_ident(RAW_OBSERVATIONS_TABLE)} "
+            con.execute(
+                f"DELETE FROM {_quote_ident(RAW_OBSERVATIONS_TABLE)} "  # noqa: S608
                 f"WHERE {_quote_ident(key_col)} IN "
                 f"(SELECT {_quote_ident(key_col)} FROM _incoming_observations)"
             )
@@ -178,8 +178,8 @@ def append_packets(con: duckdb.DuckDBPyConnection, df: pl.DataFrame) -> None:
     con.register("_incoming_packets", df)
     try:
         if not _table_exists(con, RAW_PACKETS_TABLE):
-            con.execute(  # noqa: S608
-                f"CREATE TABLE {_quote_ident(RAW_PACKETS_TABLE)} AS "
+            con.execute(
+                f"CREATE TABLE {_quote_ident(RAW_PACKETS_TABLE)} AS "  # noqa: S608
                 f"SELECT * FROM _incoming_packets"
             )
         else:
@@ -195,8 +195,8 @@ def already_decoded_pairs(con: duckdb.DuckDBPyConnection) -> set[tuple[int, str]
     """Return {(observation_id, decoder)} already present in raw_packets."""
     if not _table_exists(con, RAW_PACKETS_TABLE):
         return set()
-    rows = con.execute(  # noqa: S608
-        f"SELECT DISTINCT observation_id, decoder "
+    rows = con.execute(
+        f"SELECT DISTINCT observation_id, decoder "  # noqa: S608
         f"FROM {_quote_ident(RAW_PACKETS_TABLE)}"
     ).fetchall()
     return {(obs_id, decoder) for obs_id, decoder in rows}

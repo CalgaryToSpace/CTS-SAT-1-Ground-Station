@@ -37,6 +37,7 @@ from .decode_gr_satellites import DEFAULT_SATCFG_PATH, run_gr_satellites
 from .decode_sso_rx_replay import run_sso_rx_replay
 
 DEFAULT_DB_PATH = Path("output/cts1_processing_pipeline.duckdb")
+CHECKPOINT_INTERVAL = 100
 
 
 def _process_observation(obs: dict[str, Any]) -> list[dict[str, Any]]:
@@ -128,24 +129,33 @@ def run(
     """
     logger.info(f"Listing observations for NORAD {norad_id}")
 
-    con = db.connect(db_path)
-    done: set[tuple[int, str]] = (
-        set() if skip_packets else db.already_decoded_pairs(con)
-    )
-
     total_observations = 0
     total_decoded = 0
+    since_checkpoint = 0
     reached_limit = False
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+    with (
+        db.connect(db_path) as con,
+        concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor,
+    ):
+        done: set[tuple[int, str]] = (
+            set() if skip_packets else db.already_decoded_pairs(con)
+        )
+
         for page in fetch_all_observations(
             norad_id,
             start_lt_filter=datetime.now(UTC),
             statuses=None,
         ):
             total_observations += len(page)
+            since_checkpoint += len(page)
             observations_df = pl.DataFrame(page, infer_schema_length=None)
             db.upsert_observations(con, observations_df)
+
+            if since_checkpoint >= CHECKPOINT_INTERVAL:
+                logger.debug(f"Checkpointing after {total_observations} observation(s)")
+                con.execute("CHECKPOINT")
+                since_checkpoint = 0
 
             if skip_packets or reached_limit:
                 continue
@@ -180,7 +190,6 @@ def run(
                 reached_limit = True
                 break
 
-    con.close()
     logger.info(
         f"Done. {total_observations} observation(s) listed, {total_decoded} decoded."
     )
