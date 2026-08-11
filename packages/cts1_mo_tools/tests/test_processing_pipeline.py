@@ -1,3 +1,4 @@
+import pytest
 from cts1_mo_tools.cts1_processing_pipeline.decode_gr_satellites import (
     parse_hexdump_stdout,
 )
@@ -27,20 +28,18 @@ def test_parse_forensics_line_frame() -> None:
 
 
 def test_parse_forensics_line_no_decode() -> None:
-    row = parse_forensics_line('{"filename":"sample.ogg"}')
-    assert row is not None
-    assert row["sso_filename"] == "sample.ogg"
-    assert row["sso_data_base64"] is None
-    assert row["sso_error"] is None
+    # SSO quirk: reports just the filename when the file decoded cleanly but
+    # had no frames. Nothing to land in raw_packets, so it's skipped.
+    assert parse_forensics_line('{"filename":"sample.ogg"}') is None
 
 
 def test_parse_forensics_line_error() -> None:
-    row = parse_forensics_line(
-        '{"filename":"bad.ogg","error":"could not decode audio file via libsndfile"}'
-    )
-    assert row is not None
-    assert row["sso_error"] == "could not decode audio file via libsndfile"
-    assert row["sso_data_base64"] is None
+    # An {"filename", "error"} line carries no frame fields, so indexing them
+    # raises rather than silently fabricating a row.
+    with pytest.raises(KeyError):
+        parse_forensics_line(
+            '{"filename":"bad.ogg","error":"could not decode audio file via libsndfile"}'
+        )
 
 
 def test_parse_forensics_line_blank_and_malformed() -> None:
