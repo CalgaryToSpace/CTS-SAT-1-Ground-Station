@@ -36,13 +36,13 @@ from cts1_mo_tools.cts1_agenda_maker.satnogs_data import fetch_all_observations
 
 from . import _subprocess_registry, db
 from .audio import convert_ogg_to_wav, download_audio
-from .decode_gr_satellites import DEFAULT_SATCFG_PATH, run_gr_satellites
+from .decode_gr_satellites import DEFAULT_SATCFG_PATH, run_gr_satellites_pdu
 from .decode_gr_satellites_kiss import run_gr_satellites_kiss
 from .decode_sso_rx_replay import run_sso_rx_replay
 
 DEFAULT_DB_PATH = Path("output/cts1_processing_pipeline.duckdb")
 CHECKPOINT_INTERVAL = 100
-DECODERS = ("sso_rx_replay", "gr_satellites", "gr_satellites_kiss")
+DECODERS = ("sso_rx_replay", "gr_satellites_pdu", "gr_satellites_kiss")
 KISS_DISPATCH_INTERVAL_SECONDS = 1.0
 
 _DURATION_RE = re.compile(
@@ -132,9 +132,9 @@ def _process_fast(
     wav_path: Path | None = None
     try:
         wav_path = convert_ogg_to_wav(ogg_path)
-        gr_rows = run_gr_satellites(wav_path, satcfg=DEFAULT_SATCFG_PATH)
+        gr_rows = run_gr_satellites_pdu(wav_path, satcfg=DEFAULT_SATCFG_PATH)
     except Exception:  # noqa: BLE001
-        logger.exception(f"gr_satellites decode failed for observation {obs_id}")
+        logger.exception(f"gr_satellites_pdu decode failed for observation {obs_id}")
         gr_rows = []
     for row in gr_rows:
         data_bytes = bytes.fromhex(row["gr_pdu_hex"])
@@ -142,7 +142,7 @@ def _process_fast(
         rows.append(
             {
                 "observation_id": obs_id,
-                "decoder": "gr_satellites",
+                "decoder": "gr_satellites_pdu",
                 "audio_url": audio_url,
                 "ingested_at": datetime.now(UTC),
                 # Coalesced columns:
@@ -173,7 +173,7 @@ def _process_kiss(obs: dict[str, Any], wav_path: Path) -> list[dict[str, Any]]:
     try:
         kiss_rows = run_gr_satellites_kiss(wav_path, satcfg=DEFAULT_SATCFG_PATH)
     except Exception:  # noqa: BLE001
-        logger.exception(f"gr_satellites (kiss) decode failed for observation {obs_id}")
+        logger.exception(f"gr_satellites_kiss decode failed for observation {obs_id}")
         kiss_rows = []
     for row in kiss_rows:
         data_bytes = bytes.fromhex(row["gr_kiss_pdu_hex"])
@@ -298,7 +298,7 @@ def run(  # noqa: C901, PLR0913, PLR0915
                 if rows:
                     db.append_packets(con, pl.DataFrame(rows, infer_schema_length=None))
                 done.add((obs["id"], "sso_rx_replay"))
-                done.add((obs["id"], "gr_satellites"))
+                done.add((obs["id"], "gr_satellites_pdu"))
                 if wav_path is not None and tmp is not None:
                     ready_for_kiss.append((obs, wav_path, tmp))
                 else:

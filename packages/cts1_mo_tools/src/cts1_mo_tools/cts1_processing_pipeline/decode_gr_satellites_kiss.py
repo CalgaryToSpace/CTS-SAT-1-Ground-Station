@@ -147,7 +147,7 @@ def run_gr_satellites_kiss(
         )
         if proc.returncode != 0:
             logger.warning(
-                f"gr_satellites (kiss) exited {proc.returncode} on "
+                f"gr_satellites_kiss exited {proc.returncode} on "
                 f"{wav_path}: {proc.stderr}"
             )
             return []
@@ -157,5 +157,5 @@ def run_gr_satellites_kiss(
         kiss_path.unlink(missing_ok=True)
 
     rows = parse_kiss_file(data, launch_time_ms=launch_time_ms)
-    logger.debug(f"gr_satellites (kiss): {len(rows)} PDU(s) for {wav_path}")
+    logger.debug(f"gr_satellites_kiss: {len(rows)} PDU(s) for {wav_path}")
     return rows

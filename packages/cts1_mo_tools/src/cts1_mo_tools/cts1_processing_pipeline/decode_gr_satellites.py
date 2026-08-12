@@ -19,7 +19,7 @@ callers should convert with `audio.convert_ogg_to_wav` first.
 
 from __future__ import annotations
 
-__all__ = ["DEFAULT_SATCFG_PATH", "parse_hexdump_stdout", "run_gr_satellites"]
+__all__ = ["DEFAULT_SATCFG_PATH", "parse_hexdump_stdout", "run_gr_satellites_pdu"]
 
 import re
 from pathlib import Path
@@ -29,7 +29,7 @@ from loguru import logger
 
 from . import _subprocess_registry
 
-DECODER_NAME = "gr_satellites"
+DECODER_NAME = "gr_satellites_pdu"
 
 DEFAULT_SATCFG_PATH = Path(__file__).parent / "gr_satellites_frontiersat.yml"
 
@@ -54,7 +54,7 @@ def parse_hexdump_stdout(stdout: str) -> list[dict[str, Any]]:
         )
         rows.append(
             {
-                "gr_transmitter": m.group("transmitter").strip(),
+                "gr_pdu_transmitter": m.group("transmitter").strip(),
                 "gr_pdu_length_bytes": length,
                 "gr_pdu_hex": hex_bytes,
             }
@@ -62,7 +62,7 @@ def parse_hexdump_stdout(stdout: str) -> list[dict[str, Any]]:
     return rows
 
 
-def run_gr_satellites(
+def run_gr_satellites_pdu(
     wav_path: Path, *, satcfg: Path = DEFAULT_SATCFG_PATH
 ) -> list[dict[str, Any]]:
     """Run `gr_satellites` against a WAV file using the CTS-SAT-1 satcfg.
@@ -87,10 +87,10 @@ def run_gr_satellites(
     )
     if proc.returncode != 0:
         logger.warning(
-            f"gr_satellites exited {proc.returncode} on {wav_path}: {proc.stderr}"
+            f"gr_satellites_pdu exited {proc.returncode} on {wav_path}: {proc.stderr}"
         )
         return []
 
     rows = parse_hexdump_stdout(proc.stdout)
-    logger.debug(f"gr_satellites: {len(rows)} PDU(s) for {wav_path}")
+    logger.debug(f"gr_satellites_pdu: {len(rows)} PDU(s) for {wav_path}")
     return rows

@@ -72,6 +72,7 @@ def run_sso_rx_replay(
             "sso_rx_replay",
             str(audio_path),
             "--forensics-report",
+            "--no-csp-crc32",  # Do not validate nor strip CRC32.
             f"--report-filename={report_filename}",
         ],
         check=False,  # non-zero exit is expected on unreadable audio

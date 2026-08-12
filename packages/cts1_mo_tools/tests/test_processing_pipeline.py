@@ -100,7 +100,7 @@ def test_parse_hexdump_stdout_extracts_pdu() -> None:
     rows = parse_hexdump_stdout(_HEXDUMP_STDOUT)
     assert len(rows) == 1
     row = rows[0]
-    assert row["gr_transmitter"] == "9k6 FSK downlink"
+    assert row["gr_pdu_transmitter"] == "9k6 FSK downlink"
     assert row["gr_pdu_length_bytes"] == 208  # noqa: PLR2004
     assert len(row["gr_pdu_hex"]) == 208 * 2
     assert row["gr_pdu_hex"].startswith("c2a28a0010d06c0e000822085e07fa07")
