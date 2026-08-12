@@ -21,7 +21,6 @@ from __future__ import annotations
 __all__ = ["parse_kiss_file", "run_gr_satellites_kiss"]
 
 import tempfile
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -130,7 +129,6 @@ def run_gr_satellites_kiss(
         kiss_path = Path(tmp.name)
 
     try:
-        launch_time_ms = int(datetime.now(UTC).timestamp() * 1000)
         proc = _subprocess_registry.run_tracked(
             [
                 "gr_satellites",
@@ -138,9 +136,12 @@ def run_gr_satellites_kiss(
                 "--hexdump",
                 "--kiss_out",
                 str(kiss_path),
-                "--throttle",
+                # Note: Previously required --throttle on gr_satellites<5.10.0.
                 "--wavfile",
                 str(wav_path),
+                # Fake start time so the timestamps are file-relative.
+                "--start_time",
+                "1970-01-01T00:00:00Z",
             ],
             check=False,
             text=True,
@@ -156,6 +157,6 @@ def run_gr_satellites_kiss(
     finally:
         kiss_path.unlink(missing_ok=True)
 
-    rows = parse_kiss_file(data, launch_time_ms=launch_time_ms)
+    rows = parse_kiss_file(data, launch_time_ms=0)
     logger.debug(f"gr_satellites_kiss: {len(rows)} PDU(s) for {wav_path}")
     return rows
