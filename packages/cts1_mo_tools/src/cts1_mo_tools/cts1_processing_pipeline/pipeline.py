@@ -21,6 +21,7 @@ import concurrent.futures
 import re
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -42,6 +43,7 @@ from .decode_sso_rx_replay import run_sso_rx_replay
 DEFAULT_DB_PATH = Path("output/cts1_processing_pipeline.duckdb")
 CHECKPOINT_INTERVAL = 100
 DECODERS = ("sso_rx_replay", "gr_satellites", "gr_satellites_kiss")
+KISS_DISPATCH_INTERVAL_SECONDS = 1.0
 
 _DURATION_RE = re.compile(
     r"^\s*(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>second|minute|hour|day|week)s?\s*$",
@@ -84,85 +86,112 @@ def _parse_start_filter(value: str) -> datetime:
     return dt.astimezone(UTC) if dt.tzinfo else dt.replace(tzinfo=UTC)
 
 
-def _process_observation(obs: dict[str, Any]) -> list[dict[str, Any]]:
-    """Download one observation's audio and run both decoders on it."""
+def _process_fast(
+    obs: dict[str, Any],
+) -> tuple[list[dict[str, Any]], Path | None, tempfile.TemporaryDirectory[str] | None]:
+    """Download one observation's audio and run the two fast decoders on it.
+
+    sso_rx_replay and gr_satellites --hexdump both finish in a couple of
+    seconds, so they run at normal (small pool) concurrency. The temp dir is
+    deliberately *not* cleaned up here when a WAV was produced: the caller
+    hands wav_path off to a later, separately-paced gr_satellites_kiss pass
+    (see _process_kiss) and is responsible for calling tmp.cleanup() once
+    that finishes.
+    """
     obs_id = obs["id"]
     audio_url = obs["payload"]
     rows: list[dict[str, Any]] = []
 
-    with tempfile.TemporaryDirectory(prefix="cts1_pipeline_") as tmp_str:
-        tmp_dir = Path(tmp_str)
-        try:
-            ogg_path = download_audio(audio_url, tmp_dir)
-        except Exception:  # noqa: BLE001
-            logger.exception(f"Failed to download audio for observation {obs_id}")
-            return rows
+    tmp = tempfile.TemporaryDirectory(prefix="cts1_pipeline_")
+    try:
+        ogg_path = download_audio(audio_url, Path(tmp.name))
+    except Exception:  # noqa: BLE001
+        logger.exception(f"Failed to download audio for observation {obs_id}")
+        tmp.cleanup()
+        return rows, None, None
 
-        sso_rows = run_sso_rx_replay(ogg_path, report_filename=ogg_path.name)
-        for row in sso_rows:
-            data_bytes = base64.b64decode(row["sso_data_base64"])
+    sso_rows = run_sso_rx_replay(ogg_path, report_filename=ogg_path.name)
+    for row in sso_rows:
+        data_bytes = base64.b64decode(row["sso_data_base64"])
 
-            rows.append(
-                {
-                    "observation_id": obs_id,
-                    "decoder": "sso_rx_replay",
-                    "audio_url": audio_url,
-                    "ingested_at": datetime.now(UTC),
-                    # Coalesced columns:
-                    "data_hex": data_bytes.hex(),
-                    "data_length_bytes": len(data_bytes),
-                    "time_in_file_ms": row["sso_time_in_file_ms"],
-                    "rssi": row["sso_rssi"],
-                    **row,
-                }
-            )
+        rows.append(
+            {
+                "observation_id": obs_id,
+                "decoder": "sso_rx_replay",
+                "audio_url": audio_url,
+                "ingested_at": datetime.now(UTC),
+                # Coalesced columns:
+                "data_hex": data_bytes.hex(),
+                "data_length_bytes": len(data_bytes),
+                "time_in_file_ms": row["sso_time_in_file_ms"],
+                "rssi": row["sso_rssi"],
+                **row,
+            }
+        )
 
-        try:
-            wav_path = convert_ogg_to_wav(ogg_path)
-            gr_rows = run_gr_satellites(wav_path, satcfg=DEFAULT_SATCFG_PATH)
-        except Exception:  # noqa: BLE001
-            logger.exception(f"gr_satellites decode failed for observation {obs_id}")
-            gr_rows = []
-        for row in gr_rows:
-            data_bytes = bytes.fromhex(row["gr_pdu_hex"])
+    wav_path: Path | None = None
+    try:
+        wav_path = convert_ogg_to_wav(ogg_path)
+        gr_rows = run_gr_satellites(wav_path, satcfg=DEFAULT_SATCFG_PATH)
+    except Exception:  # noqa: BLE001
+        logger.exception(f"gr_satellites decode failed for observation {obs_id}")
+        gr_rows = []
+    for row in gr_rows:
+        data_bytes = bytes.fromhex(row["gr_pdu_hex"])
 
-            rows.append(
-                {
-                    "observation_id": obs_id,
-                    "decoder": "gr_satellites",
-                    "audio_url": audio_url,
-                    "ingested_at": datetime.now(UTC),
-                    # Coalesced columns:
-                    "data_hex": data_bytes.hex(),
-                    "data_length_bytes": len(data_bytes),
-                    "time_in_file_ms": None,  # FIXME: Get this from KISS output.
-                    "rssi": None,
-                    **row,
-                }
-            )
+        rows.append(
+            {
+                "observation_id": obs_id,
+                "decoder": "gr_satellites",
+                "audio_url": audio_url,
+                "ingested_at": datetime.now(UTC),
+                # Coalesced columns:
+                "data_hex": data_bytes.hex(),
+                "data_length_bytes": len(data_bytes),
+                "time_in_file_ms": None,  # FIXME: Get this from KISS output.
+                "rssi": None,
+                **row,
+            }
+        )
 
-        try:
-            kiss_rows = run_gr_satellites_kiss(wav_path, satcfg=DEFAULT_SATCFG_PATH)
-        except Exception:  # noqa: BLE001
-            logger.exception(f"gr_satellites (kiss) decode failed for observation {obs_id}")
-            kiss_rows = []
-        for row in kiss_rows:
-            data_bytes = bytes.fromhex(row["gr_kiss_pdu_hex"])
+    if wav_path is None:
+        tmp.cleanup()
+        return rows, None, None
 
-            rows.append(
-                {
-                    "observation_id": obs_id,
-                    "decoder": "gr_satellites_kiss",
-                    "audio_url": audio_url,
-                    "ingested_at": datetime.now(UTC),
-                    # Coalesced columns:
-                    "data_hex": data_bytes.hex(),
-                    "data_length_bytes": len(data_bytes),
-                    "time_in_file_ms": row["gr_kiss_time_in_file_ms"],
-                    "rssi": None,
-                    **row,
-                }
-            )
+    return rows, wav_path, tmp
+
+
+def _process_kiss(obs: dict[str, Any], wav_path: Path) -> list[dict[str, Any]]:
+    """Run gr_satellites_kiss (real-time --throttle) against an already-converted WAV.
+
+    Does coalesce bits too.
+    """
+    obs_id = obs["id"]
+    audio_url = obs["payload"]
+    rows: list[dict[str, Any]] = []
+
+    try:
+        kiss_rows = run_gr_satellites_kiss(wav_path, satcfg=DEFAULT_SATCFG_PATH)
+    except Exception:  # noqa: BLE001
+        logger.exception(f"gr_satellites (kiss) decode failed for observation {obs_id}")
+        kiss_rows = []
+    for row in kiss_rows:
+        data_bytes = bytes.fromhex(row["gr_kiss_pdu_hex"])
+
+        rows.append(
+            {
+                "observation_id": obs_id,
+                "decoder": "gr_satellites_kiss",
+                "audio_url": audio_url,
+                "ingested_at": datetime.now(UTC),
+                # Coalesced columns:
+                "data_hex": data_bytes.hex(),
+                "data_length_bytes": len(data_bytes),
+                "time_in_file_ms": row["gr_kiss_time_in_file_ms"],
+                "rssi": None,
+                **row,
+            }
+        )
 
     return rows
 
@@ -189,13 +218,16 @@ def _select_candidates(
     return candidates
 
 
-def run(  # noqa: C901
+def run(  # noqa: C901, PLR0913, PLR0915
     *,
     norad_id: str = "69015",
     db_path: Path = DEFAULT_DB_PATH,
     start: str | None = None,
+    page_size: int = 100,
+    batch_size: int = 500,
     limit: int | None = None,
     workers: int = 4,
+    kiss_workers: int = 200,
 ) -> None:
     """Run the pipeline once.
 
@@ -205,9 +237,20 @@ def run(  # noqa: C901
         start: Only pull observations starting after this point: a duration
             like "3 days" (relative to now) or an ISO 8601 date/datetime.
             None means no lower bound (full history).
-        page_size: Observations requested per API page.
+        page_size: Observations requested per SatNOGS API page.
+        batch_size: Candidate observations accumulated across pages before a
+            batch is dispatched to the worker pools. gr_satellites_kiss
+            decodes in real time (--throttle), so a large batch is what lets
+            hundreds of observations decode concurrently instead of the ~100
+            in a single API page.
         limit: Cap the number of observations decoded this run (for testing).
-        workers: Number of observations to download/decode concurrently.
+        workers: Concurrency for the fast decoders (sso_rx_replay,
+            gr_satellites --hexdump), which each finish in a few seconds.
+        kiss_workers: Max concurrency for gr_satellites_kiss, which decodes
+            in real time (--throttle) and so needs far more concurrent slots
+            to get comparable throughput. New kiss jobs are started at most
+            one per second (see KISS_DISPATCH_INTERVAL_SECONDS) so a big
+            batch ramps up gradually instead of launching hundreds at once.
     """
     logger.info(f"Listing observations for NORAD {norad_id}")
 
@@ -221,12 +264,86 @@ def run(  # noqa: C901
     total_decoded = 0
     since_checkpoint = 0
     reached_limit = False
+    pending: list[dict[str, Any]] = []
+    last_kiss_dispatch = 0.0
 
     with (
         db.connect(db_path) as con,
-        concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor,
+        concurrent.futures.ThreadPoolExecutor(max_workers=workers) as fast_executor,
+        concurrent.futures.ThreadPoolExecutor(
+            max_workers=kiss_workers
+        ) as kiss_executor,
     ):
         done: set[tuple[int, str]] = db.already_decoded_pairs(con)
+
+        def dispatch_fast(
+            batch: list[dict[str, Any]],
+        ) -> list[tuple[dict[str, Any], Path, tempfile.TemporaryDirectory[str]]]:
+            """Run the fast decoders over a batch; write their rows, and
+            return (obs, wav_path, tmp) for observations ready for a
+            gr_satellites_kiss pass (tmp must be .cleanup()'d by the caller
+            once that pass finishes)."""
+            nonlocal total_decoded
+            ready_for_kiss: list[
+                tuple[dict[str, Any], Path, tempfile.TemporaryDirectory[str]]
+            ] = []
+            futures = {fast_executor.submit(_process_fast, obs): obs for obs in batch}
+            for future in concurrent.futures.as_completed(futures):
+                obs = futures[future]
+                try:
+                    rows, wav_path, tmp = future.result()
+                except Exception:  # noqa: BLE001
+                    logger.exception(f"Failed processing observation {obs['id']}")
+                    rows, wav_path, tmp = [], None, None
+                if rows:
+                    db.append_packets(con, pl.DataFrame(rows, infer_schema_length=None))
+                done.add((obs["id"], "sso_rx_replay"))
+                done.add((obs["id"], "gr_satellites"))
+                if wav_path is not None and tmp is not None:
+                    ready_for_kiss.append((obs, wav_path, tmp))
+                else:
+                    # Nothing to feed gr_satellites_kiss; this observation is
+                    # already fully processed.
+                    done.add((obs["id"], "gr_satellites_kiss"))
+                    total_decoded += 1
+                    logger.info(f"[{total_decoded}] observation {obs['id']}")
+            return ready_for_kiss
+
+        def dispatch_kiss(
+            ready: list[tuple[dict[str, Any], Path, tempfile.TemporaryDirectory[str]]],
+        ) -> None:
+            nonlocal total_decoded, last_kiss_dispatch
+            kiss_futures: dict[
+                concurrent.futures.Future[list[dict[str, Any]]],
+                tuple[dict[str, Any], tempfile.TemporaryDirectory[str]],
+            ] = {}
+            for obs, wav_path, tmp in ready:
+                elapsed = time.monotonic() - last_kiss_dispatch
+                if elapsed < KISS_DISPATCH_INTERVAL_SECONDS:
+                    time.sleep(KISS_DISPATCH_INTERVAL_SECONDS - elapsed)
+                last_kiss_dispatch = time.monotonic()
+                future = kiss_executor.submit(_process_kiss, obs, wav_path)
+                kiss_futures[future] = (obs, tmp)
+
+            for future in concurrent.futures.as_completed(kiss_futures):
+                obs, tmp = kiss_futures[future]
+                total_decoded += 1
+                logger.info(f"[{total_decoded}] observation {obs['id']} (kiss)")
+                try:
+                    rows = future.result()
+                except Exception:  # noqa: BLE001
+                    logger.exception(f"Failed kiss-processing observation {obs['id']}")
+                    rows = []
+                if rows:
+                    db.append_packets(con, pl.DataFrame(rows, infer_schema_length=None))
+                done.add((obs["id"], "gr_satellites_kiss"))
+                tmp.cleanup()
+
+        def dispatch(batch: list[dict[str, Any]]) -> None:
+            if not batch:
+                return
+            logger.info(f"Dispatching a batch of {len(batch)} observation(s)...")
+            dispatch_kiss(dispatch_fast(batch))
 
         try:
             for page in fetch_all_observations(
@@ -234,6 +351,7 @@ def run(  # noqa: C901
                 start_gt_filter=start_gt,
                 start_lt_filter=datetime.now(UTC),
                 statuses=None,
+                page_size=page_size,
             ):
                 total_observations += len(page)
                 since_checkpoint += len(page)
@@ -250,48 +368,37 @@ def run(  # noqa: C901
                 if reached_limit:
                     continue
 
-                remaining = None if limit is None else limit - total_decoded
-                candidates = _select_candidates(page, done=done, remaining=remaining)
-                if not candidates:
-                    continue
+                remaining = (
+                    None if limit is None else limit - total_decoded - len(pending)
+                )
+                pending.extend(_select_candidates(page, done=done, remaining=remaining))
 
-                # Download/decode concurrently (I/O- and subprocess-bound
-                # work); DB writes stay on this thread as results come back.
-                futures = {
-                    executor.submit(_process_observation, obs): obs
-                    for obs in candidates
-                }
-                for future in concurrent.futures.as_completed(futures):
-                    obs = futures[future]
-                    total_decoded += 1
-                    logger.info(f"[{total_decoded}] observation {obs['id']}")
-                    try:
-                        rows = future.result()
-                    except Exception:  # noqa: BLE001
-                        logger.exception(f"Failed processing observation {obs['id']}")
-                        rows = []
-                    if rows:
-                        db.append_packets(
-                            con, pl.DataFrame(rows, infer_schema_length=None)
-                        )
-                    for decoder in DECODERS:
-                        done.add((obs["id"], decoder))
+                if len(pending) >= batch_size:
+                    dispatch(pending)
+                    pending = []
 
-                if limit is not None and total_decoded >= limit:
+                if limit is not None and total_decoded + len(pending) >= limit:
                     # A generator-backed fetch, so breaking here stops
                     # pulling further pages from the API rather than just
                     # skipping them.
+                    dispatch(pending)
+                    pending = []
                     reached_limit = True
                     break
+
+            dispatch(pending)  # flush whatever's left once paging is exhausted
+            pending = []
 
         except KeyboardInterrupt:
             # Worker threads block inside subprocess.run()-style calls, which
             # a signal can't interrupt from here — kill the children so those
-            # threads unblock, then let the executor's own __exit__ join them
-            # (fast now that nothing is left running) instead of hanging.
+            # threads unblock, then let each executor's own __exit__ join
+            # them (fast now that nothing is left running) instead of
+            # hanging (the kiss pool especially, mid multi-minute throttle).
             logger.warning("Interrupted; terminating in-flight downloads/decodes...")
             _subprocess_registry.terminate_all()
-            executor.shutdown(wait=True, cancel_futures=True)
+            fast_executor.shutdown(wait=True, cancel_futures=True)
+            kiss_executor.shutdown(wait=True, cancel_futures=True)
             raise
 
     logger.info(
@@ -317,11 +424,23 @@ class Args:
     page_size: int = 100
     """Observations requested per SatNOGS API page."""
 
+    batch_size: int = 500
+    """Candidate observations accumulated across pages before a batch is
+    dispatched to the worker pools, so gr_satellites_kiss's real-time
+    (--throttle) decoding can run hundreds concurrently instead of ~page_size
+    at a time."""
+
     limit: int | None = None
     """Cap the number of observations decoded this run (for testing)."""
 
     workers: int = 4
-    """Number of observations to download/decode concurrently."""
+    """Concurrency for the fast decoders (sso_rx_replay, gr_satellites
+    --hexdump)."""
+
+    kiss_workers: int = 200
+    """Max concurrency for gr_satellites_kiss (real-time --throttle decode);
+    new kiss jobs are started at most one per second regardless of this
+    limit, so a big batch ramps up gradually."""
 
     debug: bool = False
     """Enable debug logging."""
@@ -344,8 +463,11 @@ def main() -> None:
             norad_id=args.norad_id,
             db_path=args.db_path,
             start=args.start,
+            page_size=args.page_size,
+            batch_size=args.batch_size,
             limit=args.limit,
             workers=args.workers,
+            kiss_workers=args.kiss_workers,
         )
     except KeyboardInterrupt:
         logger.warning("Interrupted by user; exiting.")
