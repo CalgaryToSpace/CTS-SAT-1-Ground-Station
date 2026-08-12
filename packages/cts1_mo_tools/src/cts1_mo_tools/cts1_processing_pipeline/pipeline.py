@@ -103,6 +103,7 @@ def _received_at(obs: dict[str, Any], *, time_in_file_ms: float | None) -> datet
 
 def _process_fast(
     obs: dict[str, Any],
+    temp_dir: Path | None,
 ) -> tuple[list[dict[str, Any]], Path | None, tempfile.TemporaryDirectory[str] | None]:
     """Download one observation's audio and run the two fast decoders on it.
 
@@ -117,7 +118,7 @@ def _process_fast(
     audio_url = obs["payload"]
     rows: list[dict[str, Any]] = []
 
-    tmp = tempfile.TemporaryDirectory(prefix="cts1_pipeline_")
+    tmp = tempfile.TemporaryDirectory(prefix="cts1_pipeline_", dir=temp_dir)
     try:
         ogg_path = download_audio(audio_url, Path(tmp.name))
     except Exception:  # noqa: BLE001
@@ -250,6 +251,7 @@ def run(  # noqa: C901, PLR0913, PLR0915
     limit: int | None = None,
     workers: int = 4,
     kiss_workers: int = 200,
+    temp_dir: Path | None = None,
 ) -> None:
     """Run the pipeline once.
 
@@ -273,6 +275,9 @@ def run(  # noqa: C901, PLR0913, PLR0915
             to get comparable throughput. New kiss jobs are started at most
             one per second (see KISS_DISPATCH_INTERVAL_SECONDS) so a big
             batch ramps up gradually instead of launching hundreds at once.
+        temp_dir: Directory to create per-observation temp dirs (audio
+            downloads/WAV conversions) under. None uses the platform default
+            (see `tempfile`).
     """
     logger.info(f"Listing observations for NORAD {norad_id}")
 
@@ -309,7 +314,10 @@ def run(  # noqa: C901, PLR0913, PLR0915
             ready_for_kiss: list[
                 tuple[dict[str, Any], Path, tempfile.TemporaryDirectory[str]]
             ] = []
-            futures = {fast_executor.submit(_process_fast, obs): obs for obs in batch}
+            futures = {
+                fast_executor.submit(_process_fast, obs, temp_dir): obs
+                for obs in batch
+            }
             for future in concurrent.futures.as_completed(futures):
                 obs = futures[future]
                 try:
@@ -464,6 +472,11 @@ class Args:
     new kiss jobs are started at most one per second regardless of this
     limit, so a big batch ramps up gradually."""
 
+    temp_dir: Path | None = None
+    """Directory to create per-observation temp dirs (audio
+    downloads/WAV conversions) under. Defaults to the platform temp
+    directory (see Python's `tempfile`)."""
+
     debug: bool = False
     """Enable debug logging."""
 
@@ -490,6 +503,7 @@ def main() -> None:
             limit=args.limit,
             workers=args.workers,
             kiss_workers=args.kiss_workers,
+            temp_dir=args.temp_dir,
         )
     except KeyboardInterrupt:
         logger.warning("Interrupted by user; exiting.")

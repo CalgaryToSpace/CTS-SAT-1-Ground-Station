@@ -40,7 +40,7 @@ def convert_ogg_to_wav(ogg_path: Path, wav_path: Path | None = None) -> Path:
         wav_path = ogg_path.with_suffix(".wav")
     try:
         _subprocess_registry.run_tracked(
-            ["sox", str(ogg_path), str(wav_path)],  # noqa: S607
+            ["sox", str(ogg_path), str(wav_path)],
             check=True,
         )
     except subprocess.CalledProcessError as exc:

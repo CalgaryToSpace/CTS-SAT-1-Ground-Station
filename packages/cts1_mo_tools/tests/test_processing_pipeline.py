@@ -28,6 +28,7 @@ def _kiss_escape(payload: bytes) -> bytes:
 def _kiss_frame(control: int, payload: bytes) -> bytes:
     return bytes([FEND]) + _kiss_escape(bytes([control]) + payload) + bytes([FEND])
 
+
 # ---------------------------------------------------------------------------
 # sso_rx_replay --forensics-report line parsing
 # ---------------------------------------------------------------------------
@@ -60,7 +61,7 @@ def test_parse_forensics_line_error() -> None:
     # raises rather than silently fabricating a row.
     with pytest.raises(KeyError):
         parse_forensics_line(
-            '{"filename":"bad.ogg","error":"could not decode audio file via libsndfile"}'
+            '{"filename":"bad.ogg","error":"could not decode audio file via libsndfile"}'  # noqa: E501
         )
 
 
@@ -93,7 +94,7 @@ pdu vector contents =
 00b0: b4 08 05 08 18 07 a7 08 05 08 03 07 c5 07 b3 07
 00c0: d5 07 b4 07 b3 07 54 07 a6 04 22 0c 9b d4 db 07
 ************************************
-"""  # noqa: W291
+"""
 
 
 def test_parse_hexdump_stdout_extracts_pdu() -> None:
@@ -101,7 +102,7 @@ def test_parse_hexdump_stdout_extracts_pdu() -> None:
     assert len(rows) == 1
     row = rows[0]
     assert row["gr_pdu_transmitter"] == "9k6 FSK downlink"
-    assert row["gr_pdu_length_bytes"] == 208  # noqa: PLR2004
+    assert row["gr_pdu_length_bytes"] == 208
     assert len(row["gr_pdu_hex"]) == 208 * 2
     assert row["gr_pdu_hex"].startswith("c2a28a0010d06c0e000822085e07fa07")
 

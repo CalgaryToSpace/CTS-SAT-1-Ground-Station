@@ -9,17 +9,14 @@ call here registers its child in a shared, lock-protected set so
 `terminate_all()` can do exactly that.
 """
 
-from __future__ import annotations
-
 __all__ = ["run_tracked", "terminate_all"]
 
+import contextlib
 import subprocess
 import threading
 import time
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from collections.abc import Sequence
+from collections.abc import Sequence
+from typing import Any
 
 _lock = threading.Lock()
 _active: set[subprocess.Popen[Any]] = set()
@@ -47,17 +44,18 @@ def run_tracked(
 
 
 def terminate_all(*, kill_after: float = 3.0) -> None:
-    """Terminate every tracked in-flight child; escalate to SIGKILL after a grace period."""
+    """Terminate every tracked in-flight child with escalation.
+
+    Escalate to SIGKILL after a grace period.
+    """
     with _lock:
         procs = list(_active)
     if not procs:
         return
 
     for proc in procs:
-        try:
+        with contextlib.suppress(ProcessLookupError):
             proc.terminate()
-        except ProcessLookupError:
-            pass
 
     deadline = time.monotonic() + kill_after
     for proc in procs:
