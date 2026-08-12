@@ -1,0 +1,161 @@
+"""Wrapper around `gr_satellites --kiss_out` (CTS-SAT-1 / FrontierSat config).
+
+A separate decoding path from `decode_gr_satellites.py`'s `--hexdump` one:
+KISS output is the only gr_satellites mode that carries a per-packet
+timestamp. Per `pdu_to_kiss.py` in gr-satellites, every decoded PDU is
+preceded by a KISS control frame (control byte 0x09) holding a big-endian
+64-bit UTC Unix timestamp in milliseconds, captured via `datetime.now()` at
+the moment the PDU is emitted. That's only meaningful as a file-relative
+position if gr_satellites processes the WAV at real playback speed, hence
+`--throttle` below — decoding an observation this way takes as long as the
+observation itself (a multi-minute pass takes multiple minutes to decode).
+
+`--hexdump` is still passed alongside `--kiss_out`: it's what makes the
+yaml's `telemetry: hexdump` datasink valid at startup (gr_satellites raises
+an `AttributeError` without it), even though that stdout output is not
+parsed here — see `decode_gr_satellites.py` for the module that does.
+"""
+
+from __future__ import annotations
+
+__all__ = ["parse_kiss_file", "run_gr_satellites_kiss"]
+
+import tempfile
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from loguru import logger
+
+from . import _subprocess_registry
+from .decode_gr_satellites import DEFAULT_SATCFG_PATH
+
+DECODER_NAME = "gr_satellites_kiss"
+
+# gr_satellites_frontiersat.yml defines exactly one transmitter; KISS output
+# carries no transmitter label (unlike --hexdump's PDU debug print), so this
+# is hardcoded to match the yaml rather than parsed at runtime.
+GR_TRANSMITTER_NAME = "9k6 FSK downlink"
+
+_FEND = 0xC0
+_FESC = 0xDB
+_TFEND = 0xDC
+_TFESC = 0xDD
+_TIMESTAMP_CONTROL_BYTE = 0x09
+_DATA_CONTROL_BYTE = 0x00
+_TIMESTAMP_PAYLOAD_LEN = 8
+
+
+def _kiss_unescape(frame: bytes) -> bytes:
+    """Reverse KISS FESC/TFEND/TFESC escaping within a single frame's bytes."""
+    out = bytearray()
+    it = iter(frame)
+    for b in it:
+        if b != _FESC:
+            out.append(b)
+            continue
+        nxt = next(it, None)
+        if nxt == _TFEND:
+            out.append(_FEND)
+        elif nxt == _TFESC:
+            out.append(_FESC)
+        elif nxt is not None:
+            out.append(nxt)
+    return bytes(out)
+
+
+def parse_kiss_file(data: bytes, *, launch_time_ms: int) -> list[dict[str, Any]]:
+    """Parse a gr_satellites `--kiss_out` file into one row per decoded PDU.
+
+    Args:
+        data: Raw bytes of the KISS output file.
+        launch_time_ms: UTC Unix ms epoch captured right before the
+            gr_satellites subprocess was started; timestamps embedded in the
+            KISS stream are relative to this to produce a file-relative
+            `time_in_file_ms` (meaningful only when `--throttle` was used).
+
+    Returns:
+        One dict per data frame, using the timestamp frame (if any) that
+        immediately preceded it in the stream.
+    """
+    rows: list[dict[str, Any]] = []
+    pending_timestamp_ms: int | None = None
+
+    for raw_frame in data.split(bytes([_FEND])):
+        if not raw_frame:
+            continue
+        frame = _kiss_unescape(raw_frame)
+        if not frame:
+            continue
+
+        control, payload = frame[0], frame[1:]
+        if control == _TIMESTAMP_CONTROL_BYTE:
+            if len(payload) == _TIMESTAMP_PAYLOAD_LEN:
+                pending_timestamp_ms = int.from_bytes(payload, "big")
+            continue
+        if control != _DATA_CONTROL_BYTE:
+            continue  # some other KISS command (params, exit KISS mode, ...)
+
+        time_in_file_ms = (
+            pending_timestamp_ms - launch_time_ms
+            if pending_timestamp_ms is not None
+            else None
+        )
+        rows.append(
+            {
+                "gr_kiss_transmitter": GR_TRANSMITTER_NAME,
+                "gr_kiss_pdu_length_bytes": len(payload),
+                "gr_kiss_pdu_hex": payload.hex(),
+                "gr_kiss_time_in_file_ms": time_in_file_ms,
+            }
+        )
+        pending_timestamp_ms = None  # each timestamp frame covers one PDU
+
+    return rows
+
+
+def run_gr_satellites_kiss(
+    wav_path: Path, *, satcfg: Path = DEFAULT_SATCFG_PATH
+) -> list[dict[str, Any]]:
+    """Run `gr_satellites --kiss_out --throttle` against a WAV file.
+
+    Args:
+        wav_path: Path to a local WAV recording (see `audio.convert_ogg_to_wav`).
+        satcfg: Path to the gr_satellites satellite YAML definition.
+
+    Returns:
+        One dict per decoded PDU, with a file-relative `time_in_file_ms`.
+    """
+    with tempfile.NamedTemporaryFile(suffix=".kiss", delete=False) as tmp:
+        kiss_path = Path(tmp.name)
+
+    try:
+        launch_time_ms = int(datetime.now(UTC).timestamp() * 1000)
+        proc = _subprocess_registry.run_tracked(
+            [
+                "gr_satellites",
+                str(satcfg),
+                "--hexdump",
+                "--kiss_out",
+                str(kiss_path),
+                "--throttle",
+                "--wavfile",
+                str(wav_path),
+            ],
+            check=False,
+            text=True,
+        )
+        if proc.returncode != 0:
+            logger.warning(
+                f"gr_satellites (kiss) exited {proc.returncode} on "
+                f"{wav_path}: {proc.stderr}"
+            )
+            return []
+
+        data = kiss_path.read_bytes()
+    finally:
+        kiss_path.unlink(missing_ok=True)
+
+    rows = parse_kiss_file(data, launch_time_ms=launch_time_ms)
+    logger.debug(f"gr_satellites (kiss): {len(rows)} PDU(s) for {wav_path}")
+    return rows

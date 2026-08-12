@@ -36,10 +36,12 @@ from cts1_mo_tools.cts1_agenda_maker.satnogs_data import fetch_all_observations
 from . import _subprocess_registry, db
 from .audio import convert_ogg_to_wav, download_audio
 from .decode_gr_satellites import DEFAULT_SATCFG_PATH, run_gr_satellites
+from .decode_gr_satellites_kiss import run_gr_satellites_kiss
 from .decode_sso_rx_replay import run_sso_rx_replay
 
 DEFAULT_DB_PATH = Path("output/cts1_processing_pipeline.duckdb")
 CHECKPOINT_INTERVAL = 100
+DECODERS = ("sso_rx_replay", "gr_satellites", "gr_satellites_kiss")
 
 _DURATION_RE = re.compile(
     r"^\s*(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>second|minute|hour|day|week)s?\s*$",
@@ -139,6 +141,29 @@ def _process_observation(obs: dict[str, Any]) -> list[dict[str, Any]]:
                 }
             )
 
+        try:
+            kiss_rows = run_gr_satellites_kiss(wav_path, satcfg=DEFAULT_SATCFG_PATH)
+        except Exception:  # noqa: BLE001
+            logger.exception(f"gr_satellites (kiss) decode failed for observation {obs_id}")
+            kiss_rows = []
+        for row in kiss_rows:
+            data_bytes = bytes.fromhex(row["gr_kiss_pdu_hex"])
+
+            rows.append(
+                {
+                    "observation_id": obs_id,
+                    "decoder": "gr_satellites_kiss",
+                    "audio_url": audio_url,
+                    "ingested_at": datetime.now(UTC),
+                    # Coalesced columns:
+                    "data_hex": data_bytes.hex(),
+                    "data_length_bytes": len(data_bytes),
+                    "time_in_file_ms": row["gr_kiss_time_in_file_ms"],
+                    "rssi": None,
+                    **row,
+                }
+            )
+
     return rows
 
 
@@ -158,8 +183,7 @@ def _select_candidates(
             break
         if not obs.get("payload"):
             continue
-        key_sso, key_gr = (obs["id"], "sso_rx_replay"), (obs["id"], "gr_satellites")
-        if key_sso in done and key_gr in done:
+        if all((obs["id"], decoder) in done for decoder in DECODERS):
             continue
         candidates.append(obs)
     return candidates
@@ -250,8 +274,8 @@ def run(  # noqa: C901
                         db.append_packets(
                             con, pl.DataFrame(rows, infer_schema_length=None)
                         )
-                    done.add((obs["id"], "sso_rx_replay"))
-                    done.add((obs["id"], "gr_satellites"))
+                    for decoder in DECODERS:
+                        done.add((obs["id"], decoder))
 
                 if limit is not None and total_decoded >= limit:
                     # A generator-backed fetch, so breaking here stops

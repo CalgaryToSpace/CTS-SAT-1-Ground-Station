@@ -2,9 +2,31 @@ import pytest
 from cts1_mo_tools.cts1_processing_pipeline.decode_gr_satellites import (
     parse_hexdump_stdout,
 )
+from cts1_mo_tools.cts1_processing_pipeline.decode_gr_satellites_kiss import (
+    GR_TRANSMITTER_NAME,
+    parse_kiss_file,
+)
 from cts1_mo_tools.cts1_processing_pipeline.decode_sso_rx_replay import (
     parse_forensics_line,
 )
+
+FEND, FESC, TFEND, TFESC = 0xC0, 0xDB, 0xDC, 0xDD
+
+
+def _kiss_escape(payload: bytes) -> bytes:
+    out = bytearray()
+    for b in payload:
+        if b == FEND:
+            out += bytes([FESC, TFEND])
+        elif b == FESC:
+            out += bytes([FESC, TFESC])
+        else:
+            out.append(b)
+    return bytes(out)
+
+
+def _kiss_frame(control: int, payload: bytes) -> bytes:
+    return bytes([FEND]) + _kiss_escape(bytes([control]) + payload) + bytes([FEND])
 
 # ---------------------------------------------------------------------------
 # sso_rx_replay --forensics-report line parsing
@@ -86,3 +108,60 @@ def test_parse_hexdump_stdout_extracts_pdu() -> None:
 
 def test_parse_hexdump_stdout_no_pdus() -> None:
     assert parse_hexdump_stdout("nothing decoded here\n") == []
+
+
+# ---------------------------------------------------------------------------
+# gr_satellites --kiss_out binary parsing
+# ---------------------------------------------------------------------------
+
+
+def test_parse_kiss_file_timestamp_then_data() -> None:
+    launch_ms = 1_700_000_000_000
+    ts_ms = launch_ms + 12_345
+    data = _kiss_frame(0x09, ts_ms.to_bytes(8, "big")) + _kiss_frame(
+        0x00, b"\xaa\xbb\xcc"
+    )
+
+    rows = parse_kiss_file(data, launch_time_ms=launch_ms)
+
+    assert rows == [
+        {
+            "gr_kiss_transmitter": GR_TRANSMITTER_NAME,
+            "gr_kiss_pdu_length_bytes": 3,
+            "gr_kiss_pdu_hex": "aabbcc",
+            "gr_kiss_time_in_file_ms": 12_345,
+        }
+    ]
+
+
+def test_parse_kiss_file_unescapes_control_bytes() -> None:
+    # Payload deliberately contains FEND (0xc0) and FESC (0xdb), which must
+    # come back through KISS-escaped and be correctly restored.
+    launch_ms = 1_700_000_000_000
+    payload = bytes([0xC0, 0xDB, 0x01])
+    data = _kiss_frame(0x00, payload)
+
+    rows = parse_kiss_file(data, launch_time_ms=launch_ms)
+
+    assert len(rows) == 1
+    assert rows[0]["gr_kiss_pdu_hex"] == payload.hex()
+    assert rows[0]["gr_kiss_time_in_file_ms"] is None  # no timestamp frame preceded it
+
+
+def test_parse_kiss_file_multiple_pdus_each_use_own_timestamp() -> None:
+    launch_ms = 1_700_000_000_000
+    data = (
+        _kiss_frame(0x09, (launch_ms + 100).to_bytes(8, "big"))
+        + _kiss_frame(0x00, b"\x01")
+        + _kiss_frame(0x09, (launch_ms + 200).to_bytes(8, "big"))
+        + _kiss_frame(0x00, b"\x02")
+    )
+
+    rows = parse_kiss_file(data, launch_time_ms=launch_ms)
+
+    assert [r["gr_kiss_time_in_file_ms"] for r in rows] == [100, 200]
+    assert [r["gr_kiss_pdu_hex"] for r in rows] == ["01", "02"]
+
+
+def test_parse_kiss_file_empty() -> None:
+    assert parse_kiss_file(b"", launch_time_ms=0) == []
