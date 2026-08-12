@@ -16,6 +16,7 @@ from __future__ import annotations
 
 __all__ = ["Args", "main", "run"]
 
+import base64
 import concurrent.futures
 import re
 import sys
@@ -97,12 +98,19 @@ def _process_observation(obs: dict[str, Any]) -> list[dict[str, Any]]:
 
         sso_rows = run_sso_rx_replay(ogg_path, report_filename=ogg_path.name)
         for row in sso_rows:
-            rows.append(  # noqa: PERF401
+            data_bytes = base64.b64decode(row["sso_data_base64"])
+
+            rows.append(
                 {
                     "observation_id": obs_id,
                     "decoder": "sso_rx_replay",
                     "audio_url": audio_url,
                     "ingested_at": datetime.now(UTC),
+                    # Coalesced columns:
+                    "data_hex": data_bytes.hex(),
+                    "data_length_bytes": len(data_bytes),
+                    "time_in_file_ms": row["sso_time_in_file_ms"],
+                    "rssi": row["sso_rssi"],
                     **row,
                 }
             )
@@ -114,12 +122,19 @@ def _process_observation(obs: dict[str, Any]) -> list[dict[str, Any]]:
             logger.exception(f"gr_satellites decode failed for observation {obs_id}")
             gr_rows = []
         for row in gr_rows:
-            rows.append(  # noqa: PERF401
+            data_bytes = bytes.fromhex(row["gr_pdu_hex"])
+
+            rows.append(
                 {
                     "observation_id": obs_id,
                     "decoder": "gr_satellites",
                     "audio_url": audio_url,
                     "ingested_at": datetime.now(UTC),
+                    # Coalesced columns:
+                    "data_hex": data_bytes.hex(),
+                    "data_length_bytes": len(data_bytes),
+                    "time_in_file_ms": None,  # FIXME: Get this from KISS output.
+                    "rssi": None,
                     **row,
                 }
             )

@@ -56,7 +56,7 @@ def parse_hexdump_stdout(stdout: str) -> list[dict[str, Any]]:
             {
                 "gr_transmitter": m.group("transmitter").strip(),
                 "gr_pdu_length_bytes": length,
-                "gr_pdu_hex": hex_bytes[: length * 2],
+                "gr_pdu_hex": hex_bytes,
             }
         )
     return rows
@@ -75,7 +75,7 @@ def run_gr_satellites(
         One dict per decoded PDU.
     """
     proc = _subprocess_registry.run_tracked(
-        [  # noqa: S607
+        [
             "gr_satellites",
             str(satcfg),
             "--hexdump",
