@@ -86,6 +86,21 @@ def _parse_start_filter(value: str) -> datetime:
     return dt.astimezone(UTC) if dt.tzinfo else dt.replace(tzinfo=UTC)
 
 
+def _received_at(obs: dict[str, Any], *, time_in_file_ms: float | None) -> datetime:
+    """Absolute UTC timestamp a packet was received.
+
+    `time_in_file_ms` is an offset from the observation's start; decoders
+    that can't determine a within-file position (gr_satellites_pdu, and
+    sso_rx_replay/gr_satellites_kiss on the rare row that lacks one) fall
+    back to the observation's end time as the best available estimate.
+    """
+    if time_in_file_ms is not None:
+        return datetime.fromisoformat(obs["start"]) + timedelta(
+            milliseconds=time_in_file_ms
+        )
+    return datetime.fromisoformat(obs["end"])
+
+
 def _process_fast(
     obs: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], Path | None, tempfile.TemporaryDirectory[str] | None]:
@@ -120,6 +135,9 @@ def _process_fast(
                 "decoder": "sso_rx_replay",
                 "audio_url": audio_url,
                 "ingested_at": datetime.now(UTC),
+                "received_at": _received_at(
+                    obs, time_in_file_ms=row["sso_time_in_file_ms"]
+                ),
                 # Coalesced columns:
                 "data_hex": data_bytes.hex(),
                 "data_length_bytes": len(data_bytes),
@@ -145,6 +163,7 @@ def _process_fast(
                 "decoder": "gr_satellites_pdu",
                 "audio_url": audio_url,
                 "ingested_at": datetime.now(UTC),
+                "received_at": _received_at(obs, time_in_file_ms=None),
                 # Coalesced columns:
                 "data_hex": data_bytes.hex(),
                 "data_length_bytes": len(data_bytes),
@@ -184,6 +203,9 @@ def _process_kiss(obs: dict[str, Any], wav_path: Path) -> list[dict[str, Any]]:
                 "decoder": "gr_satellites_kiss",
                 "audio_url": audio_url,
                 "ingested_at": datetime.now(UTC),
+                "received_at": _received_at(
+                    obs, time_in_file_ms=row["gr_kiss_time_in_file_ms"]
+                ),
                 # Coalesced columns:
                 "data_hex": data_bytes.hex(),
                 "data_length_bytes": len(data_bytes),
