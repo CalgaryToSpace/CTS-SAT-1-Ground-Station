@@ -1,10 +1,12 @@
 """CTS-SAT-1 SatNOGS processing pipeline.
 
 List every SatNOGS observation for a satellite (paged across all statuses),
-land it in DuckDB's `raw_observations`, then for every observation with
-audio: download the `.ogg` into a throwaway temp dir, run it through both
-`sso_rx_replay --forensics-report` and `gr_satellites` (via `sox`-converted
-WAV), and land every decoded frame/PDU in DuckDB's `raw_packets`.
+land it in DuckDB's `raw_observations`, then decode every observation with
+audio and/or already-demodulated packets: download the `.ogg` into a
+throwaway temp dir and run it through both `sso_rx_replay
+--forensics-report` and `gr_satellites` (via `sox`-converted WAV), download
+any `demoddata` packet URLs directly, and land every decoded frame/PDU in
+DuckDB's `raw_packets`.
 
 Usage (uv):
     uv run cts1_processing_pipeline
@@ -37,11 +39,18 @@ from . import _subprocess_registry, db
 from .audio import convert_ogg_to_wav, download_audio
 from .decode_gr_satellites import DEFAULT_SATCFG_PATH, run_gr_satellites_pdu
 from .decode_gr_satellites_kiss import run_gr_satellites_kiss
+from .decode_satnogs_data_demod import run_satnogs_data_demod
 from .decode_sso_rx_replay import run_sso_rx_replay
 
 DEFAULT_DB_PATH = Path("output/cts1_processing_pipeline.duckdb")
 CHECKPOINT_INTERVAL = 100
-DECODERS = ("sso_rx_replay", "gr_satellites_pdu", "gr_satellites_kiss")
+DEMOD_DOWNLOAD_WORKERS = 50
+DECODERS = (
+    "sso_rx_replay",
+    "gr_satellites_pdu",
+    "gr_satellites_kiss",
+    "satnogs_data_demod",
+)
 
 _DURATION_RE = re.compile(
     r"^\s*(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>second|minute|hour|day|week)s?\s*$",
@@ -89,8 +98,9 @@ def _received_at(obs: dict[str, Any], *, time_in_file_ms: float | None) -> datet
 
     `time_in_file_ms` is an offset from the observation's start; decoders
     that can't determine a within-file position (gr_satellites_pdu, and
-    sso_rx_replay/gr_satellites_kiss on the rare row that lacks one) fall
-    back to the observation's end time as the best available estimate.
+    sso_rx_replay/gr_satellites_kiss/satnogs_data_demod on the rare row that
+    lacks one) fall back to the observation's end time as the best available
+    estimate.
     """
     if time_in_file_ms is not None:
         return datetime.fromisoformat(obs["start"]) + timedelta(
@@ -99,11 +109,11 @@ def _received_at(obs: dict[str, Any], *, time_in_file_ms: float | None) -> datet
     return datetime.fromisoformat(obs["end"])
 
 
-def _process_fast(
+def _process_audio(
     obs: dict[str, Any],
     temp_dir: Path | None,
 ) -> list[dict[str, Any]]:
-    """Download one observation's audio and run all three decoders on it.
+    """Download one observation's audio and run all three audio decoders on it.
 
     sso_rx_replay, gr_satellites --hexdump, and gr_satellites --kiss_out all
     now finish in a couple of seconds, so they all run at normal (small pool)
@@ -205,13 +215,74 @@ def _process_fast(
     return rows
 
 
+def _process_demod(obs: dict[str, Any]) -> list[dict[str, Any]]:
+    """Download every already-demodulated packet SatNOGS has for this observation.
+
+    Unlike the audio decoders, this needs no download of its own audio and
+    no temp dir: each `demoddata` entry is already a standalone packet URL,
+    downloaded via a thread pool nested inside this (already-pooled) call
+    (see `run_satnogs_data_demod`).
+    """
+    obs_id = obs["id"]
+    audio_url = obs.get("payload")
+    rows: list[dict[str, Any]] = []
+
+    try:
+        demod_rows = run_satnogs_data_demod(
+            obs["demoddata"], max_workers=DEMOD_DOWNLOAD_WORKERS
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception(f"satnogs_data_demod failed for observation {obs_id}")
+        demod_rows = []
+
+    for row in demod_rows:
+        data_bytes = bytes.fromhex(row["satnogs_demod_pdu_hex"])
+        parsed_at = row["satnogs_demod_received_at"]
+        time_in_file_ms = (
+            (parsed_at - datetime.fromisoformat(obs["start"])).total_seconds() * 1000
+            if parsed_at is not None
+            else None
+        )
+
+        rows.append(
+            {
+                "observation_id": obs_id,
+                "decoder": "satnogs_data_demod",
+                "audio_url": audio_url,
+                "ingested_at": datetime.now(UTC),
+                "received_at": _received_at(obs, time_in_file_ms=time_in_file_ms),
+                # Coalesced columns:
+                "data_hex": data_bytes.hex(),
+                "data_length_bytes": len(data_bytes),
+                "time_in_file_ms": time_in_file_ms,
+                "rssi": None,
+                **row,
+            }
+        )
+
+    return rows
+
+
+def _process_fast(
+    obs: dict[str, Any],
+    temp_dir: Path | None,
+) -> list[dict[str, Any]]:
+    """Run every decoder for one observation: the audio ones plus satnogs_data_demod."""
+    rows: list[dict[str, Any]] = []
+    if obs.get("payload"):
+        rows.extend(_process_audio(obs, temp_dir))
+    if obs.get("demoddata"):
+        rows.extend(_process_demod(obs))
+    return rows
+
+
 def _select_candidates(
     page: list[dict[str, Any]],
     *,
     done: set[tuple[int, str]],
     remaining: int | None,
 ) -> list[dict[str, Any]]:
-    """Observations in `page` that have audio and still need decoding.
+    """Observations in `page` that have audio and/or demoddata and still need decoding.
 
     Stops early once `remaining` candidates have been picked (None = no cap).
     """
@@ -219,7 +290,7 @@ def _select_candidates(
     for obs in page:
         if remaining is not None and len(candidates) >= remaining:
             break
-        if not obs.get("payload"):
+        if not obs.get("payload") and not obs.get("demoddata"):
             continue
         if all((obs["id"], decoder) in done for decoder in DECODERS):
             continue
@@ -246,8 +317,10 @@ def run(  # noqa: C901, PLR0913
             None means no lower bound (full history).
         limit: Cap the number of observations decoded this run (for testing).
         workers: Concurrency for the decoders (sso_rx_replay, gr_satellites
-            --hexdump, gr_satellites --kiss_out), which each finish in a few
-            seconds.
+            --hexdump, gr_satellites --kiss_out, satnogs_data_demod), which
+            each finish in a few seconds (satnogs_data_demod spins up its own
+            nested pool -- see DEMOD_DOWNLOAD_WORKERS -- for its own
+            observation's packet downloads).
         temp_dir: Directory to create per-observation temp dirs (audio
             downloads/WAV conversions) under. None uses the platform default
             (see `tempfile`).
@@ -360,7 +433,7 @@ class Args:
 
     workers: int = 4
     """Concurrency for the decoders (sso_rx_replay, gr_satellites --hexdump,
-    gr_satellites --kiss_out)."""
+    gr_satellites --kiss_out, satnogs_data_demod)."""
 
     temp_dir: Path | None = None
     """Directory to create per-observation temp dirs (audio

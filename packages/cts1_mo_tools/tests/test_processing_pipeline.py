@@ -6,6 +6,9 @@ from cts1_mo_tools.cts1_processing_pipeline.decode_gr_satellites_kiss import (
     GR_TRANSMITTER_NAME,
     parse_kiss_file,
 )
+from cts1_mo_tools.cts1_processing_pipeline.decode_satnogs_data_demod import (
+    parse_demod_filename_time,
+)
 from cts1_mo_tools.cts1_processing_pipeline.decode_sso_rx_replay import (
     parse_forensics_line,
 )
@@ -166,3 +169,29 @@ def test_parse_kiss_file_multiple_pdus_each_use_own_timestamp() -> None:
 
 def test_parse_kiss_file_empty() -> None:
     assert parse_kiss_file(b"", launch_time_ms=0) == []
+
+
+# ---------------------------------------------------------------------------
+# satnogs_data_demod filename timestamp parsing
+# ---------------------------------------------------------------------------
+
+_DEMOD_URL_BASE = (
+    "https://s3.eu-central-1.wasabisys.com/satnogs-network/data_obs/"
+    "2026/8/12/19/14759295/data_14759295_2026-08-12T19-36-50"
+)
+
+
+def test_parse_demod_filename_time_no_suffix() -> None:
+    dt = parse_demod_filename_time(_DEMOD_URL_BASE)
+    assert dt is not None
+    assert dt.isoformat() == "2026-08-12T19:36:50+00:00"
+
+
+def test_parse_demod_filename_time_with_seq_suffix() -> None:
+    dt = parse_demod_filename_time(_DEMOD_URL_BASE + "_1")
+    assert dt is not None
+    assert dt.isoformat() == "2026-08-12T19:36:50.100000+00:00"
+
+
+def test_parse_demod_filename_time_unrecognized_filename() -> None:
+    assert parse_demod_filename_time("https://example.com/not-a-demod-file") is None
