@@ -97,10 +97,10 @@ def run_satnogs_data_demod(
                 continue
             rows.append(
                 {
-                    "satnogs_demod_url": url,
+                    "received_at": parse_demod_filename_time(url),
                     "data_hex": data.hex(),
                     "data_length_bytes": len(data),
-                    "received_at": parse_demod_filename_time(url),
+                    "satnogs_demod_url": url,
                 }
             )
 

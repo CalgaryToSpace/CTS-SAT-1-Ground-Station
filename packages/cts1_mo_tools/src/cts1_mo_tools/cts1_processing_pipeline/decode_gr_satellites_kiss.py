@@ -30,11 +30,6 @@ from .decode_gr_satellites import DEFAULT_SATCFG_PATH
 
 DECODER_NAME = "gr_satellites_kiss"
 
-# gr_satellites_frontiersat.yml defines exactly one transmitter; KISS output
-# carries no transmitter label (unlike --hexdump's PDU debug print), so this
-# is hardcoded to match the yaml rather than parsed at runtime.
-GR_TRANSMITTER_NAME = "9k6 FSK downlink"
-
 _FEND = 0xC0
 _FESC = 0xDB
 _TFEND = 0xDC
@@ -101,9 +96,8 @@ def parse_kiss_file(data: bytes, *, launch_time_ms: int) -> list[dict[str, Any]]
         )
         rows.append(
             {
-                "transmitter_name": GR_TRANSMITTER_NAME,
-                "data_length_bytes": len(payload),
                 "data_hex": payload.hex(),
+                "data_length_bytes": len(payload),
                 "time_in_file_ms": time_in_file_ms,
             }
         )

@@ -3,7 +3,6 @@ from cts1_mo_tools.cts1_processing_pipeline.decode_gr_satellites import (
     parse_hexdump_stdout,
 )
 from cts1_mo_tools.cts1_processing_pipeline.decode_gr_satellites_kiss import (
-    GR_TRANSMITTER_NAME,
     parse_kiss_file,
 )
 from cts1_mo_tools.cts1_processing_pipeline.decode_satnogs_data_demod import (
@@ -104,7 +103,7 @@ def test_parse_hexdump_stdout_extracts_pdu() -> None:
     rows = parse_hexdump_stdout(_HEXDUMP_STDOUT)
     assert len(rows) == 1
     row = rows[0]
-    assert row["transmitter_name"] == "9k6 FSK downlink"
+    # Excluded - assert row["transmitter_name"] == "9k6 FSK downlink"
     assert row["data_length_bytes"] == 208
     assert len(row["data_hex"]) == 208 * 2
     assert row["data_hex"].startswith("c2a28a0010d06c0e000822085e07fa07")
@@ -130,7 +129,6 @@ def test_parse_kiss_file_timestamp_then_data() -> None:
 
     assert rows == [
         {
-            "transmitter_name": GR_TRANSMITTER_NAME,
             "data_length_bytes": 3,
             "data_hex": "aabbcc",
             "time_in_file_ms": 12_345,

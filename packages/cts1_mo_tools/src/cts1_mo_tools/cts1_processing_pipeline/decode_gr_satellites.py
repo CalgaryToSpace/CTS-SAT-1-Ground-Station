@@ -54,9 +54,9 @@ def parse_hexdump_stdout(stdout: str) -> list[dict[str, Any]]:
         )
         rows.append(
             {
-                "transmitter_name": m.group("transmitter").strip(),
-                "data_length_bytes": length,
+                # Not needed - "transmitter_name": m.group("transmitter").strip(),
                 "data_hex": hex_bytes,
+                "data_length_bytes": length,
             }
         )
     return rows
