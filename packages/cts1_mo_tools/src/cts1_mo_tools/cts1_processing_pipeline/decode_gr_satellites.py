@@ -54,9 +54,9 @@ def parse_hexdump_stdout(stdout: str) -> list[dict[str, Any]]:
         )
         rows.append(
             {
-                "gr_pdu_transmitter": m.group("transmitter").strip(),
-                "gr_pdu_length_bytes": length,
-                "gr_pdu_hex": hex_bytes,
+                "transmitter_name": m.group("transmitter").strip(),
+                "data_length_bytes": length,
+                "data_hex": hex_bytes,
             }
         )
     return rows

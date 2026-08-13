@@ -44,12 +44,12 @@ def test_parse_forensics_line_frame() -> None:
     )
     row = parse_forensics_line(line)
     assert row == {
-        "sso_filename": "sample.ogg",
-        "sso_time_in_file_ms": 45802.229,
-        "sso_rssi": -2.1,
-        "sso_rs": -2,
-        "sso_data_base64": "wiKKABCR",
-        "sso_error": None,
+        "time_in_file_ms": 45802.229,
+        "rssi": -2.1,
+        "rs_corrected_count": -2,
+        "rs_uncorrectable": True,
+        "data_hex": "c2228a001091",
+        "data_length_bytes": 6,
     }
 
 
@@ -104,10 +104,10 @@ def test_parse_hexdump_stdout_extracts_pdu() -> None:
     rows = parse_hexdump_stdout(_HEXDUMP_STDOUT)
     assert len(rows) == 1
     row = rows[0]
-    assert row["gr_pdu_transmitter"] == "9k6 FSK downlink"
-    assert row["gr_pdu_length_bytes"] == 208
-    assert len(row["gr_pdu_hex"]) == 208 * 2
-    assert row["gr_pdu_hex"].startswith("c2a28a0010d06c0e000822085e07fa07")
+    assert row["transmitter_name"] == "9k6 FSK downlink"
+    assert row["data_length_bytes"] == 208
+    assert len(row["data_hex"]) == 208 * 2
+    assert row["data_hex"].startswith("c2a28a0010d06c0e000822085e07fa07")
 
 
 def test_parse_hexdump_stdout_no_pdus() -> None:
@@ -130,10 +130,10 @@ def test_parse_kiss_file_timestamp_then_data() -> None:
 
     assert rows == [
         {
-            "gr_kiss_transmitter": GR_TRANSMITTER_NAME,
-            "gr_kiss_pdu_length_bytes": 3,
-            "gr_kiss_pdu_hex": "aabbcc",
-            "gr_kiss_time_in_file_ms": 12_345,
+            "transmitter_name": GR_TRANSMITTER_NAME,
+            "data_length_bytes": 3,
+            "data_hex": "aabbcc",
+            "time_in_file_ms": 12_345,
         }
     ]
 
@@ -148,8 +148,8 @@ def test_parse_kiss_file_unescapes_control_bytes() -> None:
     rows = parse_kiss_file(data, launch_time_ms=launch_ms)
 
     assert len(rows) == 1
-    assert rows[0]["gr_kiss_pdu_hex"] == payload.hex()
-    assert rows[0]["gr_kiss_time_in_file_ms"] is None  # no timestamp frame preceded it
+    assert rows[0]["data_hex"] == payload.hex()
+    assert rows[0]["time_in_file_ms"] is None  # no timestamp frame preceded it
 
 
 def test_parse_kiss_file_multiple_pdus_each_use_own_timestamp() -> None:
@@ -163,8 +163,8 @@ def test_parse_kiss_file_multiple_pdus_each_use_own_timestamp() -> None:
 
     rows = parse_kiss_file(data, launch_time_ms=launch_ms)
 
-    assert [r["gr_kiss_time_in_file_ms"] for r in rows] == [100, 200]
-    assert [r["gr_kiss_pdu_hex"] for r in rows] == ["01", "02"]
+    assert [r["time_in_file_ms"] for r in rows] == [100, 200]
+    assert [r["data_hex"] for r in rows] == ["01", "02"]
 
 
 def test_parse_kiss_file_empty() -> None:
