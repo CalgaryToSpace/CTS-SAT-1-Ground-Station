@@ -33,6 +33,7 @@ from dotenv import load_dotenv
 from loguru import logger
 
 from cts1_mo_tools.cts1_agenda_maker.satnogs_data import fetch_all_observations
+from cts1_mo_tools.cts1_decode_satnogs_packets import verify_csp_packet_crc32c
 
 from . import _subprocess_registry, db
 from .audio import convert_ogg_to_wav, download_audio
@@ -90,6 +91,12 @@ def _parse_start_filter(value: str) -> datetime:
         raise ValueError(msg) from exc
 
     return dt.astimezone(UTC) if dt.tzinfo else dt.replace(tzinfo=UTC)
+
+
+def _csp_crc_valid(data_hex: str) -> bool:
+    """Whether `data_hex` ends in a valid trailing CSP CRC-32C."""
+    is_valid, _computed, _received = verify_csp_packet_crc32c(bytes.fromhex(data_hex))
+    return is_valid
 
 
 def _received_at(obs: dict[str, Any], *, time_in_file_ms: float | None) -> datetime:
@@ -267,7 +274,7 @@ def _select_candidates(
     return candidates
 
 
-def run(  # noqa: C901, PLR0913
+def run(  # noqa: C901, PLR0913, PLR0915
     *,
     norad_id: str = "69015",
     db_path: Path = DEFAULT_DB_PATH,
@@ -329,7 +336,13 @@ def run(  # noqa: C901, PLR0913
                     logger.exception(f"Failed processing observation {obs['id']}")
                     rows = []
                 if rows:
-                    db.append_packets(con, pl.DataFrame(rows, infer_schema_length=None))
+                    df = pl.DataFrame(rows, infer_schema_length=None)
+                    df = df.with_columns(
+                        pl.col("data_hex")
+                        .map_elements(_csp_crc_valid, return_dtype=pl.Boolean)
+                        .alias("csp_crc_valid")
+                    )
+                    db.append_packets(con, df)
                 for decoder in DECODERS:
                     done.add((obs["id"], decoder))
                 total_decoded += 1
