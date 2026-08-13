@@ -9,10 +9,12 @@ framing, no extra bytes).
 The filename encodes a per-packet timestamp, with an optional trailing
 `_<n>` suffix breaking ties between packets landing in the same whole
 second, 100ms apart -- not an exact alignment, just a good-enough estimate
-of intra-second order:
+of intra-second order. A `_g<n>` suffix is the same idea with an extra 50ms
+offset baked in (observed on some SatNOGS stations' filenames):
 
-    .../data_14759295_2026-08-12T19-36-50    -> 19:36:50.000
-    .../data_14759295_2026-08-12T19-36-50_1  -> 19:36:50.100
+    .../data_14759295_2026-08-12T19-36-50     -> 19:36:50.000
+    .../data_14759295_2026-08-12T19-36-50_1   -> 19:36:50.100
+    .../data_14759295_2026-08-12T19-36-50_g1  -> 19:36:50.150
 """
 
 from __future__ import annotations
@@ -31,9 +33,10 @@ DECODER_NAME = "satnogs_data_demod"
 
 _FILENAME_RE = re.compile(
     r"data_\d+_(?P<date>\d{4}-\d{2}-\d{2})T(?P<time>\d{2}-\d{2}-\d{2})"
-    r"(?:_(?P<seq>\d+))?$"
+    r"(?:_(?P<g>g)?(?P<seq>\d+))?$"
 )
 _SEQ_STEP_MS = 100
+_G_OFFSET_MS = 50
 
 
 def parse_demod_filename_time(url: str) -> datetime | None:
@@ -50,7 +53,8 @@ def parse_demod_filename_time(url: str) -> datetime | None:
         f"{m.group('date')}T{m.group('time')}", "%Y-%m-%dT%H-%M-%S"
     ).replace(tzinfo=UTC)
     seq = int(m.group("seq")) if m.group("seq") else 0
-    return base + timedelta(milliseconds=seq * _SEQ_STEP_MS)
+    g_offset_ms = _G_OFFSET_MS if m.group("g") else 0
+    return base + timedelta(milliseconds=g_offset_ms + seq * _SEQ_STEP_MS)
 
 
 def _download_one(url: str) -> bytes | None:

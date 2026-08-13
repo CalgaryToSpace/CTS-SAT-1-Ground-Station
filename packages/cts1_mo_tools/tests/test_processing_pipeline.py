@@ -191,5 +191,11 @@ def test_parse_demod_filename_time_with_seq_suffix() -> None:
     assert dt.isoformat() == "2026-08-12T19:36:50.100000+00:00"
 
 
+def test_parse_demod_filename_time_with_g_suffix() -> None:
+    dt = parse_demod_filename_time(_DEMOD_URL_BASE + "_g1")
+    assert dt is not None
+    assert dt.isoformat() == "2026-08-12T19:36:50.150000+00:00"
+
+
 def test_parse_demod_filename_time_unrecognized_filename() -> None:
     assert parse_demod_filename_time("https://example.com/not-a-demod-file") is None
