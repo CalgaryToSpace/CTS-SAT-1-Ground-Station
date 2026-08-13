@@ -98,9 +98,9 @@ def run_satnogs_data_demod(
             rows.append(
                 {
                     "satnogs_demod_url": url,
-                    "satnogs_demod_pdu_length_bytes": len(data),
-                    "satnogs_demod_pdu_hex": data.hex(),
-                    "satnogs_demod_received_at": parse_demod_filename_time(url),
+                    "data_hex": data.hex(),
+                    "data_length_bytes": len(data),
+                    "received_at": parse_demod_filename_time(url),
                 }
             )
 

@@ -18,7 +18,6 @@ from __future__ import annotations
 
 __all__ = ["Args", "main", "run"]
 
-import base64
 import concurrent.futures
 import re
 import sys
@@ -132,22 +131,15 @@ def _process_audio(
 
         sso_rows = run_sso_rx_replay(ogg_path, report_filename=ogg_path.name)
         for row in sso_rows:
-            data_bytes = base64.b64decode(row["sso_data_base64"])
-
-            rows.append(
+            rows.append(  # noqa: PERF401
                 {
                     "observation_id": obs_id,
                     "decoder": "sso_rx_replay",
                     "audio_url": audio_url,
                     "ingested_at": datetime.now(UTC),
                     "received_at": _received_at(
-                        obs, time_in_file_ms=row["sso_time_in_file_ms"]
+                        obs, time_in_file_ms=row["time_in_file_ms"]
                     ),
-                    # Coalesced columns:
-                    "data_hex": data_bytes.hex(),
-                    "data_length_bytes": len(data_bytes),
-                    "time_in_file_ms": row["sso_time_in_file_ms"],
-                    "rssi": row["sso_rssi"],
                     **row,
                 }
             )
@@ -166,20 +158,13 @@ def _process_audio(
             )
             gr_rows = []
         for row in gr_rows:
-            data_bytes = bytes.fromhex(row["gr_pdu_hex"])
-
-            rows.append(
+            rows.append(  # noqa: PERF401
                 {
                     "observation_id": obs_id,
                     "decoder": "gr_satellites_pdu",
                     "audio_url": audio_url,
                     "ingested_at": datetime.now(UTC),
                     "received_at": _received_at(obs, time_in_file_ms=None),
-                    # Coalesced columns:
-                    "data_hex": data_bytes.hex(),
-                    "data_length_bytes": len(data_bytes),
-                    "time_in_file_ms": None,  # FIXME: Get this from KISS output.
-                    "rssi": None,
                     **row,
                 }
             )
@@ -192,22 +177,15 @@ def _process_audio(
             )
             kiss_rows = []
         for row in kiss_rows:
-            data_bytes = bytes.fromhex(row["gr_kiss_pdu_hex"])
-
-            rows.append(
+            rows.append(  # noqa: PERF401
                 {
                     "observation_id": obs_id,
                     "decoder": "gr_satellites_kiss",
                     "audio_url": audio_url,
                     "ingested_at": datetime.now(UTC),
                     "received_at": _received_at(
-                        obs, time_in_file_ms=row["gr_kiss_time_in_file_ms"]
+                        obs, time_in_file_ms=row["time_in_file_ms"]
                     ),
-                    # Coalesced columns:
-                    "data_hex": data_bytes.hex(),
-                    "data_length_bytes": len(data_bytes),
-                    "time_in_file_ms": row["gr_kiss_time_in_file_ms"],
-                    "rssi": None,
                     **row,
                 }
             )
@@ -236,13 +214,9 @@ def _process_demod(obs: dict[str, Any]) -> list[dict[str, Any]]:
         demod_rows = []
 
     for row in demod_rows:
-        data_bytes = bytes.fromhex(row["satnogs_demod_pdu_hex"])
-        parsed_at = row["satnogs_demod_received_at"]
         time_in_file_ms = (
-            (parsed_at - datetime.fromisoformat(obs["start"])).total_seconds() * 1000
-            if parsed_at is not None
-            else None
-        )
+            row["received_at"] - datetime.fromisoformat(obs["start"])
+        ).total_seconds() * 1000
 
         rows.append(
             {
@@ -250,12 +224,7 @@ def _process_demod(obs: dict[str, Any]) -> list[dict[str, Any]]:
                 "decoder": "satnogs_data_demod",
                 "audio_url": audio_url,
                 "ingested_at": datetime.now(UTC),
-                "received_at": _received_at(obs, time_in_file_ms=time_in_file_ms),
-                # Coalesced columns:
-                "data_hex": data_bytes.hex(),
-                "data_length_bytes": len(data_bytes),
                 "time_in_file_ms": time_in_file_ms,
-                "rssi": None,
                 **row,
             }
         )
@@ -376,6 +345,10 @@ def run(  # noqa: C901, PLR0913
                 total_observations += len(page)
                 since_checkpoint += len(page)
                 observations_df = pl.DataFrame(page, infer_schema_length=None)
+                observations_df = observations_df.with_columns(
+                    pl.col("start").cast(pl.Datetime),
+                    pl.col("end").cast(pl.Datetime),
+                )
                 db.upsert_observations(con, observations_df)
 
                 if since_checkpoint >= CHECKPOINT_INTERVAL:

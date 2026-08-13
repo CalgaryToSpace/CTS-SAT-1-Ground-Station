@@ -14,6 +14,7 @@ from __future__ import annotations
 
 __all__ = ["parse_forensics_line", "run_sso_rx_replay"]
 
+import base64
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -43,13 +44,16 @@ def parse_forensics_line(line: str) -> dict[str, Any] | None:
         # SSO quirk where it reports the filename even if there are no frames.
         return None
 
+    data_bytes = base64.b64decode(obj["data_base64"])
+
     return {
-        "sso_filename": obj["filename"],
-        "sso_time_in_file_ms": obj["time_in_file_ms"],
-        "sso_rssi": obj["rssi"],
-        "sso_rs": obj["rs"],
-        "sso_data_base64": obj["data_base64"],
-        "sso_error": obj.get("error"),  # I don't think this actually really exists.
+        # Ignore as useless - "sso_filename": obj["filename"],
+        "time_in_file_ms": obj["time_in_file_ms"],
+        "rssi": obj["rssi"],
+        "rs_corrected_count": obj["rs"],
+        "rs_uncorrectable": obj["rs"] < 0,
+        "data_hex": data_bytes.hex(),
+        "data_length_bytes": len(data_bytes),
     }
 
 

@@ -101,10 +101,10 @@ def parse_kiss_file(data: bytes, *, launch_time_ms: int) -> list[dict[str, Any]]
         )
         rows.append(
             {
-                "gr_kiss_transmitter": GR_TRANSMITTER_NAME,
-                "gr_kiss_pdu_length_bytes": len(payload),
-                "gr_kiss_pdu_hex": payload.hex(),
-                "gr_kiss_time_in_file_ms": time_in_file_ms,
+                "transmitter_name": GR_TRANSMITTER_NAME,
+                "data_length_bytes": len(payload),
+                "data_hex": payload.hex(),
+                "time_in_file_ms": time_in_file_ms,
             }
         )
         pending_timestamp_ms = None  # each timestamp frame covers one PDU
