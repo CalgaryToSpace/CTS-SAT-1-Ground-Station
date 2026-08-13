@@ -227,13 +227,11 @@ def _select_candidates(
     return candidates
 
 
-def run(  # noqa: C901, PLR0913, PLR0915
+def run(  # noqa: C901, PLR0913
     *,
     norad_id: str = "69015",
     db_path: Path = DEFAULT_DB_PATH,
     start: str | None = None,
-    page_size: int = 100,
-    batch_size: int = 500,
     limit: int | None = None,
     workers: int = 4,
     temp_dir: Path | None = None,
@@ -246,9 +244,6 @@ def run(  # noqa: C901, PLR0913, PLR0915
         start: Only pull observations starting after this point: a duration
             like "3 days" (relative to now) or an ISO 8601 date/datetime.
             None means no lower bound (full history).
-        page_size: Observations requested per SatNOGS API page.
-        batch_size: Candidate observations accumulated across pages before a
-            batch is dispatched to the worker pool.
         limit: Cap the number of observations decoded this run (for testing).
         workers: Concurrency for the decoders (sso_rx_replay, gr_satellites
             --hexdump, gr_satellites --kiss_out), which each finish in a few
@@ -269,7 +264,6 @@ def run(  # noqa: C901, PLR0913, PLR0915
     total_decoded = 0
     since_checkpoint = 0
     reached_limit = False
-    pending: list[dict[str, Any]] = []
 
     with (
         db.connect(db_path) as con,
@@ -305,7 +299,6 @@ def run(  # noqa: C901, PLR0913, PLR0915
                 start_gt_filter=start_gt,
                 start_lt_filter=datetime.now(UTC),
                 statuses=None,
-                page_size=page_size,
             ):
                 total_observations += len(page)
                 since_checkpoint += len(page)
@@ -322,26 +315,15 @@ def run(  # noqa: C901, PLR0913, PLR0915
                 if reached_limit:
                     continue
 
-                remaining = (
-                    None if limit is None else limit - total_decoded - len(pending)
-                )
-                pending.extend(_select_candidates(page, done=done, remaining=remaining))
+                remaining = None if limit is None else limit - total_decoded
+                dispatch(_select_candidates(page, done=done, remaining=remaining))
 
-                if len(pending) >= batch_size:
-                    dispatch(pending)
-                    pending = []
-
-                if limit is not None and total_decoded + len(pending) >= limit:
+                if limit is not None and total_decoded >= limit:
                     # A generator-backed fetch, so breaking here stops
                     # pulling further pages from the API rather than just
                     # skipping them.
-                    dispatch(pending)
-                    pending = []
                     reached_limit = True
                     break
-
-            dispatch(pending)  # flush whatever's left once paging is exhausted
-            pending = []
 
         except KeyboardInterrupt:
             # Worker threads block inside subprocess.run()-style calls, which
@@ -372,13 +354,6 @@ class Args:
     """Only pull observations starting after this point: a duration like
     '3 days' (relative to now) or an ISO 8601 date/datetime. Omit for full
     history."""
-
-    page_size: int = 100
-    """Observations requested per SatNOGS API page."""
-
-    batch_size: int = 500
-    """Candidate observations accumulated across pages before a batch is
-    dispatched to the worker pool."""
 
     limit: int | None = None
     """Cap the number of observations decoded this run (for testing)."""
@@ -413,8 +388,6 @@ def main() -> None:
             norad_id=args.norad_id,
             db_path=args.db_path,
             start=args.start,
-            page_size=args.page_size,
-            batch_size=args.batch_size,
             limit=args.limit,
             workers=args.workers,
             temp_dir=args.temp_dir,
