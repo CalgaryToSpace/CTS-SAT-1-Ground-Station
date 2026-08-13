@@ -26,6 +26,7 @@ from ordered_set import OrderedSet
 # -- Constants ----------------------------------------------------------------
 
 CSP_HEADER_SIZE = 4
+CSP_CRC32C_SIZE = 4  # trailing CRC-32C (Castagnoli) appended by libcsp, if present
 FRIENDLY_MESSAGE_SIZE = 42  # COMMS_BEACON_FRIENDLY_MESSAGE_SIZE
 END_MESSAGE_SIZE = 4  # "END\0"
 
@@ -423,6 +424,35 @@ def decode_adcs_current_state_1(raw: bytes) -> dict[str, Any]:
         "adcs_errors": json.dumps(errors),
         "adcs_flags": json.dumps(flags),
     }
+
+
+# -- CRC ------------------------------------------------------------------
+
+
+def crc32c(data: bytes, crc: int = 0xFFFFFFFF) -> int:
+    """CRC-32C (Castagnoli) — same variant used by iSCSI/SCTP and by libcsp."""
+    poly = 0x82F63B78  # reflected form of 0x1EDC6F41
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            mask = -(crc & 1)
+            crc = (crc >> 1) ^ (poly & mask)
+    return crc ^ 0xFFFFFFFF
+
+
+def verify_csp_packet_crc32c(packet: bytes) -> tuple[bool, int, int]:
+    """Split `packet` into payload + trailing 4-byte CRC-32C, and verify it.
+
+    Splits the packet into payload + trailing 4-byte CRC, recomputes CRC-32C
+    over the payload, and compares. Returns (is_valid, computed_crc, received_crc).
+    """
+    if len(packet) <= CSP_CRC32C_SIZE:
+        return False, 0, 0
+
+    payload, received = packet[:-CSP_CRC32C_SIZE], packet[-CSP_CRC32C_SIZE:]
+    computed = crc32c(payload)
+    received_int = int.from_bytes(received, "big")
+    return computed == received_int, computed, received_int
 
 
 # -- Decoders -----------------------------------------------------------------
@@ -903,7 +933,8 @@ def decode_packet_safe(hex_str: str) -> dict[str, Any] | None:
     payload = raw[CSP_HEADER_SIZE:]
     packet_type_byte = payload[0]
 
-    base = {"csp_header_hex": csp.hex()}
+    crc_valid, _crc_computed, _crc_received = verify_csp_packet_crc32c(raw)
+    base = {"csp_header_hex": csp.hex(), "csp_crc_valid": crc_valid}
 
     decoder = _PACKET_DECODERS.get(packet_type_byte)
     if decoder is not None:
