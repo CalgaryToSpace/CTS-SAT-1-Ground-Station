@@ -4,11 +4,10 @@ A separate decoding path from `decode_gr_satellites.py`'s `--hexdump` one:
 KISS output is the only gr_satellites mode that carries a per-packet
 timestamp. Per `pdu_to_kiss.py` in gr-satellites, every decoded PDU is
 preceded by a KISS control frame (control byte 0x09) holding a big-endian
-64-bit UTC Unix timestamp in milliseconds, captured via `datetime.now()` at
-the moment the PDU is emitted. That's only meaningful as a file-relative
-position if gr_satellites processes the WAV at real playback speed, hence
-`--throttle` below — decoding an observation this way takes as long as the
-observation itself (a multi-minute pass takes multiple minutes to decode).
+64-bit UTC Unix timestamp in milliseconds, derived from `--start_time` plus
+the amount of the WAV consumed so far. Passing a fixed epoch `--start_time`
+(see below) makes that timestamp file-relative without needing to decode at
+real playback speed, so this runs just as fast as `--hexdump`.
 
 `--hexdump` is still passed alongside `--kiss_out`: it's what makes the
 yaml's `telemetry: hexdump` datasink valid at startup (gr_satellites raises
@@ -68,10 +67,10 @@ def parse_kiss_file(data: bytes, *, launch_time_ms: int) -> list[dict[str, Any]]
 
     Args:
         data: Raw bytes of the KISS output file.
-        launch_time_ms: UTC Unix ms epoch captured right before the
-            gr_satellites subprocess was started; timestamps embedded in the
-            KISS stream are relative to this to produce a file-relative
-            `time_in_file_ms` (meaningful only when `--throttle` was used).
+        launch_time_ms: UTC Unix ms epoch matching the `--start_time` the
+            gr_satellites subprocess was launched with; timestamps embedded
+            in the KISS stream are relative to this to produce a
+            file-relative `time_in_file_ms`.
 
     Returns:
         One dict per data frame, using the timestamp frame (if any) that
@@ -116,7 +115,7 @@ def parse_kiss_file(data: bytes, *, launch_time_ms: int) -> list[dict[str, Any]]
 def run_gr_satellites_kiss(
     wav_path: Path, *, satcfg: Path = DEFAULT_SATCFG_PATH
 ) -> list[dict[str, Any]]:
-    """Run `gr_satellites --kiss_out --throttle` against a WAV file.
+    """Run `gr_satellites --kiss_out` against a WAV file.
 
     Args:
         wav_path: Path to a local WAV recording (see `audio.convert_ogg_to_wav`).
