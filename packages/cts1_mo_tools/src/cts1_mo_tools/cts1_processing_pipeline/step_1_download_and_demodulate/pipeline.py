@@ -1,4 +1,4 @@
-"""CTS-SAT-1 SatNOGS processing pipeline.
+"""Step 1: download and demodulate.
 
 List every SatNOGS observation for a satellite (paged across all statuses),
 land it in DuckDB's `raw_observations`, then decode every observation with
@@ -8,34 +8,30 @@ throwaway temp dir and run it through both `sso_rx_replay
 any `demoddata` packet URLs directly, and land every decoded frame/PDU in
 DuckDB's `raw_packets`.
 
-Usage (uv):
-    uv run cts1_processing_pipeline
-    uv run cts1_processing_pipeline --norad-id 69015 --db-path output/cts1.duckdb
-    uv run cts1_processing_pipeline --limit 5 --debug
+Invoked via the top-level CLI's `step_1` subcommand -- see
+`cts1_mo_tools.cts1_processing_pipeline.cli`.
 """
 
 from __future__ import annotations
 
-__all__ = ["Args", "main", "run"]
+from . import _subprocess_registry
+
+__all__ = ["DEFAULT_DB_PATH", "run"]
 
 import concurrent.futures
 import re
-import sys
 import tempfile
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Any
 
 import polars as pl
-import tyro
-from dotenv import load_dotenv
 from loguru import logger
 
 from cts1_mo_tools.cts1_agenda_maker.satnogs_data import fetch_all_observations
 from cts1_mo_tools.cts1_decode_satnogs_packets import verify_csp_packet_crc32c
 
-from . import _subprocess_registry, db
+from . import db
 from .audio import convert_ogg_to_wav, download_audio
 from .decode_gr_satellites import DEFAULT_SATCFG_PATH, run_gr_satellites_pdu
 from .decode_gr_satellites_kiss import run_gr_satellites_kiss
@@ -402,64 +398,3 @@ def run(  # noqa: C901, PLR0913, PLR0915
     logger.info(
         f"Done. {total_observations} observation(s) listed, {total_decoded} decoded."
     )
-
-
-@dataclass(frozen=True, slots=True)
-class Args:
-    """List SatNOGS observations, download audio, and decode packets to DuckDB."""
-
-    norad_id: Annotated[str, tyro.conf.Positional] = "69015"
-    """NORAD catalog ID of the satellite (default: 69015, CTS-SAT-1)."""
-
-    db_path: Path = DEFAULT_DB_PATH
-    """DuckDB database file for the raw_observations / raw_packets tables."""
-
-    start: str | None = None
-    """Only pull observations starting after this point: a duration like
-    '3 days' (relative to now) or an ISO 8601 date/datetime. Omit for full
-    history."""
-
-    limit: int | None = None
-    """Cap the number of observations decoded this run (for testing)."""
-
-    workers: int = 4
-    """Concurrency for the decoders (sso_rx_replay, gr_satellites --hexdump,
-    gr_satellites --kiss_out, satnogs_data_demod)."""
-
-    temp_dir: Path | None = None
-    """Directory to create per-observation temp dirs (audio
-    downloads/WAV conversions) under. Defaults to the platform temp
-    directory (see Python's `tempfile`)."""
-
-    debug: bool = False
-    """Enable debug logging."""
-
-
-def main() -> None:
-    """Entry point: parse CLI and run the pipeline."""
-    load_dotenv()  # picks up SATNOGS_NETWORK_API_KEY for higher API rate limits
-    args = tyro.cli(Args)
-
-    logger.remove()
-    logger.add(
-        sys.stderr,
-        level="DEBUG" if args.debug else "INFO",
-        format="<green>{time:HH:mm:ss}</green> | <level>{level:<8}</level> | {message}",
-    )
-
-    try:
-        run(
-            norad_id=args.norad_id,
-            db_path=args.db_path,
-            start=args.start,
-            limit=args.limit,
-            workers=args.workers,
-            temp_dir=args.temp_dir,
-        )
-    except KeyboardInterrupt:
-        logger.warning("Interrupted by user; exiting.")
-        sys.exit(130)  # 128 + SIGINT, the conventional shell exit code
-
-
-if __name__ == "__main__":
-    main()

@@ -1,14 +1,14 @@
 import pytest
-from cts1_mo_tools.cts1_processing_pipeline.decode_gr_satellites import (
+from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate.decode_gr_satellites import (  # noqa: E501
     parse_hexdump_stdout,
 )
-from cts1_mo_tools.cts1_processing_pipeline.decode_gr_satellites_kiss import (
+from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate.decode_gr_satellites_kiss import (  # noqa: E501
     parse_kiss_file,
 )
-from cts1_mo_tools.cts1_processing_pipeline.decode_satnogs_data_demod import (
+from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate.decode_satnogs_data_demod import (  # noqa: E501
     parse_demod_filename_time,
 )
-from cts1_mo_tools.cts1_processing_pipeline.decode_sso_rx_replay import (
+from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate.decode_sso_rx_replay import (  # noqa: E501
     parse_forensics_line,
 )
 
