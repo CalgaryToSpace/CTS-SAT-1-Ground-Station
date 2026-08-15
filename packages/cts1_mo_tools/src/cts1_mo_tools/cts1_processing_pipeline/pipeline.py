@@ -370,6 +370,7 @@ def run(  # noqa: C901, PLR0913, PLR0915
                         f"Checkpointing after {total_observations} observation(s)"
                     )
                     con.execute("CHECKPOINT")
+                    db.export_parquets(con, db_path)
                     since_checkpoint = 0
 
                 if reached_limit:
@@ -394,6 +395,9 @@ def run(  # noqa: C901, PLR0913, PLR0915
             _subprocess_registry.terminate_all()
             fast_executor.shutdown(wait=True, cancel_futures=True)
             raise
+
+        con.execute("CHECKPOINT")
+        db.export_parquets(con, db_path)
 
     logger.info(
         f"Done. {total_observations} observation(s) listed, {total_decoded} decoded."

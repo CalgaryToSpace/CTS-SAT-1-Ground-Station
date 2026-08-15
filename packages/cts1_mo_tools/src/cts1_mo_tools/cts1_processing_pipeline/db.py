@@ -17,6 +17,7 @@ __all__ = [
     "already_decoded_pairs",
     "append_packets",
     "connect",
+    "export_parquets",
     "upsert_observations",
 ]
 
@@ -41,6 +42,10 @@ def connect(db_path: Path) -> duckdb.DuckDBPyConnection:
 
 def _quote_ident(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
+
+
+def _quote_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
 
 
 def _table_exists(con: duckdb.DuckDBPyConnection, table: str) -> bool:
@@ -189,6 +194,61 @@ def append_packets(con: duckdb.DuckDBPyConnection, df: pl.DataFrame) -> None:
         con.unregister("_incoming_packets")
 
     logger.info(f"{RAW_PACKETS_TABLE}: appended {len(df)} row(s)")
+
+
+def export_table_to_parquet(
+    con: duckdb.DuckDBPyConnection,
+    table: str,
+    out_path: Path,
+    *,
+    order_by_columns: list[str],
+) -> None:
+    order_by_str = ", ".join([f"{_quote_ident(col)} ASC" for col in order_by_columns])
+
+    write_out_path = out_path.with_suffix(".tmp")
+    con.execute(
+        f"""
+            COPY (
+                SELECT * FROM {_quote_ident(table)}
+                ORDER BY {order_by_str}
+            )
+            TO {_quote_literal(str(write_out_path))} (FORMAT PARQUET)
+        """  # noqa: S608
+    )
+
+    write_out_path.replace(out_path)
+
+    logger.info(f"{table}: exported to {out_path}")
+
+
+def export_parquets(con: duckdb.DuckDBPyConnection, db_path: Path) -> None:
+    """Copy raw_observations/raw_packets out to Parquet files next to db_path.
+
+    Each table is sorted before writing (raw_observations by `id`,
+    raw_packets by `observation_id`/`received_at`) so the Parquet files are
+    stable to diff and cheap to range-scan downstream.
+    """
+    out_dir = db_path.parent
+
+    if _table_exists(con, RAW_OBSERVATIONS_TABLE):
+        out_path = out_dir / f"{RAW_OBSERVATIONS_TABLE}.parquet"
+        export_table_to_parquet(
+            con,
+            table=RAW_OBSERVATIONS_TABLE,
+            out_path=out_path,
+            order_by_columns=["id"],
+        )
+        logger.info(f"{RAW_OBSERVATIONS_TABLE}: exported to {out_path}")
+
+    if _table_exists(con, RAW_PACKETS_TABLE):
+        out_path = out_dir / f"{RAW_PACKETS_TABLE}.parquet"
+        export_table_to_parquet(
+            con,
+            table=RAW_PACKETS_TABLE,
+            out_path=out_path,
+            order_by_columns=["received_at", "observation_id"],
+        )
+        logger.info(f"{RAW_PACKETS_TABLE}: exported to {out_path}")
 
 
 def already_decoded_pairs(con: duckdb.DuckDBPyConnection) -> set[tuple[int, str]]:
