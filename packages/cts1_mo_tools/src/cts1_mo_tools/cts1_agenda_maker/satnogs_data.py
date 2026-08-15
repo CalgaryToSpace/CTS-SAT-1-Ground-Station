@@ -37,17 +37,20 @@ def _next_url_from_headers(headers: Any) -> str | None:
 def _get_with_retry(
     url: str, *, params: dict[str, Any], headers: dict[str, str]
 ) -> requests.Response:
-    """GET with retry-with-backoff on 429, honoring Retry-After when present."""
+    """GET with retry-with-backoff on 429/500, honoring Retry-After when present."""
     for attempt in range(_MAX_RETRIES):
         r = requests.get(url, params=params, headers=headers, timeout=30)
-        if r.status_code != requests.codes.too_many_requests:
+        if r.status_code not in (
+            requests.codes.too_many_requests,
+            requests.codes.internal_server_error,
+        ):
             r.raise_for_status()
             return r
 
         retry_after = r.headers.get("Retry-After")
         delay = float(retry_after) if retry_after else 2.0**attempt
         logger.warning(
-            f"429 from SatNOGS API (attempt {attempt + 1}/{_MAX_RETRIES}); "
+            f"{r.status_code} from SatNOGS API (attempt {attempt + 1}/{_MAX_RETRIES}); "
             f"sleeping {delay:.1f}s (Retry-After: {retry_after})"
         )
         time.sleep(delay)
