@@ -8,6 +8,7 @@ Usage (uv):
     uv run cts1_processing_pipeline step_1
     uv run cts1_processing_pipeline --db-path output/cts1.duckdb step_1 --norad-id 69015
     uv run cts1_processing_pipeline step_1 --limit 5 --debug
+    uv run cts1_processing_pipeline step_2
 """
 
 from __future__ import annotations
@@ -21,14 +22,15 @@ __all__ = ["Args", "main"]
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, assert_never
 
 import tyro
 from dotenv import load_dotenv
 from loguru import logger
-from tyro.conf import OmitSubcommandPrefixes, Suppress
+from tyro.conf import OmitSubcommandPrefixes
 
 from .step_1_download_and_demodulate import pipeline as step_1_download_and_demodulate
+from .step_2_deduplicate_packets import pipeline as step_2_deduplicate_packets
 
 DEFAULT_DB_PATH = step_1_download_and_demodulate.DEFAULT_DB_PATH
 
@@ -58,14 +60,17 @@ class Step1Args:
     directory (see Python's `tempfile`)."""
 
 
-# Union needs >= 2 members for tyro to treat it as a subcommand choice rather
-# than collapsing to its single member; the second, suppressed member pads it
-# out without adding a visible option. Add further steps as additional
+@dataclass(frozen=True, slots=True)
+class Step2Args:
+    """Step 2: dedupe raw_packets into distinct_packets_over_time."""
+
+
+# Add further steps as additional
 # `Annotated[StepNArgs, tyro.conf.subcommand(name="step_n", prefix_name=False)]`
-# members alongside Step1Args.
+# members below.
 Command = (
     Annotated[Step1Args, tyro.conf.subcommand(name="step_1", prefix_name=False)]
-    | Annotated[None, Suppress]
+    | Annotated[Step2Args, tyro.conf.subcommand(name="step_2", prefix_name=False)]
 )
 
 
@@ -74,7 +79,10 @@ class Args:
     """CTS-SAT-1 processing pipeline."""
 
     db_path: Path = DEFAULT_DB_PATH
-    """DuckDB database file the pipeline's tables live in."""
+    """DuckDB database file step 1 appends observations/packets to. Later
+    steps don't touch the database themselves -- they're parquet-in,
+    parquet-out -- but still use this path's directory to find/write the
+    parquet files step 1 exports next to it."""
 
     debug: bool = False
     """Enable debug logging."""
@@ -105,6 +113,10 @@ def main() -> None:
                 workers=args.command.workers,
                 temp_dir=args.command.temp_dir,
             )
+        elif isinstance(args.command, Step2Args):  # pyright: ignore[reportUnnecessaryIsInstance]
+            step_2_deduplicate_packets.run(output_dir=args.db_path.parent)
+        else:
+            assert_never(args.command)
     except KeyboardInterrupt:
         logger.warning("Interrupted by user; exiting.")
         sys.exit(130)  # 128 + SIGINT, the conventional shell exit code

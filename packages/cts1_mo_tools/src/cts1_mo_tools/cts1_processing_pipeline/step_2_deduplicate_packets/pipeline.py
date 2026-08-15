@@ -1,0 +1,408 @@
+"""Step 2: deduplicate packets across decoders/observations.
+
+`raw_packets` (see step 1) has one row per *decode*: the same physical
+transmission commonly shows up several times over -- once per decoder that
+managed to decode it (sso_rx_replay / gr_satellites_pdu /
+gr_satellites_kiss / satnogs_data_demod), and again per SatNOGS ground
+station that happened to record the same overpass. This step collapses
+those into one row per *distinct received packet*, each carrying a single
+best-guess `received_at` and JSON columns tracing back to every
+observation/decoder that contributed to it.
+
+Trust model:
+  - `sso_rx_replay` is the most trustworthy decoder in both content (its
+    Reed-Solomon-corrected frames are filtered to `rs_corrected_count >= 0`,
+    i.e. RS-uncorrectable frames are dropped) and timing (it reports a
+    within-file offset resolved against the observation's own start time).
+    Its packets are the baseline: two sso_rx_replay decodes of the same
+    content are only merged if received within `SSO_DEDUPE_TOLERANCE` of
+    each other -- multiple SatNOGS ground stations time-synced to within
+    about a minute of real time commonly all catch the same overpass.
+  - Every other decoder is treated as far less trustworthy on timing (some,
+    like gr_satellites_pdu, can't localize a frame within its observation at
+    all and just report the observation's end time). A same-content packet
+    from another decoder is merged into an sso_rx_replay baseline packet if
+    it falls within `OTHER_DECODER_TOLERANCE` of that baseline packet, or if
+    its own observation's window overlaps the observation window(s) the
+    baseline packet was seen in.
+  - Content with no sso_rx_replay baseline anywhere is still worth keeping
+    (a decoder-exclusive packet isn't nothing), so it's clustered against
+    itself using the same wide, low-trust tolerance and reported with its
+    earliest contributing decode as a best-effort `received_at`.
+
+Unlike step 1 -- which appends to a DuckDB database as its source of truth,
+since it's cheap to run incrementally against new SatNOGS observations --
+this step and every step after it are parquet-in-parquet-out: it reads
+`raw_packets.parquet`/`raw_observations.parquet` (as exported by step 1)
+and writes `distinct_packets_over_time.parquet` straight back out, no
+database involved. The whole dataset is cheap enough to reprocess from
+scratch on every run, so there's no incremental state to reconcile.
+"""
+
+from __future__ import annotations
+
+__all__ = [
+    "DEFAULT_OUTPUT_DIR",
+    "OUTPUT_FILENAME",
+    "compute_distinct_packets",
+    "run",
+]
+
+from datetime import timedelta
+from typing import TYPE_CHECKING
+
+import polars as pl
+from loguru import logger
+
+from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate import (
+    pipeline as step_1_pipeline,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from pathlib import Path
+
+DEFAULT_OUTPUT_DIR = step_1_pipeline.DEFAULT_DB_PATH.parent
+OUTPUT_FILENAME = "distinct_packets_over_time.parquet"
+
+SSO_DECODER = "sso_rx_replay"
+
+# Multiple ground stations recording the same overpass are all assumed
+# time-synced to within about a minute of real time.
+SSO_DEDUPE_TOLERANCE = timedelta(minutes=1)
+
+# Everything else gets a much wider berth, since e.g. gr_satellites_pdu
+# reports the observation's end time for every single frame.
+OTHER_DECODER_TOLERANCE = timedelta(minutes=15)
+
+_SOURCE_FIELDS: Sequence[str] = (
+    "observation_id",
+    "decoder",
+    "time_in_file_ms",
+    "rssi",
+    "rs_corrected_count",
+    "csp_crc_valid",
+)
+
+
+def _with_source_struct(packets: pl.DataFrame) -> pl.DataFrame:
+    """Attach a `_source` struct column: one full per-decode trace record."""
+    return packets.with_columns(
+        _source=pl.struct(
+            *(pl.col(f) for f in _SOURCE_FIELDS),
+            received_at=pl.col("received_at").dt.strftime("%Y-%m-%dT%H:%M:%S%.3fZ"),
+        )
+    )
+
+
+def _cluster_by_content_and_time(
+    df: pl.DataFrame, *, tolerance: timedelta, cluster_col: str
+) -> pl.DataFrame:
+    """Assign `cluster_col`: rows with the same `data_hex` chained together
+    by consecutive `received_at` gaps no larger than `tolerance`
+    (gap-and-island / "sessionization").
+
+    A long chain of close-together rows can end up spanning more than
+    `tolerance` end-to-end even though no single gap in it exceeds
+    `tolerance` -- an accepted approximation, standard for this kind of
+    event clustering.
+    """
+    return (
+        df.sort(["data_hex", "received_at"])
+        .with_columns(
+            _gap=pl.col("received_at") - pl.col("received_at").shift(1).over("data_hex")
+        )
+        .with_columns(
+            **{
+                cluster_col: (
+                    (pl.col("_gap").is_null() | (pl.col("_gap") > tolerance))
+                    .cum_sum()
+                    .over("data_hex")
+                )
+            }
+        )
+        .drop("_gap")
+    )
+
+
+def _cluster_baseline(baseline: pl.DataFrame) -> pl.DataFrame:
+    """Cluster sso_rx_replay rows into distinct baseline packet events."""
+    clustered = _cluster_by_content_and_time(
+        baseline, tolerance=SSO_DEDUPE_TOLERANCE, cluster_col="cluster_id"
+    )
+    return (
+        clustered.group_by(["data_hex", "cluster_id"], maintain_order=True)
+        .agg(
+            pl.col("received_at").first(),  # earliest -- rows are time-sorted
+            pl.col("data_length_bytes").first(),
+            pl.col("csp_crc_valid").first(),
+            pl.col("rssi").first(),
+            pl.col("rs_corrected_count").first(),
+            pl.col("rs_uncorrectable").first(),
+            pl.col("obs_start").min().alias("cluster_obs_start"),
+            pl.col("obs_end").max().alias("cluster_obs_end"),
+            pl.col("observation_id").unique().alias("baseline_observation_ids"),
+            pl.col("_source").alias("sources"),
+        )
+        .drop("cluster_id")
+        .with_row_index("baseline_cluster_idx")
+    )
+
+
+def _match_others_to_baseline(
+    others: pl.DataFrame, baseline_clusters: pl.DataFrame
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """Match each `others` row to its nearest same-content baseline cluster.
+
+    A match requires: the same `data_hex`, and either the row's `received_at`
+    falling within `OTHER_DECODER_TOLERANCE` of the cluster's own time span,
+    or the row's observation window overlapping an observation window the
+    baseline cluster was itself seen in.
+
+    Returns `(matched, unmatched)`: `matched` has one row per `others` row
+    that found a baseline match (nearest one, if several clusters of the
+    same content exist), `unmatched` is everything left over.
+    """
+    empty_matched = others.clear().with_columns(
+        baseline_cluster_idx=pl.lit(None, dtype=pl.UInt32)
+    )
+    if others.is_empty() or baseline_clusters.is_empty():
+        return empty_matched, others
+
+    pairs = others.join(
+        baseline_clusters.select(
+            "data_hex",
+            "baseline_cluster_idx",
+            "cluster_obs_start",
+            "cluster_obs_end",
+        ),
+        on="data_hex",
+        how="inner",
+    )
+    if pairs.is_empty():
+        return empty_matched, others
+
+    window_overlap = (pl.col("obs_start") <= pl.col("cluster_obs_end")) & (
+        pl.col("obs_end") >= pl.col("cluster_obs_start")
+    )
+    dist = pl.min_horizontal(
+        (pl.col("received_at") - pl.col("cluster_obs_start")).abs(),
+        (pl.col("received_at") - pl.col("cluster_obs_end")).abs(),
+    )
+    pairs = pairs.with_columns(
+        _dist=pl.when(window_overlap).then(pl.duration(microseconds=0)).otherwise(dist),
+        _match_ok=window_overlap | (dist <= OTHER_DECODER_TOLERANCE),
+    )
+
+    matched = (
+        pairs.filter(pl.col("_match_ok"))
+        .sort("_dist")
+        .unique(subset=["_row_id"], keep="first")
+    )
+    unmatched = others.join(matched.select("_row_id"), on="_row_id", how="anti")
+    return matched, unmatched
+
+
+def _attach_others_to_baseline(
+    baseline_clusters: pl.DataFrame, matched: pl.DataFrame
+) -> pl.DataFrame:
+    """Fold matched low-trust decodes into their baseline cluster's row."""
+    if matched.is_empty():
+        attached = baseline_clusters.with_columns(
+            _other_decoders=pl.lit([], dtype=pl.List(pl.String)),
+            _other_observation_ids=pl.lit([], dtype=pl.List(pl.Int64)),
+            _other_sources=pl.lit([], dtype=baseline_clusters.schema["sources"]),
+        )
+    else:
+        agg = matched.group_by("baseline_cluster_idx").agg(
+            pl.col("decoder").alias("_other_decoders"),
+            pl.col("observation_id").alias("_other_observation_ids"),
+            pl.col("_source").alias("_other_sources"),
+        )
+        attached = baseline_clusters.join(agg, on="baseline_cluster_idx", how="left")
+        attached = attached.with_columns(
+            pl.col("_other_decoders").fill_null([]),
+            pl.col("_other_observation_ids").fill_null([]),
+            pl.col("_other_sources").fill_null([]),
+        )
+
+    return attached.with_columns(
+        decoders=pl.concat_list([pl.lit([SSO_DECODER]), pl.col("_other_decoders")])
+        .list.unique()
+        .list.sort(),
+        observation_ids=pl.concat_list(
+            [pl.col("baseline_observation_ids"), pl.col("_other_observation_ids")]
+        )
+        .list.unique()
+        .list.sort(),
+        sources=pl.concat_list([pl.col("sources"), pl.col("_other_sources")]),
+        received_at_source=pl.lit(SSO_DECODER),
+    ).select(
+        "data_hex",
+        "received_at",
+        "received_at_source",
+        "data_length_bytes",
+        "csp_crc_valid",
+        "rssi",
+        "rs_corrected_count",
+        "rs_uncorrectable",
+        "decoders",
+        "observation_ids",
+        "sources",
+    )
+
+
+def _cluster_leftover_others(unmatched: pl.DataFrame) -> pl.DataFrame:
+    """Distinct-packet rows for content with no sso_rx_replay baseline at
+    all: clustered against themselves with the wide, low-trust tolerance,
+    reporting the earliest contributing decode as a best-effort `received_at`.
+    """
+    clustered = _cluster_by_content_and_time(
+        unmatched, tolerance=OTHER_DECODER_TOLERANCE, cluster_col="cluster_id"
+    )
+    return (
+        clustered.group_by(["data_hex", "cluster_id"], maintain_order=True)
+        .agg(
+            pl.col("received_at").min(),  # earliest available guess
+            pl.col("data_length_bytes").first(),
+            pl.col("csp_crc_valid").first(),
+            pl.lit(None).alias("rssi"),
+            pl.lit(None).alias("rs_corrected_count"),
+            pl.lit(None).alias("rs_uncorrectable"),
+            pl.col("decoder").unique().sort().alias("decoders"),
+            pl.col("observation_id").unique().sort().alias("observation_ids"),
+            pl.col("_source").alias("sources"),
+        )
+        .drop("cluster_id")
+        .with_columns(received_at_source=pl.lit("estimated"))
+    )
+
+
+def _finalize(df: pl.DataFrame) -> pl.DataFrame:
+    """Encode the traceability columns to JSON and add id/bookkeeping columns."""
+    quoted_decoders = pl.col("decoders").list.eval(pl.format('"{}"', pl.element()))
+    encoded_sources = pl.col("sources").list.eval(pl.element().struct.json_encode())
+    df = df.with_columns(
+        decoders="[" + quoted_decoders.list.join(",") + "]",
+        observation_ids=(
+            "[" + pl.col("observation_ids").cast(pl.List(pl.Utf8)).list.join(",") + "]"
+        ),
+        packet_count=pl.col("sources").list.len(),
+        sources="[" + encoded_sources.list.join(",") + "]",
+    )
+    df = df.with_columns(
+        packet_id=pl.concat_str(
+            ["data_hex", pl.col("received_at").dt.strftime("%Y-%m-%dT%H:%M:%S%.6fZ")]
+        )
+        .hash()
+        .cast(pl.Utf8)
+    )
+    return df.select(
+        "packet_id",
+        "data_hex",
+        "data_length_bytes",
+        "csp_crc_valid",
+        "received_at",
+        "received_at_source",
+        "rssi",
+        "rs_corrected_count",
+        "rs_uncorrectable",
+        "packet_count",
+        "decoders",
+        "observation_ids",
+        "sources",
+    ).sort("received_at")
+
+
+def compute_distinct_packets(
+    packets_df: pl.DataFrame, observations_df: pl.DataFrame
+) -> pl.DataFrame:
+    """Pure computation: `raw_packets`/`raw_observations` -> distinct packets.
+
+    Args:
+        packets: `raw_packets.parquet`, as exported by step 1.
+        observations: `raw_observations.parquet`, as exported by step 1.
+
+    Returns:
+        One row per distinct received packet -- see module docstring for the
+        merge/trust rules, and `_finalize` for the output schema.
+    """
+    observations_df = observations_df.select(
+        observation_id=pl.col("id"),
+        obs_start=pl.col("start").dt.replace_time_zone("UTC"),
+        obs_end=pl.col("end").dt.replace_time_zone("UTC"),
+    )
+
+    packets_df = packets_df.filter(
+        pl.col("data_hex").is_not_null() & (pl.col("data_hex") != "")
+    )
+    is_sso = pl.col("decoder") == SSO_DECODER
+    packets_df = packets_df.filter(~is_sso | (pl.col("rs_corrected_count") >= 0))
+
+    packets_df = packets_df.join(observations_df, on="observation_id", how="left")
+    packets_df = _with_source_struct(packets_df)
+
+    baseline = packets_df.filter(is_sso).with_row_index("_row_id")
+    others = packets_df.filter(~is_sso).with_row_index("_row_id")
+
+    baseline_clusters = _cluster_baseline(baseline)
+    matched, unmatched = _match_others_to_baseline(others, baseline_clusters)
+
+    baseline_final = _attach_others_to_baseline(baseline_clusters, matched)
+    leftover_final = _cluster_leftover_others(unmatched)
+
+    result = pl.concat([baseline_final, leftover_final], how="diagonal_relaxed")
+    return _finalize(result)
+
+
+def _write_parquet_atomic(df: pl.DataFrame, path: Path) -> None:
+    """Write `df` to `path` via a temp file + rename, so a crash mid-write
+    can't leave a truncated/corrupt parquet file at `path`.
+    """
+    tmp_path = path.with_suffix(".tmp")
+    df.write_parquet(tmp_path)
+    tmp_path.replace(path)
+
+
+def run(*, output_dir: Path = DEFAULT_OUTPUT_DIR) -> None:
+    """Recompute `distinct_packets_over_time.parquet` from step 1's exports.
+
+    Reads `raw_packets.parquet`/`raw_observations.parquet` from `output_dir`
+    (where step 1 exports them) and writes the result back into the same
+    directory -- parquet-in-parquet-out, no database involved.
+    """
+    packets_path = output_dir / "raw_packets.parquet"
+    observations_path = output_dir / "raw_observations.parquet"
+    for path in (packets_path, observations_path):
+        if not path.exists():
+            msg = f"{path} not found -- run step_1 first."
+            raise FileNotFoundError(msg)
+
+    logger.info(f"Reading {packets_path} and {observations_path}")
+    packets_df = pl.read_parquet(packets_path)
+    observations_df = pl.read_parquet(observations_path)
+
+    logger.info(
+        f"Loaded {len(packets_df):,} raw packets across "
+        f"{len(observations_df):,} raw observations."
+    )
+
+    result_df = compute_distinct_packets(packets_df, observations_df)
+
+    out_path = output_dir / OUTPUT_FILENAME
+    _write_parquet_atomic(result_df, out_path)
+
+    logger.info(f"Done. {len(result_df):,} distinct packet(s) written to {out_path}.")
+
+    mean_packet_count = result_df["packet_count"].mean()
+    median_packet_count = result_df["packet_count"].median()
+    logger.info(
+        f"On average, each packet was received {mean_packet_count:.2f} times (mean) "
+        f"or {median_packet_count:.1f} times (median)."
+    )
+
+    removal_ratio = packets_df.height / result_df.height
+    logger.info(
+        f"Across {packets_df.height:,} total packets, "
+        f"each packet received {removal_ratio:.2f} times."
+    )
