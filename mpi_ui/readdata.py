@@ -4,6 +4,8 @@ import hashlib
 import re
 import sys
 from pathlib import Path
+from mpi_telecommand_codes import tc_code
+
 
 # TODO: Restructure into OOP!!
 
@@ -140,11 +142,40 @@ def mpi_response_code(response_code: str) ->None:
     """
     # The last two strings will indicate if the MPI command was successfully exectuted
     # Reading '0xfe' indcates success
+    flag = 0
+   
     if response_code[-2:] == 'fe':
         # The next to last two strings will indicate what MPI telecommand was succesfully executed:
+        for key, value in tc_code.items():
+           # First check that an invalid telecommand was not sent
+            
+            #TODO: Code needs to be written to check for INVALID Telecommand response_code[-5:-2]?
+                 
+                if response_code[-4:-2] == key and flag == 0:
+                    # Check that a valid telecommand was transmitted if not, jump to "else" statement
+                    if response_code[-4:-2] != "255":
+                        # SUCCESSFUL MATCHING KEY
+                        print(f"Telecommand Executed: {value}, {key}")
+                        flag = 1
+                        break
+                    else:
+                        # An invalid telecommand was transmitted
+                        print(f"Invalid Telecommand, {value}, {key}")
+
+                #TODO: Check the below lines of code
+                else:
+                    if flag == 0:
+                        continue
+                    else:
+                        # No matches means that the telecommand was not succesfully executed
+                        print("Execution Unsuccessful")
+    
+           
+    
         
         
 def id_bytes_in_data_frame(data_frame: list[str]) ->list[dict]:
+
     """ Add each data frame to a resulting DICTIONARY???
     """
     #TODO: Test if data does calculations directly in hex or needs to be converted into decimal
@@ -186,8 +217,8 @@ def id_bytes_in_data_frame(data_frame: list[str]) ->list[dict]:
     mpi_dictionary.update({"Sync Byte 4": mpi_data_frame[3]})
 
     # Byte 4 & 5 - Frame Counter
-    byte_4 = int(mpi_data_frame[0], 16) # Convert byte 4 hexadecimal string to decimal type 'int'
-    byte_5 = int(mpi_data_frame[1], 16) # Convert byte 5 hexadecimal string to decimal type 'int'
+    byte_4 = int(mpi_data_frame[4], 16) # Convert byte 4 hexadecimal string to decimal type 'int'
+    byte_5 = int(mpi_data_frame[5], 16) # Convert byte 5 hexadecimal string to decimal type 'int'
     counter = (byte_4*256) + byte_5
     print(byte_4)
     print(byte_5)
@@ -196,8 +227,8 @@ def id_bytes_in_data_frame(data_frame: list[str]) ->list[dict]:
     mpi_dictionary.update({"Frame Number": counter})
 
     # Byte 6  & 7 - Board Temperature
-    byte_6 = int(mpi_data_frame[2], 16)
-    byte_7 = int(mpi_data_frame[3], 16)
+    byte_6 = int(mpi_data_frame[6], 16)
+    byte_7 = int(mpi_data_frame[7], 16)
 
     temperature = ((byte_6)*256 + byte_7) / 128.0
 
@@ -205,12 +236,12 @@ def id_bytes_in_data_frame(data_frame: list[str]) ->list[dict]:
     mpi_dictionary.update({"Board Temperature": temperature})
 
     # Byte 8 - Firmware version
-    byte_8 = int(mpi_data_frame[4], 16)
+    byte_8 = int(mpi_data_frame[8], 16)
     mpi_dictionary.update({"Firmware Version": byte_8})
 
     # Byte 9 & 10 - Detector Status
-    byte_9 = int(mpi_data_frame[5], 16)
-    byte_10 = int(mpi_data_frame[6], 16)
+    byte_9 = int(mpi_data_frame[9], 16)
+    byte_10 = int(mpi_data_frame[10], 16)
 
     detector_status = byte_9*256 + byte_10
 
@@ -218,8 +249,8 @@ def id_bytes_in_data_frame(data_frame: list[str]) ->list[dict]:
     
     
     # Byte 11 & 12 - Inner Dome Voltage Setting
-    byte_11 = int(mpi_data_frame[7], 16)
-    byte_12 = int(mpi_data_frame[8], 16)
+    byte_11 = int(mpi_data_frame[11], 16)
+    byte_12 = int(mpi_data_frame[12], 16)
 
     # Set inner dome scan
     inner_dome_v_setting = byte_11 * 256 + byte_12
@@ -228,14 +259,14 @@ def id_bytes_in_data_frame(data_frame: list[str]) ->list[dict]:
     
 
     # Byte 13 - Inner Dome Scan Index
-    byte_13 = int(mpi_data_frame[9], 16)
+    byte_13 = int(mpi_data_frame[13], 16)
 
     inner_dome_scan_index = byte_13
     mpi_dictionary.update({"Inner Dome Scan Index": inner_dome_scan_index})
 
     # Byte 14 & 15 - Inner Dome Voltage ADC Reading
-    byte_14 = int(mpi_data_frame[10], 16)
-    byte_15 = int(mpi_data_frame[11], 16)
+    byte_14 = int(mpi_data_frame[14], 16)
+    byte_15 = int(mpi_data_frame[15], 16)
 
     
     eu = byte_14*256 + byte_15
@@ -244,9 +275,9 @@ def id_bytes_in_data_frame(data_frame: list[str]) ->list[dict]:
     # mpi_dictionary.update({"Inner Dome Voltage ADC Reading": v_id})
 
     # Byte 16 (Defines FIRST pixel index)
-    byte_16 = int(mpi_data_frame[12], 16)
+    byte_16 = int(mpi_data_frame[16], 16)
     # Byte 17 (Defines LAST pixel index)
-    byte_17 = int(mpi_data_frame[13], 16)
+    byte_17 = int(mpi_data_frame[17], 16)
     
     mpi_dictionary.update({"First Pixel Index": byte_16})
     mpi_dictionary.update({"Last Pixel Index": byte_17})
@@ -256,8 +287,8 @@ def id_bytes_in_data_frame(data_frame: list[str]) ->list[dict]:
 
     # Byte 18 & 19 - Integration Period
 
-    byte_18 = int(mpi_data_frame[14], 16)
-    byte_19 = int(mpi_data_frame[15], 16)
+    byte_18 = int(mpi_data_frame[18], 16)
+    byte_19 = int(mpi_data_frame[19], 16)
 
     integration_period_set = byte_18*256 + byte_19
 
@@ -266,8 +297,8 @@ def id_bytes_in_data_frame(data_frame: list[str]) ->list[dict]:
 
     # Byte 20 & 21 - First Pixel Index
 
-    byte_20 = int(mpi_data_frame[16], 16)
-    byte_21 = int(mpi_data_frame[17], 16)
+    byte_20 = int(mpi_data_frame[20], 16)
+    byte_21 = int(mpi_data_frame[21], 16)
 
     #TODO: Create a function that determines the value of the pixel
     # for loop
@@ -369,29 +400,37 @@ def main() -> None:
     # The value of the length of the list will be used to parse through the entire list
     # and also identify the response code of the MPI
     for frame in range(length_of_frame_list): #list_of_frames:
+        # The first frame will contain the MPI response code
+        # Check the reponse code to see if its telecommand was executed successfully    
         if frame == 0:
             print(f'Data Length {len(list_of_frames[frame])}')
+            print(list_of_frames[frame])
             # Identify the MPI response code
+            mpi_response_code(list_of_frames[frame])
+
+        # Check the data in the other frames
         else:
             print(f'Data Length {len(list_of_frames[frame])}')
             print(list_of_frames[frame])
-            # Identify the data bytes in the frame
-            frames.append(id_bytes_in_data_frame(frame))
+
+            # Identify the data bytes in the frame, and append to a master list of data frames
+            frames.append(id_bytes_in_data_frame(list_of_frames[frame]))
+
         # if (len(frame) <= 8):
         #     continue
         # 
         # index += 1
 
-    # print(len(listy))
-    # # print(listy)
+    print(len(frames))
+    print(frames)
     
 
-    # j = 0
-    # while j < 150: #len(listy)
-    #     print()
-    #     for key, value in listy[j][0].items():
-    #         print(f"{key}: {value}")
-    #         j += 1
+    j = 0
+    while j < 150: #len(listy)
+        print()
+        for key, value in frames[j][0].items():
+            print(f"{key}: {value}")
+            j += 1
             # print(j)
 
 
