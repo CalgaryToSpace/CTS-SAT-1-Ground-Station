@@ -9,6 +9,7 @@ Usage (uv):
     uv run cts1_processing_pipeline --db-path output/cts1.duckdb step_1 --norad-id 69015
     uv run cts1_processing_pipeline step_1 --limit 5 --debug
     uv run cts1_processing_pipeline step_2
+    uv run cts1_processing_pipeline step_3
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ from tyro.conf import OmitSubcommandPrefixes
 
 from .step_1_download_and_demodulate import pipeline as step_1_download_and_demodulate
 from .step_2_deduplicate_packets import pipeline as step_2_deduplicate_packets
+from .step_3_decode_packets import pipeline as step_3_decode_packets
 
 DEFAULT_DB_PATH = step_1_download_and_demodulate.DEFAULT_DB_PATH
 
@@ -65,12 +67,18 @@ class Step2Args:
     """Step 2: dedupe raw_packets into distinct_packets_over_time."""
 
 
+@dataclass(frozen=True, slots=True)
+class Step3Args:
+    """Step 3: decode distinct_packets_over_time into everything_decoded."""
+
+
 # Add further steps as additional
 # `Annotated[StepNArgs, tyro.conf.subcommand(name="step_n", prefix_name=False)]`
 # members below.
 Command = (
     Annotated[Step1Args, tyro.conf.subcommand(name="step_1", prefix_name=False)]
     | Annotated[Step2Args, tyro.conf.subcommand(name="step_2", prefix_name=False)]
+    | Annotated[Step3Args, tyro.conf.subcommand(name="step_3", prefix_name=False)]
 )
 
 
@@ -113,8 +121,10 @@ def main() -> None:
                 workers=args.command.workers,
                 temp_dir=args.command.temp_dir,
             )
-        elif isinstance(args.command, Step2Args):  # pyright: ignore[reportUnnecessaryIsInstance]
+        elif isinstance(args.command, Step2Args):
             step_2_deduplicate_packets.run(output_dir=args.db_path.parent)
+        elif isinstance(args.command, Step3Args):  # pyright: ignore[reportUnnecessaryIsInstance]
+            step_3_decode_packets.run(output_dir=args.db_path.parent)
         else:
             assert_never(args.command)
     except KeyboardInterrupt:
