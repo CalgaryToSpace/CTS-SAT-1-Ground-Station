@@ -54,6 +54,7 @@ from typing import TYPE_CHECKING
 import polars as pl
 from loguru import logger
 
+from cts1_mo_tools.cts1_decode_satnogs_packets import CSP_CRC32C_SIZE, crc32c
 from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate import (
     pipeline as step_1_pipeline,
 )
@@ -66,6 +67,7 @@ DEFAULT_OUTPUT_DIR = step_1_pipeline.DEFAULT_DB_PATH.parent
 OUTPUT_FILENAME = "distinct_packets_over_time.parquet"
 
 SSO_DECODER = "sso_rx_replay"
+DEMOD_DECODER = "satnogs_data_demod"
 
 # Multiple ground stations recording the same overpass are all assumed
 # time-synced to within about a minute of real time.
@@ -82,7 +84,48 @@ _SOURCE_FIELDS: Sequence[str] = (
     "rssi",
     "rs_corrected_count",
     "csp_crc_valid",
+    "csp_crc_source",
 )
+
+
+def _append_crc32c(data_hex: str) -> str:
+    """Append a freshly computed CRC-32C to `data_hex`, treating it as a bare
+    payload with no trailing CRC.
+    """
+    payload = bytes.fromhex(data_hex)
+    computed = crc32c(payload)
+    return data_hex + computed.to_bytes(CSP_CRC32C_SIZE, "big").hex()
+
+
+def _complete_missing_crc(packets: pl.DataFrame) -> pl.DataFrame:
+    """satnogs_data_demod sometimes reports a packet with its trailing CSP
+    CRC-32C already stripped and sometimes doesn't -- there's no way to tell
+    from SatNOGS's API alone which case a given packet is. Any row from that
+    decoder whose `data_hex` doesn't already carry a valid CRC (per step 1's
+    `csp_crc_valid`) is treated as the "missing" case: a CRC-32C is computed
+    over its bytes and appended, completing it into the same full packet
+    another decoder that *did* keep the CRC would report for the identical
+    transmission. That's what makes the content-based grouping below able to
+    match them up at all -- two decoders' bytes-for-bytes-identical payloads
+    always produce the same computed CRC.
+
+    Adds `csp_crc_source`: "decoded" for a CRC that was already there and
+    verified as-is, "computed" for one synthesized here (i.e. not
+    independently confirmed by the satellite -- just internally consistent
+    by construction).
+    """
+    needs_crc = (pl.col("decoder") == DEMOD_DECODER) & ~pl.col(
+        "csp_crc_valid"
+    ).fill_null(value=False)
+
+    incomplete = packets.filter(needs_crc).with_columns(
+        data_hex=pl.col("data_hex").map_elements(_append_crc32c, return_dtype=pl.Utf8),
+        data_length_bytes=pl.col("data_length_bytes") + CSP_CRC32C_SIZE,
+        csp_crc_valid=pl.lit(value=True),  # true by construction
+        csp_crc_source=pl.lit("computed"),
+    )
+    complete = packets.filter(~needs_crc).with_columns(csp_crc_source=pl.lit("decoded"))
+    return pl.concat([complete, incomplete], how="vertical_relaxed")
 
 
 def _with_source_struct(packets: pl.DataFrame) -> pl.DataFrame:
@@ -136,6 +179,7 @@ def _cluster_baseline(baseline: pl.DataFrame) -> pl.DataFrame:
             pl.col("received_at").first(),  # earliest -- rows are time-sorted
             pl.col("data_length_bytes").first(),
             pl.col("csp_crc_valid").first(),
+            pl.col("csp_crc_source").first(),
             pl.col("rssi").first(),
             pl.col("rs_corrected_count").first(),
             pl.col("rs_uncorrectable").first(),
@@ -227,7 +271,8 @@ def _attach_others_to_baseline(
         )
 
     return attached.with_columns(
-        decoders=pl.concat_list([pl.lit([SSO_DECODER]), pl.col("_other_decoders")])
+        decoders=pl.col("_other_decoders")
+        .list.concat(pl.lit([SSO_DECODER]))
         .list.unique()
         .list.sort(),
         observation_ids=pl.concat_list(
@@ -243,6 +288,7 @@ def _attach_others_to_baseline(
         "received_at_source",
         "data_length_bytes",
         "csp_crc_valid",
+        "csp_crc_source",
         "rssi",
         "rs_corrected_count",
         "rs_uncorrectable",
@@ -266,6 +312,7 @@ def _cluster_leftover_others(unmatched: pl.DataFrame) -> pl.DataFrame:
             pl.col("received_at").min(),  # earliest available guess
             pl.col("data_length_bytes").first(),
             pl.col("csp_crc_valid").first(),
+            pl.col("csp_crc_source").first(),
             pl.lit(None).alias("rssi"),
             pl.lit(None).alias("rs_corrected_count"),
             pl.lit(None).alias("rs_uncorrectable"),
@@ -302,6 +349,7 @@ def _finalize(df: pl.DataFrame) -> pl.DataFrame:
         "data_hex",
         "data_length_bytes",
         "csp_crc_valid",
+        "csp_crc_source",
         "received_at",
         "received_at_source",
         "rssi",
@@ -336,6 +384,7 @@ def compute_distinct_packets(
     packets_df = packets_df.filter(
         pl.col("data_hex").is_not_null() & (pl.col("data_hex") != "")
     )
+    packets_df = _complete_missing_crc(packets_df)
     is_sso = pl.col("decoder") == SSO_DECODER
     packets_df = packets_df.filter(~is_sso | (pl.col("rs_corrected_count") >= 0))
 
@@ -404,6 +453,6 @@ def run(*, output_dir: Path = DEFAULT_OUTPUT_DIR) -> None:
 
     removal_ratio = packets_df.height / result_df.height
     logger.info(
-        f"Across {packets_df.height:,} total packet decodes, "
+        f"{packets_df.height:,} raw packets -> {result_df.height:,} distinct packets: "
         f"each packet received+decoded {removal_ratio:.2f} times."
     )
