@@ -451,8 +451,15 @@ def run(*, output_dir: Path = DEFAULT_OUTPUT_DIR) -> None:
         f"or {median_packet_count:.1f} times (median)."
     )
 
-    removal_ratio = packets_df.height / result_df.height
+    # `packets_df.height` includes rows compute_distinct_packets drops before
+    # grouping (empty data_hex, RS-uncorrectable sso frames) -- those were
+    # never "received+decoded copies" of anything, so they're excluded here
+    # rather than inflating the ratio above.
+    contributing_packets = result_df["packet_count"].sum()
+    dropped_packets = packets_df.height - contributing_packets
     logger.info(
-        f"{packets_df.height:,} raw packets -> {result_df.height:,} distinct packets: "
-        f"each packet received+decoded {removal_ratio:.2f} times."
+        f"{packets_df.height:,} raw packets loaded, "
+        f"{dropped_packets:,} dropped as noise (e.g., RS errors, empty data_hex), "
+        f"{contributing_packets:,} received+decoded into "
+        f"{result_df.height:,} distinct packets."
     )
