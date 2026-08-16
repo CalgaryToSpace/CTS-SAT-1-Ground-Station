@@ -397,12 +397,13 @@ def run(*, output_dir: Path = DEFAULT_OUTPUT_DIR) -> None:
     mean_packet_count = result_df["packet_count"].mean()
     median_packet_count = result_df["packet_count"].median()
     logger.info(
-        f"On average, each packet was received {mean_packet_count:.2f} times (mean) "
+        f"On average, each packet was received+decoded "
+        f"{mean_packet_count:.2f} times (mean) "
         f"or {median_packet_count:.1f} times (median)."
     )
 
     removal_ratio = packets_df.height / result_df.height
     logger.info(
-        f"Across {packets_df.height:,} total packets, "
-        f"each packet received {removal_ratio:.2f} times."
+        f"Across {packets_df.height:,} total packet decodes, "
+        f"each packet received+decoded {removal_ratio:.2f} times."
     )
