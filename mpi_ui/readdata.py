@@ -25,7 +25,7 @@ def extract_data_from_file(input_file_path: Path) -> str:
     then splits the string every 2 characters
 
     Args:
-        packet_type: The number of packets to extract
+        packet_type: The number of packets to extract <- I think that this is irrelevant????
         input_file_path: The Path to the input file
     Returns: 
         A list of bytes in hexadecimal separated in pairs
@@ -56,12 +56,12 @@ def extract_data_from_file(input_file_path: Path) -> str:
                 # Convert the binary data in each line to HEX STRING
                 hex_string = line.hex()
 
-                """
+                
                 # DEBUGGING ONLY
                 print(hex_string)
-                Append hexidecimal string to array of strings
-                packet_to_hex_string.join(hex_string)
-                """
+                # Append hexidecimal string to array of strings
+                # packets_to_hex_string.join(hex_string)
+                
                 
                 # Append the converted hex string to a list of strings containing MPI data
                 packets_to_hex_string.append(hex_string)
@@ -88,7 +88,7 @@ def search_packet(packet:str) -> list[str]:
     """
 
     # Search the packet string and split the string whenever '0cffff0c' is found
-    # '0cffff0c' will be at the front of eacah split packet
+    # '0cffff0c' will be at the front of each split packet
     data_frame_search = re.split(r'(?=0cffff0c)', packet)
 
     return data_frame_search
