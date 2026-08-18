@@ -202,12 +202,15 @@ def id_bytes_in_data_frame(data_frame: list[str]) ->list[dict]:
     # print(f'length of MPI DATA FRAME {len(mpi_data_frame)}')
     # Create Dictionary 
     mpi_dictionary = dict()
-    # keys = ['Sync Byte 1', 'Sync Byte 2', 'Sync Byte 3', 'Sync Byte 4',
-    #         'Frame Counter', 'Board Temperature', 'Firmware Version', 
-    #         'Detector Status', 'Inner Dome Voltage Setting', 'Inner Dome Scan Index',
-    #         'Inner Dome Voltage ADC Reading', 'First Pixel Index', 'Last Pixel Index', 
-    #         'Integration Period'
-    #         ]
+    '''
+    keys = ['Sync Byte 1', 'Sync Byte 2', 'Sync Byte 3', 'Sync Byte 4',
+            'Frame Counter', 'Board Temperature', 'Firmware Version', 
+            'Detector Status', 'Inner Dome Voltage Setting', 'Inner Dome Scan Index',
+            'Inner Dome Voltage ADC Reading', 'First Pixel Index', 'Last Pixel Index', 
+            'Integration Period'
+            ]
+    '''
+    
 
     # Byte 0 - Sync Byte
     mpi_dictionary.update({"Sync Byte 1": mpi_data_frame[0]})
