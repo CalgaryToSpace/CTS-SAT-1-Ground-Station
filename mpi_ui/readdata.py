@@ -88,9 +88,11 @@ def search_packet(packet:str) -> list[str]:
     """
 
     # Search the packet string and split the string whenever '0cffff0c' is found
-    # '0cffff0c' will be at the front of each split packet
+    # '0cffff0c' indicates the start of an MPI data telemetry frame
+    # '0cffff0c' will be at the front of each split telemetry frame
     data_frame_search = re.split(r'(?=0cffff0c)', packet)
 
+    # 
     return data_frame_search
 
 def hex_string_to_2n(data_n_frame: str) ->list[str]:
