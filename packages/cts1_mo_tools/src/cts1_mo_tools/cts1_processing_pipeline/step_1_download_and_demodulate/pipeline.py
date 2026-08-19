@@ -3,10 +3,10 @@
 List every SatNOGS observation for a satellite (paged across all statuses),
 land it in DuckDB's `raw_observations`, then decode every observation with
 audio and/or already-demodulated packets: download the `.ogg` into a
-throwaway temp dir and run it through both `sso_rx_replay
---forensics-report` and `gr_satellites` (via `sox`-converted WAV), download
-any `demoddata` packet URLs directly, and land every decoded frame/PDU in
-DuckDB's `raw_packets`.
+throwaway temp dir and run it through `askew_demod_from_file`,
+`sso_rx_replay --forensics-report`, and `gr_satellites` (via
+`sox`-converted WAV), download any `demoddata` packet URLs directly, and
+land every decoded frame/PDU in DuckDB's `raw_packets`.
 
 Invoked via the top-level CLI's `step_1` subcommand -- see
 `cts1_mo_tools.cts1_processing_pipeline.cli`.
@@ -33,6 +33,7 @@ from cts1_mo_tools.cts1_decode_satnogs_packets import verify_csp_packet_crc32c
 
 from . import db
 from .audio import convert_ogg_to_wav, download_audio
+from .decode_askew_demod import run_askew_demod_from_file
 from .decode_gr_satellites import DEFAULT_SATCFG_PATH, run_gr_satellites_pdu
 from .decode_gr_satellites_kiss import run_gr_satellites_kiss
 from .decode_satnogs_data_demod import run_satnogs_data_demod
@@ -42,6 +43,7 @@ DEFAULT_DB_PATH = Path("output/cts1_processing_pipeline.duckdb")
 CHECKPOINT_INTERVAL = 100
 DEMOD_DOWNLOAD_WORKERS = 50
 DECODERS = (
+    "askew_demod_from_file",
     "sso_rx_replay",
     "gr_satellites_pdu",
     "gr_satellites_kiss",
@@ -51,6 +53,7 @@ DECODERS = (
 # with, for `decoder_runs.version`. None means the decoder has no versioned
 # external tool (satnogs_data_demod just downloads pre-decoded packet URLs).
 _DECODER_VERSION_COMMAND = {
+    "askew_demod_from_file": "askew_demod_from_file",
     "sso_rx_replay": "sso_rx_replay",
     "gr_satellites_pdu": "gr_satellites",
     "gr_satellites_kiss": "gr_satellites",
@@ -143,9 +146,10 @@ def _process_audio(
 ) -> list[dict[str, Any]]:
     """Download one observation's audio and run all three audio decoders on it.
 
-    sso_rx_replay, gr_satellites --hexdump, and gr_satellites --kiss_out all
-    now finish in a couple of seconds, so they all run at normal (small pool)
-    concurrency, sharing one temp dir that's cleaned up before returning.
+    askew_demod_from_file, sso_rx_replay, gr_satellites --hexdump, and
+    gr_satellites --kiss_out all now finish in a couple of seconds, so they
+    all run at normal (small pool) concurrency, sharing one temp dir that's
+    cleaned up before returning.
     """
     obs_id = obs["id"]
     audio_url = obs["payload"]
@@ -157,6 +161,27 @@ def _process_audio(
         except Exception:  # noqa: BLE001
             logger.exception(f"Failed to download audio for observation {obs_id}")
             return rows
+
+        try:
+            askew_rows = run_askew_demod_from_file(ogg_path)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                f"askew_demod_from_file decode failed for observation {obs_id}"
+            )
+            askew_rows = []
+        for row in askew_rows:
+            rows.append(  # noqa: PERF401
+                {
+                    "observation_id": obs_id,
+                    "decoder": "askew_demod_from_file",
+                    "audio_url": audio_url,
+                    "ingested_at": datetime.now(UTC),
+                    "received_at": _received_at(
+                        obs, time_in_file_ms=row["time_in_file_ms"]
+                    ),
+                    **row,
+                }
+            )
 
         sso_rows = run_sso_rx_replay(ogg_path, report_filename=ogg_path.name)
         for row in sso_rows:
@@ -315,9 +340,10 @@ def run(  # noqa: C901, PLR0913, PLR0915
             like "3 days" (relative to now) or an ISO 8601 date/datetime.
             None means no lower bound (full history).
         limit: Cap the number of observations decoded this run (for testing).
-        workers: Concurrency for the decoders (sso_rx_replay, gr_satellites
-            --hexdump, gr_satellites --kiss_out, satnogs_data_demod), which
-            each finish in a few seconds (satnogs_data_demod spins up its own
+        workers: Concurrency for the decoders (askew_demod_from_file,
+            sso_rx_replay, gr_satellites --hexdump, gr_satellites
+            --kiss_out, satnogs_data_demod), which each finish in a few
+            seconds (satnogs_data_demod spins up its own
             nested pool -- see DEMOD_DOWNLOAD_WORKERS -- for its own
             observation's packet downloads).
         temp_dir: Directory to create per-observation temp dirs (audio
