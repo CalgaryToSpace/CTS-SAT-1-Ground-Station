@@ -14,7 +14,7 @@ _DEFAULT_PACKET = {
     "data_hex": "c2a28a00aa",
     "data_length_bytes": 1,
     "csp_crc_valid": True,
-    "rssi": -1.0,
+    "rssi_db": -1.0,
     "rs_corrected_error_count": 0,
     "rs_correctable": True,
     "time_in_file_ms": 1000.0,
@@ -213,7 +213,7 @@ def test_other_decoder_matches_baseline_via_observation_window_overlap() -> None
                 received_at="2026-08-12T23:59:00",  # way outside 15 min
                 data_hex="c2a28a00cc",
                 csp_crc_valid=None,
-                rssi=None,
+                rssi_db=None,
                 rs_corrected_error_count=None,
                 rs_correctable=True,
                 time_in_file_ms=None,
@@ -257,7 +257,7 @@ def test_other_decoder_matches_baseline_via_fifteen_minute_tolerance() -> None:
                 received_at="2026-08-12T19:40:00",  # 5 min after baseline
                 data_hex="c2a28a00dd",
                 csp_crc_valid=None,
-                rssi=None,
+                rssi_db=None,
                 rs_corrected_error_count=None,
                 rs_correctable=True,
             ),
@@ -293,7 +293,7 @@ def test_other_decoder_not_matched_becomes_its_own_leftover_row() -> None:
                 received_at="2026-08-12T23:59:00",
                 data_hex="c2a28a00ee",
                 csp_crc_valid=True,  # already has a valid CRC -- no completion needed
-                rssi=None,
+                rssi_db=None,
                 rs_corrected_error_count=None,
                 rs_correctable=True,
                 time_in_file_ms=None,
@@ -308,7 +308,7 @@ def test_other_decoder_not_matched_becomes_its_own_leftover_row() -> None:
     assert row["received_at_source"] == "estimated"
     assert row["received_at"] == _dt("2026-08-12T23:59:00")
     assert json.loads(row["decoders"]) == ["satnogs_data_demod"]
-    assert row["rssi"] is None
+    assert row["rssi_db"] is None
     assert row["rs_corrected_error_count"] is None
 
 
@@ -343,7 +343,7 @@ def test_leftover_content_clusters_by_fifteen_minute_gaps() -> None:
                 received_at="2026-08-12T10:05:00",
                 data_hex="c2a28a00ff",
                 csp_crc_valid=True,
-                rssi=None,
+                rssi_db=None,
                 rs_corrected_error_count=None,
                 rs_correctable=True,
                 time_in_file_ms=None,
@@ -354,7 +354,7 @@ def test_leftover_content_clusters_by_fifteen_minute_gaps() -> None:
                 received_at="2026-08-12T10:12:00",  # 7 min later, within 15 min
                 data_hex="c2a28a00ff",
                 csp_crc_valid=True,
-                rssi=None,
+                rssi_db=None,
                 rs_corrected_error_count=None,
                 rs_correctable=True,
                 time_in_file_ms=None,
@@ -365,7 +365,7 @@ def test_leftover_content_clusters_by_fifteen_minute_gaps() -> None:
                 received_at="2026-08-13T10:05:00",  # a day later
                 data_hex="c2a28a00ff",
                 csp_crc_valid=True,
-                rssi=None,
+                rssi_db=None,
                 rs_corrected_error_count=None,
                 rs_correctable=True,
                 time_in_file_ms=None,
@@ -414,7 +414,7 @@ def test_demod_packet_missing_crc_merges_with_sso_baseline() -> None:
                 data_hex=payload_hex,  # missing its trailing CRC
                 data_length_bytes=len(payload),
                 csp_crc_valid=False,  # step 1 already flagged this invalid
-                rssi=None,
+                rssi_db=None,
                 rs_corrected_error_count=None,
                 rs_correctable=True,
                 time_in_file_ms=None,
@@ -461,7 +461,7 @@ def test_demod_only_packet_gets_a_completed_self_consistent_crc() -> None:
                 data_hex=payload.hex(),
                 data_length_bytes=len(payload),
                 csp_crc_valid=False,
-                rssi=None,
+                rssi_db=None,
                 rs_corrected_error_count=None,
                 rs_correctable=True,
                 time_in_file_ms=None,
@@ -508,7 +508,7 @@ def test_demod_packet_with_already_valid_crc_is_left_alone() -> None:
                 data_hex=full_hex,
                 data_length_bytes=len(payload) + 4,
                 csp_crc_valid=True,
-                rssi=None,
+                rssi_db=None,
                 rs_corrected_error_count=None,
                 rs_correctable=True,
                 time_in_file_ms=None,
@@ -565,7 +565,7 @@ def test_output_schema_and_json_columns() -> None:
         "csp_crc_source",
         "received_at",
         "received_at_source",
-        "rssi",
+        "rssi_db",
         "rs_corrected_error_count",
         "rs_correctable",
         "packet_count",

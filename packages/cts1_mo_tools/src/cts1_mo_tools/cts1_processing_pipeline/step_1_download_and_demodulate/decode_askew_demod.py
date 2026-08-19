@@ -40,6 +40,7 @@ def parse_askew_line(line: str) -> dict[str, Any] | None:
         "data_length_bytes": obj["data_length_bytes"],
         "rs_corrected_error_count": obj["rs_corrected_error_count"],
         "rs_correctable": obj["rs_correctable"],
+        "rssi_db": obj["rssi_db"],
         # Skip including - We calculate it in here anyway - "crc_pass": obj["crc_pass"],
     }
 

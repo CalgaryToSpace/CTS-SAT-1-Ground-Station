@@ -1,4 +1,7 @@
 import pytest
+from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate.decode_askew_demod import (  # noqa: E501
+    parse_askew_line,
+)
 from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate.decode_gr_satellites import (  # noqa: E501
     parse_hexdump_stdout,
 )
@@ -44,7 +47,7 @@ def test_parse_forensics_line_frame() -> None:
     row = parse_forensics_line(line)
     assert row == {
         "time_in_file_ms": 45802.229,
-        "rssi": -2.1,
+        "rssi_db": -2.1,
         "rs_corrected_error_count": None,
         "rs_correctable": False,
         "data_hex": "c2228a001091",
@@ -60,7 +63,7 @@ def test_parse_forensics_line_frame_rs_corrected() -> None:
     row = parse_forensics_line(line)
     assert row == {
         "time_in_file_ms": 45802.229,
-        "rssi": -2.1,
+        "rssi_db": -2.1,
         "rs_corrected_error_count": 3,
         "rs_correctable": True,
         "data_hex": "c2228a001091",
@@ -87,6 +90,34 @@ def test_parse_forensics_line_blank_and_malformed() -> None:
     assert parse_forensics_line("") is None
     assert parse_forensics_line("   ") is None
     assert parse_forensics_line("not json") is None
+
+
+# ---------------------------------------------------------------------------
+# askew_demod_from_file JSONL parsing
+# ---------------------------------------------------------------------------
+
+
+def test_parse_askew_line_frame() -> None:
+    line = (
+        '{"data_length_bytes":138,"time_in_file_ms":279888.092,'
+        '"rs_corrected_error_count":0,"rs_correctable":true,"crc_pass":true,'
+        '"rssi_db":-3.4,"data_hex":"c2a28a00"}'
+    )
+    row = parse_askew_line(line)
+    assert row == {
+        "time_in_file_ms": 279888.092,
+        "data_hex": "c2a28a00",
+        "data_length_bytes": 138,
+        "rs_corrected_error_count": 0,
+        "rs_correctable": True,
+        "rssi_db": -3.4,
+    }
+
+
+def test_parse_askew_line_blank_and_malformed() -> None:
+    assert parse_askew_line("") is None
+    assert parse_askew_line("   ") is None
+    assert parse_askew_line("not json") is None
 
 
 # ---------------------------------------------------------------------------
