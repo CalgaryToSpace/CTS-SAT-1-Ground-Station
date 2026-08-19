@@ -15,7 +15,9 @@ __all__ = [
     "DEFAULT_PARQUET_PATH",
     "latest_beacons",
     "load_beacon_window",
+    "load_bulk_file_downlink_packets",
     "load_packet_window",
+    "load_tcmd_response_packets",
 ]
 
 from typing import TYPE_CHECKING
@@ -27,6 +29,7 @@ from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from datetime import datetime
     from pathlib import Path
 
@@ -76,6 +79,61 @@ def load_beacon_window(
     lf = lf.filter(pl.col("packet_type").is_in(BEACON_PACKET_TYPES))
     if since is not None:
         lf = lf.filter(pl.col("received_at") >= since)
+    return lf.sort("received_at").collect()
+
+
+def _filter_to_ranges(
+    lf: pl.LazyFrame, ranges: Sequence[tuple[datetime, datetime]]
+) -> pl.LazyFrame:
+    """Restrict `lf` to rows whose `received_at` falls in any of `ranges`
+    (each an inclusive [start, end] window). An empty `ranges` means no time
+    filter at all -- every row.
+    """
+    if not ranges:
+        return lf
+    in_any_range = pl.any_horizontal(
+        [
+            pl.col("received_at").is_between(start, end, closed="both")
+            for start, end in ranges
+        ]
+    )
+    return lf.filter(in_any_range)
+
+
+def load_bulk_file_downlink_packets(
+    path: Path = DEFAULT_PARQUET_PATH,
+    *,
+    ranges: Sequence[tuple[datetime, datetime]] = (),
+) -> pl.DataFrame:
+    """`BULK_FILE_DOWNLINK` packets restricted to the union of `ranges`,
+    ordered by `bulk_file_offset` (the order file-reassembly cares about,
+    not receipt order).
+
+    `ranges=()` (the default) means no time filter -- every such packet ever
+    decoded. The web UI's File Reassembler page is what narrows this down to
+    one or more `received_at` windows isolating a single download.
+    """
+    lf = _scan(path)
+    if lf is None:
+        return pl.DataFrame()
+    lf = lf.filter(pl.col("packet_type") == "BULK_FILE_DOWNLINK")
+    lf = _filter_to_ranges(lf, ranges)
+    return lf.sort("bulk_file_offset").collect()
+
+
+def load_tcmd_response_packets(
+    path: Path = DEFAULT_PARQUET_PATH,
+    *,
+    ranges: Sequence[tuple[datetime, datetime]] = (),
+) -> pl.DataFrame:
+    """`TCMD_RESPONSE` packets restricted to the union of `ranges`, oldest
+    first -- see `load_bulk_file_downlink_packets` for the `ranges` contract.
+    """
+    lf = _scan(path)
+    if lf is None:
+        return pl.DataFrame()
+    lf = lf.filter(pl.col("packet_type") == "TCMD_RESPONSE")
+    lf = _filter_to_ranges(lf, ranges)
     return lf.sort("received_at").collect()
 
 

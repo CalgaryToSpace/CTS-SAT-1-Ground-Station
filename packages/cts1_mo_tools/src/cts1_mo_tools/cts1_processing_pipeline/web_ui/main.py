@@ -17,7 +17,6 @@ from __future__ import annotations
 
 # tyro resolves dataclass field annotations at runtime (via get_type_hints),
 # so imports used only in annotations below still need to be real imports.
-# ruff: noqa: TC003
 
 __all__ = ["main"]
 
@@ -31,6 +30,12 @@ from nicegui import ui
 
 from . import data as beacon_data
 from .charts import BEACON_CHART_GROUPS, OTHER_CHART_GROUPS, chart_option
+from .file_reassembly import (
+    BulkHeaderCandidate,
+    ReassemblyResult,
+    find_header_candidates,
+    reassemble_bulk_chunks,
+)
 
 if TYPE_CHECKING:
     import polars as pl
@@ -262,16 +267,301 @@ def _build_home_page(args: Args) -> None:
     ui.timer(REFRESH_INTERVAL_SEC, live_status.refresh)
 
 
-def _build_file_reassembler_page() -> None:
-    with _page_shell():
-        ui.label("File Reassembler").classes("text-2xl font-bold")
-        with ui.card().classes("w-full items-center p-12"):
-            ui.icon("construction", size="xl", color="grey")
-            ui.label("Coming soon").classes("text-xl text-grey")
+@dataclass
+class _TimeRangeRow:
+    """One (mutable) start/end pair the user is editing in the range list."""
+
+    start: str | None = None
+    end: str | None = None
+
+
+RANGE_INPUT_MASK = "####-##-## ##:##:##"
+RANGE_INPUT_PLACEHOLDER = "YYYY-MM-DD HH:MM:SS"
+
+
+def _parse_range_input(value: str | None) -> datetime | None:
+    """Parse a `RANGE_INPUT_MASK`-shaped value ("YYYY-MM-DD HH:MM:SS"),
+    treated as UTC (like every other timestamp in this dashboard).
+
+    A plain masked text input rather than `<input type=datetime-local>` is
+    deliberate: that native picker's on-screen *display* follows the
+    browser/OS locale (day-first vs. month-first, 12h vs. 24h), even though
+    its underlying value is always ISO 8601 -- ambiguous exactly where a
+    ground-station operator can least afford it. The mask forces
+    YYYY-MM-DD/24h ordering no matter whose browser this runs in.
+
+    Returns None for anything that doesn't (yet) parse -- an in-progress or
+    invalid edit is just treated the same as an empty row rather than
+    raising, since this runs on every keystroke.
+    """
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value).replace(tzinfo=UTC)
+    except ValueError:
+        return None
+
+
+def _valid_ranges(rows: list[_TimeRangeRow]) -> list[tuple[datetime, datetime]]:
+    """Every row with both a start and an end, start <= end. Rows the user
+    hasn't finished filling in (or got backwards) are silently skipped
+    rather than erroring -- they just don't contribute to the selection yet.
+    """
+    ranges = []
+    for row in rows:
+        start = _parse_range_input(row.start)
+        end = _parse_range_input(row.end)
+        if start is not None and end is not None and start <= end:
+            ranges.append((start, end))
+    return ranges
+
+
+def _byte_range_str(start: int, end: int) -> str:
+    return f"{start:,}-{end:,} ({end - start:,} bytes)"
+
+
+def _duplicates_section(result: ReassemblyResult) -> None:
+    with ui.row().classes("items-center gap-2"):
+        ui.icon("error", color="negative")
+        ui.label(
+            f"{len(result.duplicates)} offset(s) appear more than once -- "
+            "narrow the time range(s) until every offset is distinct "
+            "before trusting the reassembled bytes below."
+        ).classes("text-negative")
+    columns = [
+        {"name": "offset", "label": "Offset", "field": "offset"},
+        {"name": "count", "label": "Copies", "field": "count"},
+        {"name": "consistent", "label": "Agree?", "field": "consistent"},
+    ]
+    rows = [
+        {
+            "offset": d.offset,
+            "count": d.count,
+            "consistent": "yes" if d.consistent else "CONFLICTING BYTES",
+        }
+        for d in result.duplicates[:50]
+    ]
+    ui.table(columns=columns, rows=rows, row_key="offset").classes("w-full")
+    if len(result.duplicates) > len(rows):
+        ui.label(f"...and {len(result.duplicates) - len(rows)} more.").classes(
+            "text-caption text-grey"
+        )
+
+
+def _gaps_section(result: ReassemblyResult) -> None:
+    if result.is_gapless:
+        with ui.row().classes("items-center gap-2"):
+            ui.icon("check_circle", color="positive")
+            ui.label("No gaps -- every byte in range is covered.").classes(
+                "text-positive"
+            )
+        return
+
+    with ui.row().classes("items-center gap-2"):
+        ui.icon("warning", color="warning")
+        ui.label(
+            f"{len(result.gaps)} missing byte range(s) -- these need to be "
+            "re-downlinked:"
+        ).classes("text-warning")
+    for start, end in result.gaps[:50]:
+        ui.label(_byte_range_str(start, end)).classes("font-mono text-sm")
+    if len(result.gaps) > 50:  # noqa: PLR2004
+        ui.label(f"...and {len(result.gaps) - 50} more.").classes(
+            "text-caption text-grey"
+        )
+
+
+def _sha256_comparison(result: ReassemblyResult, expected: str | None) -> None:
+    ui.label(f"SHA-256 of assembled bytes: {result.sha256}").classes(
+        "font-mono text-sm"
+    )
+    if not expected:
+        ui.label("No SHA-256 to compare against -- pick a header below.").classes(
+            "text-caption text-grey"
+        )
+    elif len(expected) < 64:  # noqa: PLR2004
+        ui.label(
+            f"Header's SHA-256 was truncated ({len(expected)}/64 hex chars) -- "
+            "can't verify."
+        ).classes("text-caption text-grey")
+    elif expected == result.sha256:
+        with ui.row().classes("items-center gap-2"):
+            ui.icon("check_circle", color="positive")
+            ui.label("Matches the header's SHA-256.").classes("text-positive")
+    else:
+        with ui.row().classes("items-center gap-2"):
+            ui.icon("error", color="negative")
+            ui.label("Does NOT match the header's SHA-256.").classes("text-negative")
+
+
+def _best_named_candidate(
+    candidates: list[BulkHeaderCandidate],
+) -> BulkHeaderCandidate | None:
+    """Whichever candidate looks most trustworthy: prefer one with a full
+    (untruncated, 64-hex-char) SHA-256, then one with a known file_size,
+    tie-broken by most recently received.
+    """
+    named = [c for c in candidates if c.file]
+    if not named:
+        return None
+
+    def _score(c: BulkHeaderCandidate) -> tuple[int, int, datetime]:
+        has_full_sha256 = c.sha256 is not None and len(c.sha256) == 64  # noqa: PLR2004
+        return (int(has_full_sha256), int(c.file_size is not None), c.received_at)
+
+    return max(named, key=_score)
+
+
+def _header_candidates_table(candidates: list[BulkHeaderCandidate]) -> str | None:
+    """Render the found header candidates and return the SHA-256 (possibly
+    None/truncated) of whichever one looks most trustworthy -- see
+    `_best_named_candidate`.
+    """
+    if not candidates:
+        ui.label(
+            "No TCMD_RESPONSE header found in the selected range(s) -- that's "
+            "fine, headers are sometimes missing entirely; just cross-check "
+            "the file name/size/hash some other way."
+        ).classes("text-caption text-grey")
+        return None
+
+    columns = [
+        {"name": "received_at", "label": "Received", "field": "received_at"},
+        {"name": "action", "label": "Action", "field": "action"},
+        {"name": "file", "label": "File", "field": "file"},
+        {"name": "file_size", "label": "Size (bytes)", "field": "file_size"},
+        {"name": "sha256", "label": "SHA-256", "field": "sha256"},
+    ]
+    rows = [
+        {
+            "received_at": f"{c.received_at:%Y-%m-%d %H:%M:%S}",
+            "action": c.action or "",
+            "file": c.file or "",
+            "file_size": f"{c.file_size:,}" if c.file_size is not None else "",
+            "sha256": (c.sha256 or "")[:16] + ("..." if c.sha256 else ""),
+        }
+        for c in candidates
+    ]
+    ui.table(columns=columns, rows=rows, row_key="received_at").classes("w-full")
+
+    best = _best_named_candidate(candidates)
+    return best.sha256 if best is not None else None
+
+
+def _reassembler_results(path: Path, ranges: list[tuple[datetime, datetime]]) -> None:
+    if not ranges:
+        ui.label(
+            "No time range selected yet -- fill in a start and end above "
+            "(an empty selection intentionally shows nothing, rather than "
+            "every BULK_FILE_DOWNLINK packet ever decoded)."
+        ).classes("text-caption text-grey")
+        return
+
+    chunks = beacon_data.load_bulk_file_downlink_packets(path, ranges=ranges)
+    tcmd_responses = beacon_data.load_tcmd_response_packets(path, ranges=ranges)
+    candidates = find_header_candidates(tcmd_responses)
+
+    with ui.card().classes("w-full"):
+        ui.label("Header candidates").classes("text-lg font-bold")
+        expected_sha256 = _header_candidates_table(candidates)
+
+    with ui.card().classes("w-full"):
+        ui.label("BULK_FILE_DOWNLINK chunks").classes("text-lg font-bold")
+        if chunks.is_empty():
+            ui.label("No BULK_FILE_DOWNLINK packets in the selected range(s).").classes(
+                "text-caption text-grey"
+            )
+            return
+
+        result = reassemble_bulk_chunks(chunks)
+        ui.label(
+            f"{result.total_chunks:,} packet(s), {result.unique_offsets:,} "
+            f"distinct offset(s), spanning {result.span_bytes:,} bytes."
+        ).classes("text-caption text-grey")
+
+        if result.is_distinct_per_offset:
+            with ui.row().classes("items-center gap-2"):
+                ui.icon("check_circle", color="positive")
+                ui.label("Every offset is distinct.").classes("text-positive")
+        else:
+            _duplicates_section(result)
+
+        _gaps_section(result)
+        _sha256_comparison(result, expected_sha256)
+
+        best = _best_named_candidate(candidates)
+        filename = Path(best.file).name if best is not None and best.file else None
+        ui.button(
+            "Download reassembled bytes",
+            icon="download",
+            on_click=lambda: ui.download.content(
+                result.data, filename=filename or "reassembled_file.bin"
+            ),
+        )
+        if not (result.is_distinct_per_offset and result.is_gapless):
             ui.label(
-                "This tool will reassemble downlinked bulk files from "
-                "BULK_FILE_DOWNLINK packet chunks."
+                "Duplicate offsets and/or gaps are present -- the download "
+                "will still work (missing bytes are filled with 0x00), but "
+                "isn't a verified, complete copy of the file yet."
             ).classes("text-caption text-grey")
+
+
+def _build_file_reassembler_page(args: Args) -> None:
+    rows: list[_TimeRangeRow] = [_TimeRangeRow()]
+
+    @ui.refreshable
+    def range_editor() -> None:
+        for i, row in enumerate(rows):
+            with ui.row().classes("w-full items-center gap-2"):
+
+                def _set_start(e: events.ValueChangeEventArguments, row=row) -> None:  # noqa: ANN001
+                    row.start = e.value
+
+                def _set_end(e: events.ValueChangeEventArguments, row=row) -> None:  # noqa: ANN001
+                    row.end = e.value
+
+                ui.input(
+                    "Start (UTC)",
+                    value=row.start or "",
+                    placeholder=RANGE_INPUT_PLACEHOLDER,
+                    on_change=_set_start,
+                ).props(f'mask="{RANGE_INPUT_MASK}"').classes("w-56")
+                ui.input(
+                    "End (UTC)",
+                    value=row.end or "",
+                    placeholder=RANGE_INPUT_PLACEHOLDER,
+                    on_change=_set_end,
+                ).props(f'mask="{RANGE_INPUT_MASK}"').classes("w-56")
+                if len(rows) > 1:
+
+                    def _remove(i: int = i) -> None:
+                        rows.pop(i)
+                        range_editor.refresh()
+
+                    ui.button(icon="close", on_click=_remove).props("flat round dense")
+        ui.button(
+            "Add time range",
+            icon="add",
+            on_click=lambda: (rows.append(_TimeRangeRow()), range_editor.refresh()),
+        ).props("flat")
+
+    @ui.refreshable
+    def results() -> None:
+        _reassembler_results(args.parquet_path, _valid_ranges(rows))
+
+    with _page_shell():
+        with ui.row().classes("w-full items-center justify-between"):
+            ui.label("File Reassembler").classes("text-2xl font-bold")
+            ui.button("Analyze", icon="search", on_click=results.refresh)
+        ui.label(
+            "Pick one or more UTC time ranges covering a single bulk file "
+            "download. Missing time boundaries on a row mean that row is "
+            "ignored, so an empty first row (the default) selects nothing "
+            "until you fill one in."
+        ).classes("text-caption text-grey")
+        with ui.card().classes("w-full"):
+            range_editor()
+        results()
 
 
 def _build_pages(args: Args) -> None:
@@ -288,7 +578,7 @@ def _build_pages(args: Args) -> None:
     @ui.page("/file-reassembler")
     def file_reassembler_page() -> None:
         _drawer()
-        _build_file_reassembler_page()
+        _build_file_reassembler_page(args)
 
 
 def main() -> None:
