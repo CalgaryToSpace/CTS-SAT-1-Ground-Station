@@ -307,6 +307,37 @@ def _parse_range_input(value: str | None) -> datetime | None:
         return None
 
 
+def _validate_datetime_field(value: str | None) -> str | None:
+    """A `ui.input` `validation` callable for a lone Start/End field: an
+    empty value is fine (that row just isn't contributing to the selection
+    yet), but a non-empty one that doesn't parse gets flagged rather than
+    silently doing nothing, per `RANGE_INPUT_MASK`.
+    """
+    if value and _parse_range_input(value) is None:
+        return f"Expected {RANGE_INPUT_PLACEHOLDER}"
+    return None
+
+
+def _make_end_validator(row: _TimeRangeRow) -> Callable[[str | None], str | None]:
+    """Like `_validate_datetime_field`, plus flagging an End that's before
+    its row's Start. A factory (rather than a closure written inline in the
+    row loop) so each row's validator is bound to *that* row's `row`
+    object, not whatever the loop variable last pointed at.
+    """
+
+    def _validate(value: str | None) -> str | None:
+        error = _validate_datetime_field(value)
+        if error is not None:
+            return error
+        start = _parse_range_input(row.start)
+        end = _parse_range_input(value)
+        if start is not None and end is not None and end < start:
+            return "End must be after Start"
+        return None
+
+    return _validate
+
+
 def _valid_ranges(rows: list[_TimeRangeRow]) -> list[tuple[datetime, datetime]]:
     """Every row with both a start and an end, start <= end. Rows the user
     hasn't finished filling in (or got backwards) are silently skipped
@@ -636,9 +667,28 @@ def _build_file_reassembler_page(args: Args) -> None:
     def range_editor() -> None:
         for i, row in enumerate(rows):
             with ui.row().classes("w-full items-center gap-2"):
+                # A forward-reference box for the End input, filled in right
+                # after it's created below -- `_set_start` only *calls*
+                # into it once the user actually types (well after that
+                # happens), but it's defined beforehand since Start renders
+                # first. A plain loop-variable capture wouldn't work here:
+                # every row's `_set_start` needs *its own* End input, not
+                # whichever row's End happened to be created last.
+                end_input_ref: dict[str, ui.input] = {}
 
-                def _set_start(e: events.ValueChangeEventArguments, row=row) -> None:  # noqa: ANN001
+                def _set_start(
+                    e: events.ValueChangeEventArguments,
+                    row: _TimeRangeRow = row,
+                    end_input_ref: dict[str, ui.input] = end_input_ref,
+                ) -> None:
                     row.start = e.value
+                    # End's validity (the "must be after Start" half of it)
+                    # depends on Start too, but NiceGUI only re-runs an
+                    # input's own `validation` automatically on *its own*
+                    # value changing -- ask it to re-check explicitly so a
+                    # later Start edit doesn't leave a stale/missing error
+                    # on End.
+                    end_input_ref["input"].validate(return_result=False)
 
                 def _set_end(e: events.ValueChangeEventArguments, row=row) -> None:  # noqa: ANN001
                     row.end = e.value
@@ -648,13 +698,19 @@ def _build_file_reassembler_page(args: Args) -> None:
                     value=row.start or "",
                     placeholder=RANGE_INPUT_PLACEHOLDER,
                     on_change=_set_start,
+                    validation=_validate_datetime_field,
                 ).props(f'mask="{RANGE_INPUT_MASK}"').classes("w-56")
-                ui.input(
-                    "End (UTC)",
-                    value=row.end or "",
-                    placeholder=RANGE_INPUT_PLACEHOLDER,
-                    on_change=_set_end,
-                ).props(f'mask="{RANGE_INPUT_MASK}"').classes("w-56")
+                end_input_ref["input"] = (
+                    ui.input(
+                        "End (UTC)",
+                        value=row.end or "",
+                        placeholder=RANGE_INPUT_PLACEHOLDER,
+                        on_change=_set_end,
+                        validation=_make_end_validator(row),
+                    )
+                    .props(f'mask="{RANGE_INPUT_MASK}"')
+                    .classes("w-56")
+                )
                 if len(rows) > 1:
 
                     def _remove(i: int = i) -> None:
@@ -673,9 +729,7 @@ def _build_file_reassembler_page(args: Args) -> None:
         _reassembler_results(args.parquet_path, _valid_ranges(rows))
 
     with _page_shell():
-        with ui.row().classes("w-full items-center justify-between"):
-            ui.label("File Reassembler").classes("text-2xl font-bold")
-            ui.button("Analyze", icon="search", on_click=results.refresh)
+        ui.label("File Reassembler").classes("text-2xl font-bold")
         ui.label(
             "Pick one or more UTC time ranges covering a single bulk file "
             "download. Missing time boundaries on a row mean that row is "
@@ -684,6 +738,7 @@ def _build_file_reassembler_page(args: Args) -> None:
         ).classes("text-caption text-grey")
         with ui.card().classes("w-full"):
             range_editor()
+        ui.button("Analyze", icon="search", on_click=results.refresh)
         results()
 
 
