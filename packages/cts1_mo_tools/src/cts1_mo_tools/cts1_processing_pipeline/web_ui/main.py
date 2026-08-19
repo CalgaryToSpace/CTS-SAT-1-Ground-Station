@@ -271,10 +271,9 @@ def _build_file_reassembler_page() -> None:
 
 def _build_pages(args: Args) -> None:
     def _drawer() -> None:
-        with ui.left_drawer(value=True).classes("bg-gray-900") as drawer:
+        with ui.left_drawer(value=True).classes("bg-gray-900"):
             ui.link("Home", "/").classes("text-lg p-2")
             ui.link("File Reassembler", "/file-reassembler").classes("text-lg p-2")
-        return drawer
 
     @ui.page("/")
     def home_page() -> None:
