@@ -47,6 +47,32 @@ DECODERS = (
     "gr_satellites_kiss",
     "satnogs_data_demod",
 )
+# Command each decoder's underlying tool is invoked as `<cmd> --version`
+# with, for `decoder_runs.version`. None means the decoder has no versioned
+# external tool (satnogs_data_demod just downloads pre-decoded packet URLs).
+_DECODER_VERSION_COMMAND = {
+    "sso_rx_replay": "sso_rx_replay",
+    "gr_satellites_pdu": "gr_satellites",
+    "gr_satellites_kiss": "gr_satellites",
+    "satnogs_data_demod": None,
+}
+
+
+def _resolve_decoder_versions() -> dict[str, str | None]:
+    """Run `<tool> --version` once per distinct command, first line only."""
+    version_by_command: dict[str, str | None] = {}
+    versions: dict[str, str | None] = {}
+    for decoder, command in _DECODER_VERSION_COMMAND.items():
+        if command is None:
+            versions[decoder] = None
+            continue
+        if command not in version_by_command:
+            proc = _subprocess_registry.run_tracked([command, "--version"], text=True)
+            first_line = proc.stdout.splitlines()[0].strip() if proc.stdout else None
+            version_by_command[command] = first_line
+        versions[decoder] = version_by_command[command]
+    return versions
+
 
 _DURATION_RE = re.compile(
     r"^\s*(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>second|minute|hour|day|week)s?\s*$",
@@ -278,6 +304,7 @@ def run(  # noqa: C901, PLR0913, PLR0915
     limit: int | None = None,
     workers: int = 4,
     temp_dir: Path | None = None,
+    force_rerun: bool = False,
 ) -> None:
     """Run the pipeline once.
 
@@ -296,6 +323,10 @@ def run(  # noqa: C901, PLR0913, PLR0915
         temp_dir: Directory to create per-observation temp dirs (audio
             downloads/WAV conversions) under. None uses the platform default
             (see `tempfile`).
+        force_rerun: Ignore the decoder_runs table's record of which
+            observation/decoder pairs have already been run, and rerun every
+            decoder on every candidate observation regardless. New runs are
+            still recorded to decoder_runs as usual.
     """
     logger.info(f"Listing observations for NORAD {norad_id}")
 
@@ -314,7 +345,14 @@ def run(  # noqa: C901, PLR0913, PLR0915
         db.connect(db_path) as con,
         concurrent.futures.ThreadPoolExecutor(max_workers=workers) as fast_executor,
     ):
-        done: set[tuple[int, str]] = db.already_decoded_pairs(con)
+        done: set[tuple[int, str]] = (
+            set() if force_rerun else db.already_decoded_pairs(con)
+        )
+        if force_rerun:
+            logger.info("--force-rerun: ignoring decoder_runs history")
+
+        decoder_versions = _resolve_decoder_versions()
+        logger.info(f"Decoder versions: {decoder_versions}")
 
         def dispatch(batch: list[dict[str, Any]]) -> None:
             nonlocal total_decoded
@@ -339,6 +377,7 @@ def run(  # noqa: C901, PLR0913, PLR0915
                         .alias("csp_crc_valid")
                     )
                     db.append_packets(con, df)
+                db.record_decoder_runs(con, obs["id"], decoder_versions)
                 for decoder in DECODERS:
                     done.add((obs["id"], decoder))
                 total_decoded += 1

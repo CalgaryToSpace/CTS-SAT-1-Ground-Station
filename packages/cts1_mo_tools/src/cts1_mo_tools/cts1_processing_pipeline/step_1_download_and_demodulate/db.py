@@ -1,38 +1,47 @@
 """DuckDB landing-zone tables for the processing pipeline.
 
-Two tables, both append/upsert-friendly and tolerant of new columns showing
+Three tables, all append/upsert-friendly and tolerant of new columns showing
 up in later runs (the SatNOGS API and our decoder wrappers are both allowed
 to grow fields over time):
 
   - raw_observations: one row per SatNOGS observation, upserted by `id`.
   - raw_packets: one row per decoded frame/PDU (from either decoder),
     append-only.
+  - decoder_runs: one row per (observation_id, decoder) that has been run,
+    upserted by that pair (primary key), along with the decoder tool's
+    version at the time. Recorded unconditionally -- even when a decoder
+    finds no packets -- so an observation/decoder pair with no output isn't
+    retried on every subsequent run.
 """
 
 from __future__ import annotations
 
 __all__ = [
+    "DECODER_RUNS_TABLE",
     "RAW_OBSERVATIONS_TABLE",
     "RAW_PACKETS_TABLE",
     "already_decoded_pairs",
     "append_packets",
     "connect",
     "export_parquets",
+    "record_decoder_runs",
     "upsert_observations",
 ]
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import duckdb
+import polars as pl
 from loguru import logger
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from pathlib import Path
-
-    import polars as pl
 
 RAW_OBSERVATIONS_TABLE = "raw_observations"
 RAW_PACKETS_TABLE = "raw_packets"
+DECODER_RUNS_TABLE = "decoder_runs"
 
 
 def connect(db_path: Path) -> duckdb.DuckDBPyConnection:
@@ -196,6 +205,56 @@ def append_packets(con: duckdb.DuckDBPyConnection, df: pl.DataFrame) -> None:
     logger.info(f"{RAW_PACKETS_TABLE}: appended {len(df)} row(s)")
 
 
+def record_decoder_runs(
+    con: duckdb.DuckDBPyConnection,
+    observation_id: int,
+    decoder_versions: Mapping[str, str | None],
+) -> None:
+    """Record that each decoder in `decoder_versions` has been run.
+
+    `decoder_versions` maps decoder name to that decoder's tool version
+    (e.g. the first line of `<tool> --version`), or None when the decoder
+    has no versioned external tool.
+
+    Upserted by (observation_id, decoder): rerunning a pair (e.g. via
+    --force-rerun-decoders) just bumps `run_at`/`version` rather than adding
+    a duplicate row.
+    """
+    run_at = datetime.now(UTC).replace(tzinfo=None)
+    rows = [
+        {
+            "observation_id": observation_id,
+            "decoder": decoder,
+            "run_at": run_at,
+            "version": version,
+        }
+        for decoder, version in decoder_versions.items()
+    ]
+    if not rows:
+        return
+
+    df = pl.DataFrame(rows)
+    con.register("_incoming_decoder_runs", df)
+    try:
+        if not _table_exists(con, DECODER_RUNS_TABLE):
+            con.execute(
+                f"CREATE TABLE {_quote_ident(DECODER_RUNS_TABLE)} ("
+                f"observation_id BIGINT, "
+                f"decoder VARCHAR, "
+                f"run_at TIMESTAMP, "
+                f"version VARCHAR, "
+                f"PRIMARY KEY (observation_id, decoder))"
+            )
+        con.execute(
+            f"INSERT INTO {_quote_ident(DECODER_RUNS_TABLE)} BY NAME "  # noqa: S608
+            f"SELECT * FROM _incoming_decoder_runs "
+            f"ON CONFLICT (observation_id, decoder) "
+            f"DO UPDATE SET run_at = excluded.run_at, version = excluded.version"
+        )
+    finally:
+        con.unregister("_incoming_decoder_runs")
+
+
 def export_table_to_parquet(
     con: duckdb.DuckDBPyConnection,
     table: str,
@@ -250,13 +309,23 @@ def export_parquets(con: duckdb.DuckDBPyConnection, db_path: Path) -> None:
         )
         logger.info(f"{RAW_PACKETS_TABLE}: exported to {out_path}")
 
+    if _table_exists(con, DECODER_RUNS_TABLE):
+        out_path = out_dir / f"{DECODER_RUNS_TABLE}.parquet"
+        export_table_to_parquet(
+            con,
+            table=DECODER_RUNS_TABLE,
+            out_path=out_path,
+            order_by_columns=["observation_id", "decoder"],
+        )
+        logger.info(f"{DECODER_RUNS_TABLE}: exported to {out_path}")
+
 
 def already_decoded_pairs(con: duckdb.DuckDBPyConnection) -> set[tuple[int, str]]:
-    """Return {(observation_id, decoder)} already present in raw_packets."""
-    if not _table_exists(con, RAW_PACKETS_TABLE):
+    """Return {(observation_id, decoder)} already recorded in decoder_runs."""
+    if not _table_exists(con, DECODER_RUNS_TABLE):
         return set()
     rows = con.execute(
-        f"SELECT DISTINCT observation_id, decoder "  # noqa: S608
-        f"FROM {_quote_ident(RAW_PACKETS_TABLE)}"
+        f"SELECT observation_id, decoder "  # noqa: S608
+        f"FROM {_quote_ident(DECODER_RUNS_TABLE)}"
     ).fetchall()
     return {(obs_id, decoder) for obs_id, decoder in rows}

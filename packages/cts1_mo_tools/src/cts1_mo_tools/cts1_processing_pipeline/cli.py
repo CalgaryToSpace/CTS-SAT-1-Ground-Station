@@ -61,6 +61,11 @@ class Step1Args:
     downloads/WAV conversions) under. Defaults to the platform temp
     directory (see Python's `tempfile`)."""
 
+    force_rerun_decoders: bool = False
+    """By default, an observation/decoder pair already recorded in the
+    decoder_runs table is skipped. Set this to rerun every decoder on every
+    candidate observation regardless of that history."""
+
 
 @dataclass(frozen=True, slots=True)
 class Step2Args:
@@ -120,6 +125,7 @@ def main() -> None:
                 limit=args.command.limit,
                 workers=args.command.workers,
                 temp_dir=args.command.temp_dir,
+                force_rerun=args.command.force_rerun_decoders,
             )
         elif isinstance(args.command, Step2Args):
             step_2_deduplicate_packets.run(output_dir=args.db_path.parent)
