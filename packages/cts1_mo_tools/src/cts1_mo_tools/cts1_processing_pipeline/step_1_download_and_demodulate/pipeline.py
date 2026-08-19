@@ -394,8 +394,8 @@ def run(  # noqa: C901, PLR0913, PLR0915
                 since_checkpoint += len(page)
                 observations_df = pl.DataFrame(page, infer_schema_length=None)
                 observations_df = observations_df.with_columns(
-                    pl.col("start").cast(pl.Datetime),
-                    pl.col("end").cast(pl.Datetime),
+                    pl.col("start").cast(pl.Datetime).dt.replace_time_zone("UTC"),
+                    pl.col("end").cast(pl.Datetime).dt.replace_time_zone("UTC"),
                     pl.col("demoddata").struct.json_encode(),
                 )
                 db.upsert_observations(con, observations_df)
