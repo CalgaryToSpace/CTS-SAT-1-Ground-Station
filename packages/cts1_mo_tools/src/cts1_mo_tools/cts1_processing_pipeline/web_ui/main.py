@@ -320,8 +320,17 @@ def _byte_range_str(start: int, end: int) -> str:
     return f"{start:,}-{end:,} ({end - start:,} bytes)"
 
 
-def _duplicates_section(result: ReassemblyResult) -> None:
-    if result.has_conflicts:
+def _duplicates_status(result: ReassemblyResult) -> None:
+    """The pass/fail line above the chunks table -- the table itself always
+    renders (see `_chunks_table`) regardless of which of these applies, so
+    it's still there to inspect even mid-download, before every gap is
+    filled in.
+    """
+    if not result.duplicates:
+        with ui.row().classes("items-center gap-2"):
+            ui.icon("check_circle", color="positive")
+            ui.label("Every offset appears exactly once.").classes("text-positive")
+    elif result.has_conflicts:
         with ui.row().classes("items-center gap-2"):
             ui.icon("error", color="negative")
             ui.label(
@@ -339,6 +348,13 @@ def _duplicates_section(result: ReassemblyResult) -> None:
                 "than once (e.g. a retransmission), but every copy agrees "
                 "-- not a problem."
             ).classes("text-caption text-grey")
+
+
+def _chunks_table(result: ReassemblyResult) -> None:
+    """Every distinct offset in the selection -- shown unconditionally
+    (not just when there are duplicates/conflicts to flag) so there's
+    still something to inspect while a download is incomplete.
+    """
     columns = [
         {"name": "offset", "label": "Offset", "field": "offset"},
         {"name": "length", "label": "Length", "field": "length"},
@@ -352,17 +368,17 @@ def _duplicates_section(result: ReassemblyResult) -> None:
     ]
     rows = [
         {
-            "offset": d.offset,
-            "length": ", ".join(str(n) for n in d.lengths),
-            "count": d.count,
-            "distinct_contents_count": d.distinct_contents_count,
-            "consistent": "yes" if d.consistent else "CONFLICTING BYTES",
+            "offset": o.offset,
+            "length": ", ".join(str(n) for n in o.lengths),
+            "count": o.count,
+            "distinct_contents_count": o.distinct_contents_count,
+            "consistent": "yes" if o.consistent else "CONFLICTING BYTES",
         }
-        for d in result.duplicates[:50]
+        for o in result.offsets[:50]
     ]
     ui.table(columns=columns, rows=rows, row_key="offset").classes("w-full")
-    if len(result.duplicates) > len(rows):
-        ui.label(f"...and {len(result.duplicates) - len(rows)} more.").classes(
+    if len(result.offsets) > len(rows):
+        ui.label(f"...and {len(result.offsets) - len(rows)} more.").classes(
             "text-caption text-grey"
         )
 
@@ -510,13 +526,8 @@ def _reassembler_results(path: Path, ranges: list[tuple[datetime, datetime]]) ->
             f"distinct offset(s), spanning {result.span_bytes:,} bytes."
         ).classes("text-caption text-grey")
 
-        if not result.duplicates:
-            with ui.row().classes("items-center gap-2"):
-                ui.icon("check_circle", color="positive")
-                ui.label("Every offset appears exactly once.").classes("text-positive")
-        else:
-            _duplicates_section(result)
-
+        _duplicates_status(result)
+        _chunks_table(result)
         _gaps_section(result)
         _sha256_comparison(result, expected_sha256)
 

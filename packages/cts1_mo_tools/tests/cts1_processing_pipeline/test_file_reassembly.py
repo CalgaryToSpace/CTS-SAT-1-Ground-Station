@@ -62,6 +62,31 @@ def test_clean_contiguous_chunks_reassemble_exactly() -> None:
     assert result.span_bytes == 10
     assert result.covered_bytes == 10
     assert result.sha256 == __import__("hashlib").sha256(b"AAAABBBBCC").hexdigest()
+    # Every distinct offset is summarized in `.offsets`, not just duplicates
+    # -- so a clean, gapless download still has something to show in the
+    # UI's chunks table.
+    assert [o.offset for o in result.offsets] == [0, 4, 8]
+    assert all(o.count == 1 for o in result.offsets)
+    assert all(o.consistent for o in result.offsets)
+
+
+def test_offsets_are_summarized_even_with_gaps_and_no_duplicates() -> None:
+    """A partial/sparse download (missing chunks, but no offset repeated)
+    should still populate `.offsets` -- this is the case the web UI's
+    chunks table needs to keep rendering rather than going blank.
+    """
+    df = _chunks_df(
+        [
+            _chunk(offset=0, data=b"AAAA"),
+            # bytes 4..8 missing -- never downlinked (yet)
+            _chunk(offset=8, data=b"CCCC"),
+        ]
+    )
+    result = reassemble_bulk_chunks(df)
+    assert not result.is_gapless
+    assert not result.duplicates
+    assert [o.offset for o in result.offsets] == [0, 8]
+    assert [o.count for o in result.offsets] == [1, 1]
 
 
 def test_out_of_order_chunks_still_reassemble_correctly() -> None:

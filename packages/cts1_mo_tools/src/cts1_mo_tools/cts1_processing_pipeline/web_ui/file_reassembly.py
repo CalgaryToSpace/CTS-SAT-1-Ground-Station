@@ -11,11 +11,13 @@ this module does is:
 
   - `reassemble_bulk_chunks()`: given whatever chunks the caller selected,
     assemble them into one byte string ordered by offset (missing byte
-    ranges are left as `\\x00` and reported separately as `.gaps`), and flag
-    any offset that shows up more than once (`.duplicates`) -- the caller's
-    time-range filter should be narrowed until there are none, since a
-    duplicated offset means either a harmless retransmission or, worse, two
-    different files' chunks got mixed into the same selection.
+    ranges are left as `\\x00` and reported separately as `.gaps`), and
+    summarize every distinct offset seen (`.offsets`) -- `.duplicates` is
+    the subset that showed up more than once. A duplicated offset alone
+    isn't a problem (e.g. a harmless retransmission); only `.conflicts`
+    (repeats that disagree on the bytes) means the caller's time-range
+    filter needs narrowing, since that's the sign two different files'
+    chunks got mixed into the same selection.
 
   - `find_header_candidates()`: a bulk downlink is nominally preceded by a
     `TCMD_RESPONSE` whose text is a JSON file descriptor (name, size,
@@ -33,7 +35,7 @@ from __future__ import annotations
 
 __all__ = [
     "BulkHeaderCandidate",
-    "DuplicateOffset",
+    "OffsetSummary",
     "ReassemblyResult",
     "find_header_candidates",
     "reassemble_bulk_chunks",
@@ -56,8 +58,10 @@ MAX_REASSEMBLY_SPAN_BYTES = 256 * 1024 * 1024
 
 
 @dataclass(slots=True, frozen=True)
-class DuplicateOffset:
-    """A `bulk_file_offset` that showed up more than once in the selection."""
+class OffsetSummary:
+    """A summary of every copy seen at one `bulk_file_offset` in the
+    selection -- `count` is 1 for an offset that showed up exactly once.
+    """
 
     offset: int
     count: int
@@ -79,28 +83,36 @@ class ReassemblyResult:
     and its exact position is also listed in `.gaps`, so a fully accurate
     file requires both `is_gapless` and no `.conflicts`.
 
-    Seeing the *same* offset more than once is routine (e.g. a
-    retransmission, or two ground stations catching the same overpass) and
-    isn't itself a problem -- `.duplicates` lists every repeated offset, but
-    only `.conflicts` (the subset where the repeats *disagree* on the
+    `.offsets` summarizes every distinct offset seen -- present even when
+    there's nothing wrong to report, so the caller always has something to
+    show (e.g. while there are still gaps to fill in). Seeing the *same*
+    offset more than once is routine (e.g. a retransmission, or two ground
+    stations catching the same overpass) and isn't itself a problem --
+    `.duplicates` is the subset of `.offsets` with `count > 1`, but only
+    `.conflicts` (the further subset where the repeats *disagree* on the
     bytes) means two different transmissions' chunks likely got selected
     together and the caller's time-range filter needs narrowing.
     """
 
     total_chunks: int
     unique_offsets: int
-    duplicates: tuple[DuplicateOffset, ...]
+    offsets: tuple[OffsetSummary, ...]
     gaps: tuple[tuple[int, int], ...]
     data: bytes
     covered_bytes: int
     span_bytes: int
 
     @property
-    def conflicts(self) -> tuple[DuplicateOffset, ...]:
+    def duplicates(self) -> tuple[OffsetSummary, ...]:
+        """Offsets that showed up more than once in the selection."""
+        return tuple(o for o in self.offsets if o.count > 1)
+
+    @property
+    def conflicts(self) -> tuple[OffsetSummary, ...]:
         """Duplicated offsets whose repeated copies don't agree -- the only
         kind of duplicate that actually threatens correctness.
         """
-        return tuple(d for d in self.duplicates if not d.consistent)
+        return tuple(o for o in self.offsets if o.count > 1 and not o.consistent)
 
     @property
     def has_conflicts(self) -> bool:
@@ -154,15 +166,14 @@ def reassemble_bulk_chunks(df: pl.DataFrame) -> ReassemblyResult:
         by_offset[offset] = (length, hex_str)  # last one (in `df`'s order) wins
         copies_by_offset.setdefault(offset, []).append((length, hex_str))
 
-    duplicates = tuple(
-        DuplicateOffset(
+    offset_summaries = tuple(
+        OffsetSummary(
             offset,
             count=len(copies),
             distinct_contents_count=len({hex_str for _length, hex_str in copies}),
             lengths=tuple(sorted({length for length, _hex_str in copies})),
         )
         for offset, copies in sorted(copies_by_offset.items())
-        if len(copies) > 1
     )
 
     span = max(
@@ -207,7 +218,7 @@ def reassemble_bulk_chunks(df: pl.DataFrame) -> ReassemblyResult:
     return ReassemblyResult(
         total_chunks=len(offsets),
         unique_offsets=len(by_offset),
-        duplicates=duplicates,
+        offsets=offset_summaries,
         gaps=tuple(gaps),
         data=bytes(buf),
         covered_bytes=covered_bytes,
