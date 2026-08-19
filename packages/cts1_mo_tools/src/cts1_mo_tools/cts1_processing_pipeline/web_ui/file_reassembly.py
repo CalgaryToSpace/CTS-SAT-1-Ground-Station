@@ -61,7 +61,13 @@ class DuplicateOffset:
 
     offset: int
     count: int
-    consistent: bool  # every copy at this offset carries identical bytes
+    distinct_contents_count: int  # how many distinct byte-content variants
+    lengths: tuple[int, ...]  # distinct `bulk_data_len` values seen, ascending
+
+    @property
+    def consistent(self) -> bool:
+        """Whether every copy at this offset carries identical bytes."""
+        return self.distinct_contents_count == 1
 
 
 @dataclass(slots=True, frozen=True)
@@ -71,7 +77,14 @@ class ReassemblyResult:
     `data` always has length `span_bytes` (the highest `offset + length`
     seen across the selection) -- any never-covered byte in it is `\\x00`,
     and its exact position is also listed in `.gaps`, so a fully accurate
-    file requires both `is_distinct_per_offset` and `is_gapless`.
+    file requires both `is_gapless` and no `.conflicts`.
+
+    Seeing the *same* offset more than once is routine (e.g. a
+    retransmission, or two ground stations catching the same overpass) and
+    isn't itself a problem -- `.duplicates` lists every repeated offset, but
+    only `.conflicts` (the subset where the repeats *disagree* on the
+    bytes) means two different transmissions' chunks likely got selected
+    together and the caller's time-range filter needs narrowing.
     """
 
     total_chunks: int
@@ -83,8 +96,15 @@ class ReassemblyResult:
     span_bytes: int
 
     @property
-    def is_distinct_per_offset(self) -> bool:
-        return not self.duplicates
+    def conflicts(self) -> tuple[DuplicateOffset, ...]:
+        """Duplicated offsets whose repeated copies don't agree -- the only
+        kind of duplicate that actually threatens correctness.
+        """
+        return tuple(d for d in self.duplicates if not d.consistent)
+
+    @property
+    def has_conflicts(self) -> bool:
+        return bool(self.conflicts)
 
     @property
     def is_gapless(self) -> bool:
@@ -94,8 +114,8 @@ class ReassemblyResult:
     def sha256(self) -> str:
         """SHA-256 of `data` as assembled -- only meaningful to compare
         against a known-good hash once `is_gapless` (a gap zero-fills its
-        bytes, which changes the hash) and ideally `is_distinct_per_offset`
-        (a duplicate means some other offset's bytes may have been dropped).
+        bytes, which changes the hash) and there are no `.conflicts`
+        (a conflicting duplicate means the "wrong" copy may have won).
         """
         return hashlib.sha256(self.data).hexdigest()
 
@@ -122,21 +142,32 @@ def reassemble_bulk_chunks(df: pl.DataFrame) -> ReassemblyResult:
         return ReassemblyResult(0, 0, (), (), b"", 0, 0)
 
     offsets = df["bulk_file_offset"].to_list()
+    lengths = df["bulk_data_len"].to_list()
     hexes = df["bulk_data_hex"].to_list()
 
-    by_offset: dict[int, str] = {}
-    copies_by_offset: dict[int, list[str]] = {}
-    for offset, hex_str in zip(offsets, hexes, strict=True):
-        by_offset[offset] = hex_str  # last one (in `df`'s given order) wins
-        copies_by_offset.setdefault(offset, []).append(hex_str)
+    # (length, hex) per copy, keyed by offset -- `length` is the decoder's
+    # own `bulk_data_len`, trusted as-is rather than re-derived from the hex
+    # string (which would silently mask a corrupt odd-length hex value).
+    by_offset: dict[int, tuple[int, str]] = {}
+    copies_by_offset: dict[int, list[tuple[int, str]]] = {}
+    for offset, length, hex_str in zip(offsets, lengths, hexes, strict=True):
+        by_offset[offset] = (length, hex_str)  # last one (in `df`'s order) wins
+        copies_by_offset.setdefault(offset, []).append((length, hex_str))
 
     duplicates = tuple(
-        DuplicateOffset(offset, len(copies), consistent=len(set(copies)) == 1)
+        DuplicateOffset(
+            offset,
+            count=len(copies),
+            distinct_contents_count=len({hex_str for _length, hex_str in copies}),
+            lengths=tuple(sorted({length for length, _hex_str in copies})),
+        )
         for offset, copies in sorted(copies_by_offset.items())
         if len(copies) > 1
     )
 
-    span = max((offset + len(h) // 2 for offset, h in by_offset.items()), default=0)
+    span = max(
+        (offset + length for offset, (length, _hex) in by_offset.items()), default=0
+    )
     if span > MAX_REASSEMBLY_SPAN_BYTES:
         msg = (
             f"Implied file size {span:,} bytes exceeds the "
@@ -149,7 +180,7 @@ def reassemble_bulk_chunks(df: pl.DataFrame) -> ReassemblyResult:
     # per byte) -- the byte buffer itself still needs an O(bytes) slice
     # assignment per chunk, which is unavoidable since it *is* the output.
     intervals = sorted(
-        (offset, offset + len(h) // 2) for offset, h in by_offset.items()
+        (offset, offset + length) for offset, (length, _hex) in by_offset.items()
     )
     merged: list[list[int]] = []
     for start, end in intervals:
@@ -159,7 +190,7 @@ def reassemble_bulk_chunks(df: pl.DataFrame) -> ReassemblyResult:
             merged.append([start, end])
 
     buf = bytearray(span)
-    for offset, hex_str in by_offset.items():
+    for offset, (_length, hex_str) in by_offset.items():
         chunk = bytes.fromhex(hex_str)
         buf[offset : offset + len(chunk)] = chunk
 

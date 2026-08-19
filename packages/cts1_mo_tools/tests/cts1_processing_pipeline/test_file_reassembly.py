@@ -39,7 +39,8 @@ def test_empty_input() -> None:
     assert result.total_chunks == 0
     assert result.unique_offsets == 0
     assert result.data == b""
-    assert result.is_distinct_per_offset
+    assert not result.duplicates
+    assert not result.has_conflicts
     assert result.is_gapless
 
 
@@ -55,7 +56,8 @@ def test_clean_contiguous_chunks_reassemble_exactly() -> None:
     assert result.data == b"AAAABBBBCC"
     assert result.total_chunks == 3
     assert result.unique_offsets == 3
-    assert result.is_distinct_per_offset
+    assert not result.duplicates
+    assert not result.has_conflicts
     assert result.is_gapless
     assert result.span_bytes == 10
     assert result.covered_bytes == 10
@@ -97,7 +99,7 @@ def test_gap_at_the_start_is_reported() -> None:
     assert result.data == b"\x00\x00\x00\x00BBBB"
 
 
-def test_duplicate_offset_with_agreeing_bytes_is_flagged_but_consistent() -> None:
+def test_duplicate_offset_with_agreeing_bytes_is_not_a_conflict() -> None:
     df = _chunks_df(
         [
             _chunk(offset=0, data=b"AAAA", received_at="2026-01-01T00:00:00"),
@@ -106,17 +108,21 @@ def test_duplicate_offset_with_agreeing_bytes_is_flagged_but_consistent() -> Non
         ]
     )
     result = reassemble_bulk_chunks(df)
-    assert not result.is_distinct_per_offset
+    # Duplicated (e.g. retransmitted) offsets are routine and listed, but
+    # since the copies agree, this isn't a conflict.
     assert len(result.duplicates) == 1
     dup = result.duplicates[0]
     assert dup.offset == 0
     assert dup.count == 2
+    assert dup.distinct_contents_count == 1
+    assert dup.lengths == (4,)
     assert dup.consistent
-    # Still reassembles something sensible even though flagged.
+    assert not result.has_conflicts
+    assert result.conflicts == ()
     assert result.data == b"AAAABBBB"
 
 
-def test_duplicate_offset_with_conflicting_bytes_is_flagged_inconsistent() -> None:
+def test_duplicate_offset_with_conflicting_bytes_is_a_conflict() -> None:
     df = _chunks_df(
         [
             _chunk(offset=0, data=b"AAAA"),
@@ -124,12 +130,26 @@ def test_duplicate_offset_with_conflicting_bytes_is_flagged_inconsistent() -> No
         ]
     )
     result = reassemble_bulk_chunks(df)
-    assert not result.is_distinct_per_offset
+    assert result.has_conflicts
+    assert len(result.conflicts) == 1
     dup = result.duplicates[0]
     assert dup.count == 2
+    assert dup.distinct_contents_count == 2
     assert not dup.consistent
     # Last row in the given DataFrame order wins.
     assert result.data == b"ZZZZ"
+
+
+def test_duplicate_offset_with_differing_lengths_reports_both() -> None:
+    df = _chunks_df(
+        [
+            _chunk(offset=0, data=b"AAAA"),
+            _chunk(offset=0, data=b"AAAAAA"),
+        ]
+    )
+    result = reassemble_bulk_chunks(df)
+    dup = result.duplicates[0]
+    assert dup.lengths == (4, 6)
 
 
 def test_span_over_safety_cap_raises() -> None:

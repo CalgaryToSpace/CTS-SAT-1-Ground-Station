@@ -321,22 +321,41 @@ def _byte_range_str(start: int, end: int) -> str:
 
 
 def _duplicates_section(result: ReassemblyResult) -> None:
-    with ui.row().classes("items-center gap-2"):
-        ui.icon("error", color="negative")
-        ui.label(
-            f"{len(result.duplicates)} offset(s) appear more than once -- "
-            "narrow the time range(s) until every offset is distinct "
-            "before trusting the reassembled bytes below."
-        ).classes("text-negative")
+    if result.has_conflicts:
+        with ui.row().classes("items-center gap-2"):
+            ui.icon("error", color="negative")
+            ui.label(
+                f"{len(result.conflicts)} offset(s) have CONFLICTING "
+                "content -- narrow the time range(s) until these agree "
+                "before trusting the reassembled bytes below (the other "
+                f"{len(result.duplicates) - len(result.conflicts)} "
+                "duplicated offset(s) agree and aren't a problem)."
+            ).classes("text-negative")
+    else:
+        with ui.row().classes("items-center gap-2"):
+            ui.icon("info", color="grey")
+            ui.label(
+                f"{len(result.duplicates)} offset(s) were received more "
+                "than once (e.g. a retransmission), but every copy agrees "
+                "-- not a problem."
+            ).classes("text-caption text-grey")
     columns = [
         {"name": "offset", "label": "Offset", "field": "offset"},
+        {"name": "length", "label": "Length", "field": "length"},
         {"name": "count", "label": "Copies", "field": "count"},
+        {
+            "name": "distinct_contents_count",
+            "label": "Distinct Contents Count",
+            "field": "distinct_contents_count",
+        },
         {"name": "consistent", "label": "Agree?", "field": "consistent"},
     ]
     rows = [
         {
             "offset": d.offset,
+            "length": ", ".join(str(n) for n in d.lengths),
             "count": d.count,
+            "distinct_contents_count": d.distinct_contents_count,
             "consistent": "yes" if d.consistent else "CONFLICTING BYTES",
         }
         for d in result.duplicates[:50]
@@ -430,7 +449,18 @@ def _header_candidates_table(candidates: list[BulkHeaderCandidate]) -> str | Non
         {"name": "action", "label": "Action", "field": "action"},
         {"name": "file", "label": "File", "field": "file"},
         {"name": "file_size", "label": "Size (bytes)", "field": "file_size"},
-        {"name": "sha256", "label": "SHA-256", "field": "sha256"},
+        {"name": "crc16", "label": "CRC-16", "field": "crc16"},
+        {
+            "name": "sha256",
+            "label": "SHA-256",
+            "field": "sha256",
+            # The full value, not manually truncated -- the browser ellipses
+            # it if the column is too narrow to fit (see Quasar's `.ellipsis`
+            # utility class), rather than us guessing how much to cut.
+            "classes": "ellipsis",
+            "headerClasses": "ellipsis",
+            "style": "max-width: 220px",
+        },
     ]
     rows = [
         {
@@ -438,7 +468,8 @@ def _header_candidates_table(candidates: list[BulkHeaderCandidate]) -> str | Non
             "action": c.action or "",
             "file": c.file or "",
             "file_size": f"{c.file_size:,}" if c.file_size is not None else "",
-            "sha256": (c.sha256 or "")[:16] + ("..." if c.sha256 else ""),
+            "crc16": c.crc16 or "",
+            "sha256": c.sha256 or "",
         }
         for c in candidates
     ]
@@ -479,10 +510,10 @@ def _reassembler_results(path: Path, ranges: list[tuple[datetime, datetime]]) ->
             f"distinct offset(s), spanning {result.span_bytes:,} bytes."
         ).classes("text-caption text-grey")
 
-        if result.is_distinct_per_offset:
+        if not result.duplicates:
             with ui.row().classes("items-center gap-2"):
                 ui.icon("check_circle", color="positive")
-                ui.label("Every offset is distinct.").classes("text-positive")
+                ui.label("Every offset appears exactly once.").classes("text-positive")
         else:
             _duplicates_section(result)
 
@@ -498,9 +529,9 @@ def _reassembler_results(path: Path, ranges: list[tuple[datetime, datetime]]) ->
                 result.data, filename=filename or "reassembled_file.bin"
             ),
         )
-        if not (result.is_distinct_per_offset and result.is_gapless):
+        if result.has_conflicts or not result.is_gapless:
             ui.label(
-                "Duplicate offsets and/or gaps are present -- the download "
+                "Conflicting offsets and/or gaps are present -- the download "
                 "will still work (missing bytes are filled with 0x00), but "
                 "isn't a verified, complete copy of the file yet."
             ).classes("text-caption text-grey")
