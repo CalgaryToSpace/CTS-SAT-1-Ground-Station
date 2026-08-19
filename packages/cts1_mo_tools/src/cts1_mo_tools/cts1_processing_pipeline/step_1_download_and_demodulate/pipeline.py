@@ -219,6 +219,7 @@ def _process_audio(
                     "audio_url": audio_url,
                     "ingested_at": datetime.now(UTC),
                     "received_at": _received_at(obs, time_in_file_ms=None),
+                    "rs_correctable": True,  # gr_satellites has no uncorrectable frames
                     **row,
                 }
             )
@@ -240,6 +241,7 @@ def _process_audio(
                     "received_at": _received_at(
                         obs, time_in_file_ms=row["time_in_file_ms"]
                     ),
+                    "rs_correctable": True,  # gr_satellites has no uncorrectable frames
                     **row,
                 }
             )
@@ -279,6 +281,7 @@ def _process_demod(obs: dict[str, Any]) -> list[dict[str, Any]]:
                 "audio_url": audio_url,
                 "ingested_at": datetime.now(UTC),
                 "time_in_file_ms": time_in_file_ms,
+                "rs_correctable": True,  # no uncorrectable frames from this decoder
                 **row,
             }
         )
