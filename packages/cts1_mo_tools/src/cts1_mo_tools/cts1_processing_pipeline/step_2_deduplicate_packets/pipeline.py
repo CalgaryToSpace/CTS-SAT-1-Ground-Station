@@ -56,6 +56,7 @@ __all__ = [
     "run",
 ]
 
+import hashlib
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
@@ -103,6 +104,17 @@ _SOURCE_FIELDS: Sequence[str] = (
     "csp_crc_valid",
     "csp_crc_source",
 )
+
+
+def _packet_id(key: str) -> str:
+    """Deterministic packet id, stable across Polars versions.
+
+    Polars' own `.hash()` isn't guaranteed stable across releases (it's not
+    a documented, versioned hash), so `packet_id` -- which needs to compare
+    equal across separate step-2 runs on the same data -- is computed with
+    the standard library's `hashlib` instead, via `map_elements`.
+    """
+    return hashlib.sha256(key.encode()).hexdigest()[:16]  # first 8 bytes
 
 
 def _append_crc32c(data_hex: str) -> str:
@@ -373,9 +385,7 @@ def _finalize(df: pl.DataFrame) -> pl.DataFrame:
     df = df.with_columns(
         packet_id=pl.concat_str(
             ["data_hex", pl.col("received_at").dt.strftime("%Y-%m-%dT%H:%M:%S%.6fZ")]
-        )
-        .hash()
-        .cast(pl.Utf8)
+        ).map_elements(_packet_id, return_dtype=pl.Utf8)
     )
     return df.select(
         "packet_id",
