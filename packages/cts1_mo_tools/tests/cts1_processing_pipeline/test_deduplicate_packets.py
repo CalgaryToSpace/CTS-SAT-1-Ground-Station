@@ -147,6 +147,54 @@ def test_askew_outranks_sso_as_baseline_within_same_cluster() -> None:
     assert json.loads(row["decoders"]) == ["askew_demod_from_file", "sso_rx_replay"]
 
 
+def test_rssi_db_prefers_max_among_askew_decodes() -> None:
+    """When several askew_demod_from_file decodes of the same content land
+    in one cluster (e.g. multiple ground stations), rssi_db is the max of
+    those -- not the earliest, and not a weaker sso_rx_replay reading.
+    """
+    observations = _observations_df(
+        [
+            _OBS_1,
+            {
+                "id": 2,
+                "start": _dt("2026-08-12T19:30:30"),
+                "end": _dt("2026-08-12T19:40:30"),
+            },
+        ]
+    )
+    packets = _packets_df(
+        [
+            _packet(
+                observation_id=1,
+                decoder="sso_rx_replay",
+                received_at="2026-08-12T19:35:00",
+                data_hex="c2a28a00aa",
+                rssi_db=-1.0,  # strongest overall, but not askew -- ignored
+            ),
+            _packet(
+                observation_id=1,
+                decoder="askew_demod_from_file",
+                received_at="2026-08-12T19:35:01",  # earlier askew reading
+                data_hex="c2a28a00aa",
+                rssi_db=-8.0,
+            ),
+            _packet(
+                observation_id=2,
+                decoder="askew_demod_from_file",
+                received_at="2026-08-12T19:35:20",  # later, but stronger
+                data_hex="c2a28a00aa",
+                rssi_db=-4.0,
+            ),
+        ]
+    )
+
+    result = compute_distinct_packets(packets, observations)
+
+    assert len(result) == 1
+    row = result.row(0, named=True)
+    assert row["rssi_db"] == -4.0
+
+
 def test_sso_does_not_dedupe_beyond_one_minute() -> None:
     """Two identical-content sso_rx_replay decodes 45 minutes apart are two
     distinct receptions, not a single duplicate detection.

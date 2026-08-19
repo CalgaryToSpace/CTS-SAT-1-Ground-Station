@@ -208,6 +208,13 @@ def _cluster_baseline(baseline: pl.DataFrame) -> pl.DataFrame:
     received_at/metadata/decoder name (`received_at_source`) as the
     cluster's authoritative values, falling back to the next-most-trusted
     decoder present.
+
+    `rssi_db` is picked separately: askew_demod_from_file is preferred over
+    any other decoder, and if several askew_demod_from_file decodes landed
+    in the same cluster (e.g. multiple ground stations), the strongest
+    (max) of their rssi_db values is used. Only when no
+    askew_demod_from_file decode is present does it fall back to the
+    cluster's other authoritative-row value above.
     """
     clustered = _cluster_by_content_and_time(
         baseline, tolerance=BASELINE_DEDUPE_TOLERANCE, cluster_col="cluster_id"
@@ -217,6 +224,7 @@ def _cluster_baseline(baseline: pl.DataFrame) -> pl.DataFrame:
         return_dtype=pl.UInt32,
     )
     clustered = clustered.sort(["data_hex", "cluster_id", trust_rank, "received_at"])
+    is_askew = pl.col("decoder") == ASKEW_DECODER
     return (
         clustered.group_by(["data_hex", "cluster_id"], maintain_order=True)
         .agg(
@@ -225,7 +233,10 @@ def _cluster_baseline(baseline: pl.DataFrame) -> pl.DataFrame:
             pl.col("data_length_bytes").first(),
             pl.col("csp_crc_valid").first(),
             pl.col("csp_crc_source").first(),
-            pl.col("rssi_db").first(),
+            pl.coalesce(
+                pl.col("rssi_db").filter(is_askew).max(),
+                pl.col("rssi_db").first(),
+            ).alias("rssi_db"),
             pl.col("rs_corrected_error_count").first(),
             pl.col("rs_correctable").first(),
             pl.col("obs_start").min().alias("cluster_obs_start"),
