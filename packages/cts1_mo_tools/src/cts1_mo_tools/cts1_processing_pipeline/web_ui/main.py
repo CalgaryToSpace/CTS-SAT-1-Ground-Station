@@ -20,9 +20,10 @@ from __future__ import annotations
 
 __all__ = ["main"]
 
+import base64
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
+from pathlib import Path  # noqa: TC003 -- tyro needs this at runtime, see below
 from typing import TYPE_CHECKING
 
 import tyro
@@ -31,10 +32,12 @@ from nicegui import ui
 from . import data as beacon_data
 from .charts import BEACON_CHART_GROUPS, OTHER_CHART_GROUPS, chart_option
 from .file_reassembly import (
+    COVERAGE_ROW_WIDTH_BYTES,
     BulkHeaderCandidate,
     ReassemblyResult,
     find_header_candidates,
     reassemble_bulk_chunks,
+    render_coverage_png,
 )
 
 if TYPE_CHECKING:
@@ -429,6 +432,32 @@ def _build_chunks_table(result: ReassemblyResult) -> Callable[[], None]:
     return chunks_table
 
 
+COVERAGE_BLOCK_PX = 3  # on-screen size of one byte's block; may change later
+
+
+def _coverage_map(result: ReassemblyResult) -> None:
+    """A byte-coverage map: one block per byte, green if covered, red if
+    still a gap, `COVERAGE_ROW_WIDTH_BYTES` blocks per row.
+
+    `render_coverage_png` encodes one *pixel* per byte -- small and cheap to
+    ship even for a 20+ MB file -- and the `COVERAGE_BLOCK_PX`-per-byte
+    on-screen size is applied here purely with CSS
+    (`image-rendering: pixelated` keeps the block edges crisp instead of
+    blurring the upscale).
+    """
+    if result.span_bytes == 0:
+        return
+    data_uri = "data:image/png;base64," + base64.b64encode(
+        render_coverage_png(result)
+    ).decode("ascii")
+    width_px = COVERAGE_ROW_WIDTH_BYTES * COVERAGE_BLOCK_PX
+    height_px = -(-result.span_bytes // COVERAGE_ROW_WIDTH_BYTES) * COVERAGE_BLOCK_PX
+    with ui.row().classes("w-full overflow-x-auto"):
+        ui.image(data_uri).style(
+            f"width: {width_px}px; height: {height_px}px; image-rendering: pixelated;"
+        )
+
+
 def _gaps_section(result: ReassemblyResult) -> None:
     if result.is_gapless:
         with ui.row().classes("items-center gap-2"):
@@ -573,12 +602,18 @@ def _reassembler_results(path: Path, ranges: list[tuple[datetime, datetime]]) ->
         ).classes("text-caption text-grey")
 
         _duplicates_status(result)
+        _coverage_map(result)
         _build_chunks_table(result)()
         _gaps_section(result)
         _sha256_comparison(result, expected_sha256)
 
         best = _best_named_candidate(candidates)
-        filename = Path(best.file).name if best is not None and best.file else None
+        # The full path (e.g. "ADCS/log_b51a.TLM"), not just the basename --
+        # slashes become underscores since the browser would otherwise treat
+        # them as directory separators in the downloaded filename.
+        filename = (
+            best.file.replace("/", "_") if best is not None and best.file else None
+        )
         ui.button(
             "Download reassembled bytes",
             icon="download",

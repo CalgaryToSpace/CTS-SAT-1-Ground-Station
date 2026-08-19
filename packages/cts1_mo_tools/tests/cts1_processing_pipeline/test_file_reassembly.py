@@ -1,12 +1,16 @@
+import struct
+import zlib
 from datetime import UTC, datetime
 from typing import Any
 
 import polars as pl
 import pytest
 from cts1_mo_tools.cts1_processing_pipeline.web_ui.file_reassembly import (
+    COVERAGE_ROW_WIDTH_BYTES,
     MAX_REASSEMBLY_SPAN_BYTES,
     find_header_candidates,
     reassemble_bulk_chunks,
+    render_coverage_png,
 )
 
 
@@ -319,3 +323,79 @@ def test_multiple_distinct_headers_are_all_returned() -> None:
     assert [c.received_at for c in candidates] == sorted(
         c.received_at for c in candidates
     )
+
+
+# ---------------------------------------------------------------------------
+# render_coverage_png
+# ---------------------------------------------------------------------------
+
+
+def _decode_indexed_png(png: bytes) -> tuple[int, int, list[bytes]]:
+    """Minimal indexed-PNG decoder for test assertions: (width, height, rows
+    of raw palette-index bytes, one row per scanline).
+    """
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
+    pos = 8
+    idat = b""
+    width = height = 0
+    while pos < len(png):
+        length = struct.unpack(">I", png[pos : pos + 4])[0]
+        chunk_type = png[pos + 4 : pos + 8]
+        data = png[pos + 8 : pos + 8 + length]
+        if chunk_type == b"IHDR":
+            width, height = struct.unpack(">II", data[:8])
+        elif chunk_type == b"IDAT":
+            idat += data
+        pos += 8 + length + 4
+
+    raw = zlib.decompress(idat)
+    stride = width + 1
+    return (
+        width,
+        height,
+        [raw[i * stride + 1 : (i + 1) * stride] for i in range(height)],
+    )
+
+
+def test_coverage_png_empty_result_is_a_single_pixel() -> None:
+    result = reassemble_bulk_chunks(_chunks_df([]))
+    width, height, rows = _decode_indexed_png(render_coverage_png(result))
+    assert (width, height) == (1, 1)
+    assert rows[0] == bytes([1])  # covered-color index
+
+
+def test_coverage_png_marks_gaps_and_covered_bytes_correctly() -> None:
+    df = _chunks_df(
+        [
+            _chunk(offset=0, data=b"A" * 195),
+            # bytes 195..390 missing
+            _chunk(offset=390, data=b"A" * 195),
+        ]
+    )
+    result = reassemble_bulk_chunks(df)
+    assert result.gaps  # sanity: there is a gap
+    width, height, rows = _decode_indexed_png(render_coverage_png(result))
+    assert width == COVERAGE_ROW_WIDTH_BYTES
+    assert height == 2  # 585 bytes / 390-wide rows, rounded up
+
+    # Recompute expected row/col for each gap byte and check it decoded red (0).
+    for start, end in result.gaps:
+        for byte_index in range(start, end):
+            row, col = divmod(byte_index, COVERAGE_ROW_WIDTH_BYTES)
+            assert rows[row][col] == 0
+    # And covered bytes decode green (1).
+    for byte_index in (0, 194, 390, 584):
+        row, col = divmod(byte_index, COVERAGE_ROW_WIDTH_BYTES)
+        assert rows[row][col] == 1
+
+
+def test_coverage_png_pads_last_row_without_marking_it_covered_or_gap() -> None:
+    # A span that doesn't divide evenly into COVERAGE_ROW_WIDTH_BYTES --
+    # the padding pixels (index 2) must be distinguishable from both real
+    # states so they don't get misread as "covered" or "missing".
+    df = _chunks_df([_chunk(offset=0, data=b"A" * 10)])
+    result = reassemble_bulk_chunks(df)
+    _width, height, rows = _decode_indexed_png(render_coverage_png(result))
+    assert height == 1
+    assert rows[0][:10] == bytes([1]) * 10
+    assert set(rows[0][10:]) == {2}

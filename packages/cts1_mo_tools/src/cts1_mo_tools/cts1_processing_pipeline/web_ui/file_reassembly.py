@@ -29,20 +29,31 @@ this module does is:
     fields (`file`, `file_size`, `sha256`, ...) show up in that text,
     tolerant of the JSON being incomplete/truncated -- surfaced to the user
     as candidates to cross-check against, not as ground truth.
+
+  - `render_coverage_png()`: a byte-per-pixel bitmap of which bytes are
+    covered vs. missing, one pixel per byte -- the web UI scales it up 3x
+    with CSS (`image-rendering: pixelated`) rather than this baking the
+    zoom into the image data, so a 20+ MB file's map still only encodes one
+    pixel per byte, and PNG's DEFLATE compression makes the (typically
+    long) covered/missing runs cheap to ship over the websocket.
 """
 
 from __future__ import annotations
 
 __all__ = [
+    "COVERAGE_ROW_WIDTH_BYTES",
     "BulkHeaderCandidate",
     "OffsetSummary",
     "ReassemblyResult",
     "find_header_candidates",
     "reassemble_bulk_chunks",
+    "render_coverage_png",
 ]
 
 import hashlib
 import re
+import struct
+import zlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -223,6 +234,102 @@ def reassemble_bulk_chunks(df: pl.DataFrame) -> ReassemblyResult:
         data=bytes(buf),
         covered_bytes=covered_bytes,
         span_bytes=span,
+    )
+
+
+# -- Coverage map --------------------------------------------------------------
+
+COVERAGE_ROW_WIDTH_BYTES = 195 * 2  # 195 == BULK_DOWNLINK_MAX_DATA, one row = 2 packets
+
+# Palette indices/colors for the coverage bitmap -- index 2 ("no data yet",
+# past the end of the file but needed to fill out the last row's width) is
+# marked fully transparent via tRNS so it doesn't paint a visible block.
+_COVERAGE_GAP_INDEX = 0
+_COVERAGE_COVERED_INDEX = 1
+_COVERAGE_PAD_INDEX = 2
+_COVERAGE_PALETTE = (
+    (0xC1, 0x00, 0x15),  # gap: Quasar "negative" red
+    (0x21, 0xBA, 0x45),  # covered: Quasar "positive" green
+    (0x00, 0x00, 0x00),  # padding: color irrelevant, alpha 0 makes it invisible
+)
+_COVERAGE_ALPHA = (255, 255, 0)
+
+
+def _png_chunk(chunk_type: bytes, data: bytes) -> bytes:
+    return (
+        struct.pack(">I", len(data))
+        + chunk_type
+        + data
+        + struct.pack(">I", zlib.crc32(chunk_type + data) & 0xFFFFFFFF)
+    )
+
+
+def _encode_indexed_png(
+    width: int,
+    height: int,
+    pixel_indices: bytes,
+    palette: tuple[tuple[int, int, int], ...],
+    alpha: tuple[int, ...],
+) -> bytes:
+    """A minimal indexed-color (palette) PNG encoder -- no imaging library
+    dependency needed for what's just a 1-byte-per-pixel bitmap with a
+    handful of colors.
+    """
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 3, 0, 0, 0)
+    plte = b"".join(bytes(c) for c in palette)
+    trns = bytes(alpha)
+
+    # PNG scanlines are each prefixed with a filter-type byte; "0" (None) is
+    # the simplest choice and compresses just as well here since the actual
+    # runs (long stretches of the same covered/gap color) are horizontal,
+    # not something a byte-to-byte predictor filter would help with.
+    raw = bytearray()
+    for y in range(height):
+        raw.append(0)
+        start = y * width
+        raw += pixel_indices[start : start + width]
+    idat = zlib.compress(bytes(raw), level=6)
+
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", ihdr)
+        + _png_chunk(b"PLTE", plte)
+        + _png_chunk(b"tRNS", trns)
+        + _png_chunk(b"IDAT", idat)
+        + _png_chunk(b"IEND", b"")
+    )
+
+
+def render_coverage_png(
+    result: ReassemblyResult, *, row_width_bytes: int = COVERAGE_ROW_WIDTH_BYTES
+) -> bytes:
+    """A one-pixel-per-byte PNG of `result`'s coverage: green where a byte
+    was received, red where it's still a gap, `row_width_bytes` pixels per
+    row. The caller (the web UI) is expected to scale this up with CSS
+    (`image-rendering: pixelated`) rather than baking the zoom into the
+    image -- keeps the actual PNG small regardless of the on-screen block
+    size.
+
+    Returns a 1x1 (single covered-color pixel) PNG if `result` is empty,
+    rather than a 0-byte image some browsers may refuse to render.
+    """
+    span = result.span_bytes
+    if span == 0:
+        return _encode_indexed_png(
+            1, 1, bytes([_COVERAGE_COVERED_INDEX]), _COVERAGE_PALETTE, _COVERAGE_ALPHA
+        )
+
+    pixels = bytearray([_COVERAGE_COVERED_INDEX]) * span
+    for start, end in result.gaps:
+        pixels[start:end] = bytes([_COVERAGE_GAP_INDEX]) * (end - start)
+
+    remainder = span % row_width_bytes
+    if remainder:
+        pixels += bytes([_COVERAGE_PAD_INDEX]) * (row_width_bytes - remainder)
+    height = len(pixels) // row_width_bytes
+
+    return _encode_indexed_png(
+        row_width_bytes, height, bytes(pixels), _COVERAGE_PALETTE, _COVERAGE_ALPHA
     )
 
 
