@@ -38,6 +38,8 @@ from .file_reassembly import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     import polars as pl
     from nicegui import events
 
@@ -322,8 +324,8 @@ def _byte_range_str(start: int, end: int) -> str:
 
 def _duplicates_status(result: ReassemblyResult) -> None:
     """The pass/fail line above the chunks table -- the table itself always
-    renders (see `_chunks_table`) regardless of which of these applies, so
-    it's still there to inspect even mid-download, before every gap is
+    renders (see `_build_chunks_table`) regardless of which of these
+    applies, so it's still there to inspect even mid-download, before every gap is
     filled in.
     """
     if not result.duplicates:
@@ -350,37 +352,81 @@ def _duplicates_status(result: ReassemblyResult) -> None:
             ).classes("text-caption text-grey")
 
 
-def _chunks_table(result: ReassemblyResult) -> None:
-    """Every distinct offset in the selection -- shown unconditionally
-    (not just when there are duplicates/conflicts to flag) so there's
-    still something to inspect while a download is incomplete.
+CHUNKS_TABLE_PAGE_SIZE = 100
+
+
+def _build_chunks_table(result: ReassemblyResult) -> Callable[[], None]:
+    """Build a paginated, independently-refreshable chunks table.
+
+    A file's chunks (`result.offsets`) are already fully computed
+    server-side by this point -- reassembling the bytes needs every one of
+    them regardless -- but a 20+ MB file is 100,000+ 195-byte chunks, and
+    shipping that many rows to the browser at once (even paginated
+    client-side by Quasar, which still means the whole row set travels over
+    the websocket first) would be its own problem. Paging *here*, before
+    anything is handed to `ui.table`, keeps each page turn down to
+    `CHUNKS_TABLE_PAGE_SIZE` rows -- flipping pages only re-renders this one
+    component (via the returned callable's `.refresh()`), not the whole
+    results section, so it never re-fetches or re-reassembles anything.
     """
-    columns = [
-        {"name": "offset", "label": "Offset", "field": "offset"},
-        {"name": "length", "label": "Length", "field": "length"},
-        {"name": "count", "label": "Copies", "field": "count"},
-        {
-            "name": "distinct_contents_count",
-            "label": "Distinct Contents Count",
-            "field": "distinct_contents_count",
-        },
-        {"name": "consistent", "label": "Agree?", "field": "consistent"},
-    ]
-    rows = [
-        {
-            "offset": o.offset,
-            "length": ", ".join(str(n) for n in o.lengths),
-            "count": o.count,
-            "distinct_contents_count": o.distinct_contents_count,
-            "consistent": "yes" if o.consistent else "CONFLICTING BYTES",
-        }
-        for o in result.offsets[:50]
-    ]
-    ui.table(columns=columns, rows=rows, row_key="offset").classes("w-full")
-    if len(result.offsets) > len(rows):
-        ui.label(f"...and {len(result.offsets) - len(rows)} more.").classes(
-            "text-caption text-grey"
-        )
+    page_state = {"index": 0}
+
+    @ui.refreshable
+    def chunks_table() -> None:
+        total = len(result.offsets)
+        if total == 0:
+            return
+        total_pages = -(-total // CHUNKS_TABLE_PAGE_SIZE)  # ceil div
+        page_state["index"] = max(0, min(page_state["index"], total_pages - 1))
+        start = page_state["index"] * CHUNKS_TABLE_PAGE_SIZE
+        page_offsets = result.offsets[start : start + CHUNKS_TABLE_PAGE_SIZE]
+
+        columns = [
+            {"name": "offset", "label": "Offset", "field": "offset"},
+            {"name": "length", "label": "Length", "field": "length"},
+            {"name": "count", "label": "Copies", "field": "count"},
+            {
+                "name": "distinct_contents_count",
+                "label": "Distinct Contents Count",
+                "field": "distinct_contents_count",
+            },
+            {"name": "consistent", "label": "Agree?", "field": "consistent"},
+        ]
+        rows = [
+            {
+                "offset": o.offset,
+                "length": ", ".join(str(n) for n in o.lengths),
+                "count": o.count,
+                "distinct_contents_count": o.distinct_contents_count,
+                "consistent": "yes" if o.consistent else "CONFLICTING BYTES",
+            }
+            for o in page_offsets
+        ]
+        ui.table(columns=columns, rows=rows, row_key="offset").classes("w-full")
+
+        if total_pages == 1:
+            ui.label(f"{total:,} distinct offset(s).").classes("text-caption text-grey")
+            return
+
+        def _turn_page(delta: int) -> None:
+            page_state["index"] += delta
+            chunks_table.refresh()
+
+        with ui.row().classes("w-full items-center justify-between mt-2"):
+            ui.label(
+                f"Showing {start + 1:,}-{min(start + CHUNKS_TABLE_PAGE_SIZE, total):,} "
+                f"of {total:,} distinct offset(s)."
+            ).classes("text-caption text-grey")
+            with ui.row().classes("items-center gap-2"):
+                ui.button(icon="chevron_left", on_click=lambda: _turn_page(-1)).props(
+                    "flat dense round"
+                ).set_enabled(page_state["index"] > 0)
+                ui.label(f"Page {page_state['index'] + 1} / {total_pages}")
+                ui.button(icon="chevron_right", on_click=lambda: _turn_page(1)).props(
+                    "flat dense round"
+                ).set_enabled(page_state["index"] < total_pages - 1)
+
+    return chunks_table
 
 
 def _gaps_section(result: ReassemblyResult) -> None:
@@ -527,7 +573,7 @@ def _reassembler_results(path: Path, ranges: list[tuple[datetime, datetime]]) ->
         ).classes("text-caption text-grey")
 
         _duplicates_status(result)
-        _chunks_table(result)
+        _build_chunks_table(result)()
         _gaps_section(result)
         _sha256_comparison(result, expected_sha256)
 
