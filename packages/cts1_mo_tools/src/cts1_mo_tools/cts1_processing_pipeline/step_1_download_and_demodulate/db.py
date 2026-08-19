@@ -220,7 +220,7 @@ def record_decoder_runs(
     --force-rerun-decoders) just bumps `run_at`/`version` rather than adding
     a duplicate row.
     """
-    run_at = datetime.now(UTC).replace(tzinfo=None)
+    run_at = datetime.now(UTC)
     rows = [
         {
             "observation_id": observation_id,
@@ -241,7 +241,7 @@ def record_decoder_runs(
                 f"CREATE TABLE {_quote_ident(DECODER_RUNS_TABLE)} ("
                 f"observation_id BIGINT, "
                 f"decoder VARCHAR, "
-                f"run_at TIMESTAMP, "
+                f"run_at TIMESTAMPTZ NOT NULL, "
                 f"version VARCHAR, "
                 f"PRIMARY KEY (observation_id, decoder))"
             )
