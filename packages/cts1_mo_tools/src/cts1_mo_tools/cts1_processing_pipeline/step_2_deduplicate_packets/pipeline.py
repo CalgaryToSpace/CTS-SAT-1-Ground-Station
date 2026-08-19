@@ -11,7 +11,7 @@ observation/decoder that contributed to it.
 
 Trust model:
   - `sso_rx_replay` is the most trustworthy decoder in both content (its
-    Reed-Solomon-corrected frames are filtered to `rs_corrected_count >= 0`,
+    Reed-Solomon-corrected frames are filtered to `rs_corrected_error_count >= 0`,
     i.e. RS-uncorrectable frames are dropped) and timing (it reports a
     within-file offset resolved against the observation's own start time).
     Its packets are the baseline: two sso_rx_replay decodes of the same
@@ -82,7 +82,7 @@ _SOURCE_FIELDS: Sequence[str] = (
     "decoder",
     "time_in_file_ms",
     "rssi",
-    "rs_corrected_count",
+    "rs_corrected_error_count",
     "csp_crc_valid",
     "csp_crc_source",
 )
@@ -181,8 +181,8 @@ def _cluster_baseline(baseline: pl.DataFrame) -> pl.DataFrame:
             pl.col("csp_crc_valid").first(),
             pl.col("csp_crc_source").first(),
             pl.col("rssi").first(),
-            pl.col("rs_corrected_count").first(),
-            pl.col("rs_uncorrectable").first(),
+            pl.col("rs_corrected_error_count").first(),
+            pl.col("rs_correctable").first(),
             pl.col("obs_start").min().alias("cluster_obs_start"),
             pl.col("obs_end").max().alias("cluster_obs_end"),
             pl.col("observation_id").unique().alias("baseline_observation_ids"),
@@ -290,8 +290,8 @@ def _attach_others_to_baseline(
         "csp_crc_valid",
         "csp_crc_source",
         "rssi",
-        "rs_corrected_count",
-        "rs_uncorrectable",
+        "rs_corrected_error_count",
+        "rs_correctable",
         "decoders",
         "observation_ids",
         "sources",
@@ -314,8 +314,8 @@ def _cluster_leftover_others(unmatched: pl.DataFrame) -> pl.DataFrame:
             pl.col("csp_crc_valid").first(),
             pl.col("csp_crc_source").first(),
             pl.lit(None).alias("rssi"),
-            pl.lit(None).alias("rs_corrected_count"),
-            pl.lit(None).alias("rs_uncorrectable"),
+            pl.lit(None).alias("rs_corrected_error_count"),
+            pl.lit(None).alias("rs_correctable"),
             pl.col("decoder").unique().sort().alias("decoders"),
             pl.col("observation_id").unique().sort().alias("observation_ids"),
             pl.col("_source").alias("sources"),
@@ -353,8 +353,8 @@ def _finalize(df: pl.DataFrame) -> pl.DataFrame:
         "received_at",
         "received_at_source",
         "rssi",
-        "rs_corrected_count",
-        "rs_uncorrectable",
+        "rs_corrected_error_count",
+        "rs_correctable",
         "packet_count",
         "decoders",
         "observation_ids",
@@ -386,7 +386,7 @@ def compute_distinct_packets(
     )
     packets_df = _complete_missing_crc(packets_df)
     is_sso = pl.col("decoder") == SSO_DECODER
-    packets_df = packets_df.filter(~is_sso | (pl.col("rs_corrected_count") >= 0))
+    packets_df = packets_df.filter(~is_sso | (pl.col("rs_corrected_error_count") >= 0))
 
     packets_df = packets_df.join(observations_df, on="observation_id", how="left")
     packets_df = _with_source_struct(packets_df)

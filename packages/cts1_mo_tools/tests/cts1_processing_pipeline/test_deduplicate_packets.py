@@ -15,8 +15,8 @@ _DEFAULT_PACKET = {
     "data_length_bytes": 1,
     "csp_crc_valid": True,
     "rssi": -1.0,
-    "rs_corrected_count": 0,
-    "rs_uncorrectable": False,
+    "rs_corrected_error_count": 0,
+    "rs_correctable": True,
     "time_in_file_ms": 1000.0,
 }
 
@@ -49,7 +49,7 @@ _OBS_1 = {
 def test_sso_rs_uncorrectable_is_dropped() -> None:
     observations = _observations_df([_OBS_1])
     packets = _packets_df(
-        [_packet(received_at="2026-08-12T19:35:00", rs_corrected_count=-1)]
+        [_packet(received_at="2026-08-12T19:35:00", rs_corrected_error_count=-1)]
     )
 
     result = compute_distinct_packets(packets, observations)
@@ -60,13 +60,13 @@ def test_sso_rs_uncorrectable_is_dropped() -> None:
 def test_sso_rs_corrected_is_kept() -> None:
     observations = _observations_df([_OBS_1])
     packets = _packets_df(
-        [_packet(received_at="2026-08-12T19:35:00", rs_corrected_count=0)]
+        [_packet(received_at="2026-08-12T19:35:00", rs_corrected_error_count=0)]
     )
 
     result = compute_distinct_packets(packets, observations)
 
     assert len(result) == 1
-    assert result["rs_corrected_count"][0] == 0
+    assert result["rs_corrected_error_count"][0] == 0
 
 
 def test_sso_dedupes_within_one_minute_across_observations() -> None:
@@ -156,8 +156,8 @@ def test_other_decoder_matches_baseline_via_observation_window_overlap() -> None
                 data_hex="cc",
                 csp_crc_valid=None,
                 rssi=None,
-                rs_corrected_count=None,
-                rs_uncorrectable=None,
+                rs_corrected_error_count=None,
+                rs_correctable=None,
                 time_in_file_ms=None,
             ),
         ]
@@ -196,8 +196,8 @@ def test_other_decoder_matches_baseline_via_fifteen_minute_tolerance() -> None:
                 data_hex="dd",
                 csp_crc_valid=None,
                 rssi=None,
-                rs_corrected_count=None,
-                rs_uncorrectable=None,
+                rs_corrected_error_count=None,
+                rs_correctable=None,
             ),
         ]
     )
@@ -232,8 +232,8 @@ def test_other_decoder_not_matched_becomes_its_own_leftover_row() -> None:
                 data_hex="ee",
                 csp_crc_valid=True,  # already has a valid CRC -- no completion needed
                 rssi=None,
-                rs_corrected_count=None,
-                rs_uncorrectable=None,
+                rs_corrected_error_count=None,
+                rs_correctable=None,
                 time_in_file_ms=None,
             )
         ]
@@ -247,7 +247,7 @@ def test_other_decoder_not_matched_becomes_its_own_leftover_row() -> None:
     assert row["received_at"] == _dt("2026-08-12T23:59:00")
     assert json.loads(row["decoders"]) == ["satnogs_data_demod"]
     assert row["rssi"] is None
-    assert row["rs_corrected_count"] is None
+    assert row["rs_corrected_error_count"] is None
 
 
 def test_leftover_content_clusters_by_fifteen_minute_gaps() -> None:
@@ -282,8 +282,8 @@ def test_leftover_content_clusters_by_fifteen_minute_gaps() -> None:
                 data_hex="ff",
                 csp_crc_valid=True,
                 rssi=None,
-                rs_corrected_count=None,
-                rs_uncorrectable=None,
+                rs_corrected_error_count=None,
+                rs_correctable=None,
                 time_in_file_ms=None,
             ),
             _packet(
@@ -293,8 +293,8 @@ def test_leftover_content_clusters_by_fifteen_minute_gaps() -> None:
                 data_hex="ff",
                 csp_crc_valid=True,
                 rssi=None,
-                rs_corrected_count=None,
-                rs_uncorrectable=None,
+                rs_corrected_error_count=None,
+                rs_correctable=None,
                 time_in_file_ms=None,
             ),
             _packet(
@@ -304,8 +304,8 @@ def test_leftover_content_clusters_by_fifteen_minute_gaps() -> None:
                 data_hex="ff",
                 csp_crc_valid=True,
                 rssi=None,
-                rs_corrected_count=None,
-                rs_uncorrectable=None,
+                rs_corrected_error_count=None,
+                rs_correctable=None,
                 time_in_file_ms=None,
             ),
         ]
@@ -353,8 +353,8 @@ def test_demod_packet_missing_crc_merges_with_sso_baseline() -> None:
                 data_length_bytes=len(payload),
                 csp_crc_valid=False,  # step 1 already flagged this invalid
                 rssi=None,
-                rs_corrected_count=None,
-                rs_uncorrectable=None,
+                rs_corrected_error_count=None,
+                rs_correctable=None,
                 time_in_file_ms=None,
             ),
         ]
@@ -400,8 +400,8 @@ def test_demod_only_packet_gets_a_completed_self_consistent_crc() -> None:
                 data_length_bytes=len(payload),
                 csp_crc_valid=False,
                 rssi=None,
-                rs_corrected_count=None,
-                rs_uncorrectable=None,
+                rs_corrected_error_count=None,
+                rs_correctable=None,
                 time_in_file_ms=None,
             )
         ]
@@ -447,8 +447,8 @@ def test_demod_packet_with_already_valid_crc_is_left_alone() -> None:
                 data_length_bytes=len(payload) + 4,
                 csp_crc_valid=True,
                 rssi=None,
-                rs_corrected_count=None,
-                rs_uncorrectable=None,
+                rs_corrected_error_count=None,
+                rs_correctable=None,
                 time_in_file_ms=None,
             )
         ]
@@ -493,8 +493,8 @@ def test_output_schema_and_json_columns() -> None:
         "received_at",
         "received_at_source",
         "rssi",
-        "rs_corrected_count",
-        "rs_uncorrectable",
+        "rs_corrected_error_count",
+        "rs_correctable",
         "packet_count",
         "decoders",
         "observation_ids",

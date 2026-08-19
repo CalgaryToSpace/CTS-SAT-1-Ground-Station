@@ -45,8 +45,8 @@ def test_parse_forensics_line_frame() -> None:
     assert row == {
         "time_in_file_ms": 45802.229,
         "rssi": -2.1,
-        "rs_corrected_count": -2,
-        "rs_uncorrectable": True,
+        "rs_corrected_error_count": -2,
+        "rs_correctable": False,
         "data_hex": "c2228a001091",
         "data_length_bytes": 6,
     }

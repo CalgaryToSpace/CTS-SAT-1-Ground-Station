@@ -40,7 +40,7 @@ def parse_askew_line(line: str) -> dict[str, Any] | None:
         "data_length_bytes": obj["data_length_bytes"],
         "rs_corrected_error_count": obj["rs_corrected_error_count"],
         "rs_correctable": obj["rs_correctable"],
-        "crc_pass": obj["crc_pass"],
+        # Skip including - We calculate it in here anyway - "crc_pass": obj["crc_pass"],
     }
 
 
@@ -60,8 +60,6 @@ def run_askew_demod_from_file(audio_path: Path) -> list[dict[str, Any]]:
         text=True,
     )
 
-    rows = [
-        row for line in proc.stdout.splitlines() if (row := parse_askew_line(line))
-    ]
+    rows = [row for line in proc.stdout.splitlines() if (row := parse_askew_line(line))]
     logger.debug(f"askew_demod_from_file: {len(rows)} frame(s) for {audio_path}")
     return rows
