@@ -67,7 +67,7 @@ def _decode_unique_payloads(data_hex_values: list[str]) -> pl.DataFrame:
         decoded[data_hex] = fields
 
     if not decoded:
-        return pl.DataFrame(schema={"data_hex": pl.Utf8})
+        return pl.DataFrame(schema={"data_hex": pl.String})
 
     return pl.DataFrame(
         [{"data_hex": data_hex, **fields} for data_hex, fields in decoded.items()],

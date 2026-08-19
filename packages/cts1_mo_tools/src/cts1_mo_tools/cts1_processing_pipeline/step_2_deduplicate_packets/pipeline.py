@@ -47,8 +47,6 @@ database involved. The whole dataset is cheap enough to reprocess from
 scratch on every run, so there's no incremental state to reconcile.
 """
 
-from __future__ import annotations
-
 __all__ = [
     "DEFAULT_OUTPUT_DIR",
     "OUTPUT_FILENAME",
@@ -56,21 +54,18 @@ __all__ = [
     "run",
 ]
 
-import hashlib
+from collections.abc import Sequence
 from datetime import timedelta
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import polars as pl
+import polars_hash
 from loguru import logger
 
 from cts1_mo_tools.cts1_decode_satnogs_packets import CSP_CRC32C_SIZE, crc32c
 from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate import (
     pipeline as step_1_pipeline,
 )
-
-if TYPE_CHECKING:
-    from collections.abc import Sequence
-    from pathlib import Path
 
 DEFAULT_OUTPUT_DIR = step_1_pipeline.DEFAULT_DB_PATH.parent
 OUTPUT_FILENAME = "distinct_packets_over_time.parquet"
@@ -106,17 +101,6 @@ _SOURCE_FIELDS: Sequence[str] = (
 )
 
 
-def _packet_id(key: str) -> str:
-    """Deterministic packet id, stable across Polars versions.
-
-    Polars' own `.hash()` isn't guaranteed stable across releases (it's not
-    a documented, versioned hash), so `packet_id` -- which needs to compare
-    equal across separate step-2 runs on the same data -- is computed with
-    the standard library's `hashlib` instead, via `map_elements`.
-    """
-    return hashlib.sha256(key.encode()).hexdigest()[:16]  # first 8 bytes
-
-
 def _append_crc32c(data_hex: str) -> str:
     """Append a freshly computed CRC-32C to `data_hex`, treating it as a bare
     payload with no trailing CRC.
@@ -148,7 +132,9 @@ def _complete_missing_crc(packets: pl.DataFrame) -> pl.DataFrame:
     ).fill_null(value=False)
 
     incomplete = packets.filter(needs_crc).with_columns(
-        data_hex=pl.col("data_hex").map_elements(_append_crc32c, return_dtype=pl.Utf8),
+        data_hex=pl.col("data_hex").map_elements(
+            _append_crc32c, return_dtype=pl.String
+        ),
         data_length_bytes=pl.col("data_length_bytes") + CSP_CRC32C_SIZE,
         csp_crc_valid=pl.lit(value=True),  # true by construction
         csp_crc_source=pl.lit("computed"),
@@ -388,15 +374,24 @@ def _finalize(df: pl.DataFrame) -> pl.DataFrame:
     df = df.with_columns(
         decoders="[" + quoted_decoders.list.join(",") + "]",
         observation_ids=(
-            "[" + pl.col("observation_ids").cast(pl.List(pl.Utf8)).list.join(",") + "]"
+            "["
+            + pl.col("observation_ids").cast(pl.List(pl.String)).list.join(",")
+            + "]"
         ),
         packet_count=pl.col("sources").list.len(),
         sources="[" + encoded_sources.list.join(",") + "]",
     )
     df = df.with_columns(
-        packet_id=pl.concat_str(
-            ["data_hex", pl.col("received_at").dt.strftime("%Y-%m-%dT%H:%M:%S%.6fZ")]
-        ).map_elements(_packet_id, return_dtype=pl.Utf8)
+        packet_id=(
+            polars_hash.concat_str(
+                [
+                    "data_hex",
+                    pl.col("received_at").dt.strftime("%Y-%m-%dT%H:%M:%S%.6fZ"),
+                ]
+            )
+            .chash.sha2_256()
+            .str.slice(0, 16)  # first 8 bytes
+        )
     )
     return df.select(
         "packet_id",

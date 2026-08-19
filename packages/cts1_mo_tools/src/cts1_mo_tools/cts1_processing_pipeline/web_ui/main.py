@@ -134,9 +134,7 @@ def _recent_beacons_table(path: Path) -> None:
         ui.table(columns=columns, rows=rows, row_key="received_at").classes("w-full")
 
 
-def _render_chart_group(
-    title: str, specs: list[ChartSpec], df: pl.DataFrame
-) -> None:
+def _render_chart_group(title: str, specs: list[ChartSpec], df: pl.DataFrame) -> None:
     """One collapsible chart group, with charts mounted lazily on first expand.
 
     An `ui.echart` is a real ECharts instance in the browser (its own canvas,
@@ -159,8 +157,11 @@ def _render_chart_group(
         if not e.value or built:
             return
         built = True
-        with container, ui.grid(columns="repeat(auto-fit, minmax(420px, 1fr))").classes(
-            "w-full gap-4 p-2"
+        with (
+            container,
+            ui.grid(columns="repeat(auto-fit, minmax(420px, 1fr))").classes(
+                "w-full gap-4 p-2"
+            ),
         ):
             for option in options:
                 ui.echart(option).classes("h-72")
