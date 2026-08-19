@@ -62,10 +62,12 @@ import polars as pl
 import polars_hash
 from loguru import logger
 
-from cts1_mo_tools.cts1_decode_satnogs_packets import CSP_CRC32C_SIZE, crc32c
+from cts1_mo_tools.cts1_decode_satnogs_packets import CSP_CRC32C_SIZE
 from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate import (
     pipeline as step_1_pipeline,
 )
+
+from .crc32c_vectorized import crc32c_hex_series
 
 DEFAULT_OUTPUT_DIR = step_1_pipeline.DEFAULT_DB_PATH.parent
 OUTPUT_FILENAME = "distinct_packets_over_time.parquet"
@@ -101,15 +103,6 @@ _SOURCE_FIELDS: Sequence[str] = (
 )
 
 
-def _append_crc32c(data_hex: str) -> str:
-    """Append a freshly computed CRC-32C to `data_hex`, treating it as a bare
-    payload with no trailing CRC.
-    """
-    payload = bytes.fromhex(data_hex)
-    computed = crc32c(payload)
-    return data_hex + computed.to_bytes(CSP_CRC32C_SIZE, "big").hex()
-
-
 def _complete_missing_crc(packets: pl.DataFrame) -> pl.DataFrame:
     """satnogs_data_demod sometimes reports a packet with its trailing CSP
     CRC-32C already stripped and sometimes doesn't -- there's no way to tell
@@ -131,10 +124,9 @@ def _complete_missing_crc(packets: pl.DataFrame) -> pl.DataFrame:
         "csp_crc_valid"
     ).fill_null(value=False)
 
-    incomplete = packets.filter(needs_crc).with_columns(
-        data_hex=pl.col("data_hex").map_elements(
-            _append_crc32c, return_dtype=pl.String
-        ),
+    incomplete = packets.filter(needs_crc)
+    incomplete = incomplete.with_columns(
+        data_hex=pl.col("data_hex") + crc32c_hex_series(incomplete, "data_hex"),
         data_length_bytes=pl.col("data_length_bytes") + CSP_CRC32C_SIZE,
         csp_crc_valid=pl.lit(value=True),  # true by construction
         csp_crc_source=pl.lit("computed"),
