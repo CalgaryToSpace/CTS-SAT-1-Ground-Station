@@ -45,13 +45,15 @@ def parse_forensics_line(line: str) -> dict[str, Any] | None:
         return None
 
     data_bytes = base64.b64decode(obj["data_base64"])
+    rs = obj["rs"]
 
     return {
         # Ignore as useless - "sso_filename": obj["filename"],
         "time_in_file_ms": obj["time_in_file_ms"],
         "rssi": obj["rssi"],
-        "rs_corrected_error_count": obj["rs"],
-        "rs_correctable": obj["rs"] >= 0,
+        # Negative means RS-uncorrectable -- no meaningful error count then.
+        "rs_corrected_error_count": rs if rs >= 0 else None,
+        "rs_correctable": rs >= 0,
         "data_hex": data_bytes.hex(),
         "data_length_bytes": len(data_bytes),
     }

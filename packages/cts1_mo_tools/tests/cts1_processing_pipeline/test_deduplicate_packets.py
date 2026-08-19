@@ -11,7 +11,7 @@ from cts1_mo_tools.cts1_processing_pipeline.step_2_deduplicate_packets.pipeline 
 _DEFAULT_PACKET = {
     "observation_id": 1,
     "decoder": "sso_rx_replay",
-    "data_hex": "aa",
+    "data_hex": "c2a28a00aa",
     "data_length_bytes": 1,
     "csp_crc_valid": True,
     "rssi": -1.0,
@@ -49,7 +49,13 @@ _OBS_1 = {
 def test_sso_rs_uncorrectable_is_dropped() -> None:
     observations = _observations_df([_OBS_1])
     packets = _packets_df(
-        [_packet(received_at="2026-08-12T19:35:00", rs_corrected_error_count=-1)]
+        [
+            _packet(
+                received_at="2026-08-12T19:35:00",
+                rs_corrected_error_count=-1,
+                rs_correctable=False,
+            )
+        ]
     )
 
     result = compute_distinct_packets(packets, observations)
@@ -71,7 +77,7 @@ def test_sso_rs_corrected_is_kept() -> None:
 
 def test_sso_dedupes_within_one_minute_across_observations() -> None:
     """Two ground stations catching the same overpass, both sso_rx_replay,
-    within SSO_DEDUPE_TOLERANCE of each other, merge into one row.
+    within BASELINE_DEDUPE_TOLERANCE of each other, merge into one row.
     """
     observations = _observations_df(
         [
@@ -85,8 +91,16 @@ def test_sso_dedupes_within_one_minute_across_observations() -> None:
     )
     packets = _packets_df(
         [
-            _packet(observation_id=1, received_at="2026-08-12T19:35:00", data_hex="aa"),
-            _packet(observation_id=2, received_at="2026-08-12T19:35:20", data_hex="aa"),
+            _packet(
+                observation_id=1,
+                received_at="2026-08-12T19:35:00",
+                data_hex="c2a28a00aa",
+            ),
+            _packet(
+                observation_id=2,
+                received_at="2026-08-12T19:35:20",
+                data_hex="c2a28a00aa",
+            ),
         ]
     )
 
@@ -99,6 +113,38 @@ def test_sso_dedupes_within_one_minute_across_observations() -> None:
     assert row["packet_count"] == 2
     assert json.loads(row["observation_ids"]) == [1, 2]
     assert json.loads(row["decoders"]) == ["sso_rx_replay"]
+
+
+def test_askew_outranks_sso_as_baseline_within_same_cluster() -> None:
+    """When both askew_demod_from_file and sso_rx_replay decode the same
+    content within BASELINE_DEDUPE_TOLERANCE, askew's own received_at/decoder
+    wins as the cluster's authoritative source, even though it arrives later.
+    """
+    observations = _observations_df([_OBS_1])
+    packets = _packets_df(
+        [
+            _packet(
+                observation_id=1,
+                received_at="2026-08-12T19:35:10",  # later than askew's
+                data_hex="c2a28a00aa",
+            ),
+            _packet(
+                observation_id=1,
+                decoder="askew_demod_from_file",
+                received_at="2026-08-12T19:35:00",  # earlier -- still wins
+                data_hex="c2a28a00aa",
+            ),
+        ]
+    )
+
+    result = compute_distinct_packets(packets, observations)
+
+    assert len(result) == 1
+    row = result.row(0, named=True)
+    assert row["received_at"] == _dt("2026-08-12T19:35:00")
+    assert row["received_at_source"] == "askew_demod_from_file"
+    assert row["packet_count"] == 2
+    assert json.loads(row["decoders"]) == ["askew_demod_from_file", "sso_rx_replay"]
 
 
 def test_sso_does_not_dedupe_beyond_one_minute() -> None:
@@ -117,8 +163,16 @@ def test_sso_does_not_dedupe_beyond_one_minute() -> None:
     )
     packets = _packets_df(
         [
-            _packet(observation_id=1, received_at="2026-08-12T19:35:00", data_hex="aa"),
-            _packet(observation_id=3, received_at="2026-08-12T20:20:00", data_hex="aa"),
+            _packet(
+                observation_id=1,
+                received_at="2026-08-12T19:35:00",
+                data_hex="c2a28a00aa",
+            ),
+            _packet(
+                observation_id=3,
+                received_at="2026-08-12T20:20:00",
+                data_hex="c2a28a00aa",
+            ),
         ]
     )
 
@@ -148,16 +202,20 @@ def test_other_decoder_matches_baseline_via_observation_window_overlap() -> None
     )
     packets = _packets_df(
         [
-            _packet(observation_id=1, received_at="2026-08-12T19:37:00", data_hex="cc"),
+            _packet(
+                observation_id=1,
+                received_at="2026-08-12T19:37:00",
+                data_hex="c2a28a00cc",
+            ),
             _packet(
                 observation_id=4,
                 decoder="gr_satellites_pdu",
                 received_at="2026-08-12T23:59:00",  # way outside 15 min
-                data_hex="cc",
+                data_hex="c2a28a00cc",
                 csp_crc_valid=None,
                 rssi=None,
                 rs_corrected_error_count=None,
-                rs_correctable=None,
+                rs_correctable=True,
                 time_in_file_ms=None,
             ),
         ]
@@ -188,16 +246,20 @@ def test_other_decoder_matches_baseline_via_fifteen_minute_tolerance() -> None:
     )
     packets = _packets_df(
         [
-            _packet(observation_id=1, received_at="2026-08-12T19:35:00", data_hex="dd"),
+            _packet(
+                observation_id=1,
+                received_at="2026-08-12T19:35:00",
+                data_hex="c2a28a00dd",
+            ),
             _packet(
                 observation_id=5,
                 decoder="gr_satellites_kiss",
                 received_at="2026-08-12T19:40:00",  # 5 min after baseline
-                data_hex="dd",
+                data_hex="c2a28a00dd",
                 csp_crc_valid=None,
                 rssi=None,
                 rs_corrected_error_count=None,
-                rs_correctable=None,
+                rs_correctable=True,
             ),
         ]
     )
@@ -229,11 +291,11 @@ def test_other_decoder_not_matched_becomes_its_own_leftover_row() -> None:
                 observation_id=6,
                 decoder="satnogs_data_demod",
                 received_at="2026-08-12T23:59:00",
-                data_hex="ee",
+                data_hex="c2a28a00ee",
                 csp_crc_valid=True,  # already has a valid CRC -- no completion needed
                 rssi=None,
                 rs_corrected_error_count=None,
-                rs_correctable=None,
+                rs_correctable=True,
                 time_in_file_ms=None,
             )
         ]
@@ -279,33 +341,33 @@ def test_leftover_content_clusters_by_fifteen_minute_gaps() -> None:
                 observation_id=7,
                 decoder="satnogs_data_demod",
                 received_at="2026-08-12T10:05:00",
-                data_hex="ff",
+                data_hex="c2a28a00ff",
                 csp_crc_valid=True,
                 rssi=None,
                 rs_corrected_error_count=None,
-                rs_correctable=None,
+                rs_correctable=True,
                 time_in_file_ms=None,
             ),
             _packet(
                 observation_id=8,
                 decoder="satnogs_data_demod",
                 received_at="2026-08-12T10:12:00",  # 7 min later, within 15 min
-                data_hex="ff",
+                data_hex="c2a28a00ff",
                 csp_crc_valid=True,
                 rssi=None,
                 rs_corrected_error_count=None,
-                rs_correctable=None,
+                rs_correctable=True,
                 time_in_file_ms=None,
             ),
             _packet(
                 observation_id=9,
                 decoder="satnogs_data_demod",
                 received_at="2026-08-13T10:05:00",  # a day later
-                data_hex="ff",
+                data_hex="c2a28a00ff",
                 csp_crc_valid=True,
                 rssi=None,
                 rs_corrected_error_count=None,
-                rs_correctable=None,
+                rs_correctable=True,
                 time_in_file_ms=None,
             ),
         ]
@@ -354,7 +416,7 @@ def test_demod_packet_missing_crc_merges_with_sso_baseline() -> None:
                 csp_crc_valid=False,  # step 1 already flagged this invalid
                 rssi=None,
                 rs_corrected_error_count=None,
-                rs_correctable=None,
+                rs_correctable=True,
                 time_in_file_ms=None,
             ),
         ]
@@ -380,7 +442,7 @@ def test_demod_only_packet_gets_a_completed_self_consistent_crc() -> None:
     completed, purely so the result is internally consistent -- not because
     it was independently verified by the satellite.
     """
-    payload = bytes.fromhex("aabbccddeeff")
+    payload = bytes.fromhex("c2a28a00aabbccddeeff")
     observations = _observations_df(
         [
             {
@@ -401,7 +463,7 @@ def test_demod_only_packet_gets_a_completed_self_consistent_crc() -> None:
                 csp_crc_valid=False,
                 rssi=None,
                 rs_corrected_error_count=None,
-                rs_correctable=None,
+                rs_correctable=True,
                 time_in_file_ms=None,
             )
         ]
@@ -425,7 +487,7 @@ def test_demod_packet_with_already_valid_crc_is_left_alone() -> None:
     """A satnogs_data_demod row that already carries a valid CRC shouldn't
     have a second one appended on top.
     """
-    payload = bytes.fromhex("11223344")
+    payload = bytes.fromhex("c2a28a0011223344")
     full_hex = (payload + crc32c(payload).to_bytes(4, "big")).hex()
 
     observations = _observations_df(
@@ -448,7 +510,7 @@ def test_demod_packet_with_already_valid_crc_is_left_alone() -> None:
                 csp_crc_valid=True,
                 rssi=None,
                 rs_corrected_error_count=None,
-                rs_correctable=None,
+                rs_correctable=True,
                 time_in_file_ms=None,
             )
         ]
@@ -463,6 +525,17 @@ def test_demod_packet_with_already_valid_crc_is_left_alone() -> None:
 
     sources = json.loads(row["sources"])
     assert sources[0]["csp_crc_source"] == "decoded"
+
+
+def test_packet_with_wrong_csp_header_is_dropped() -> None:
+    observations = _observations_df([_OBS_1])
+    packets = _packets_df(
+        [_packet(received_at="2026-08-12T19:35:00", data_hex="deadbeef00")]
+    )
+
+    result = compute_distinct_packets(packets, observations)
+
+    assert result.is_empty()
 
 
 def test_empty_data_hex_rows_are_dropped() -> None:

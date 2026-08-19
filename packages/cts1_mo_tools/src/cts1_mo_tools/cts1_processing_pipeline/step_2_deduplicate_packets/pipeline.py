@@ -9,23 +9,31 @@ those into one row per *distinct received packet*, each carrying a single
 best-guess `received_at` and JSON columns tracing back to every
 observation/decoder that contributed to it.
 
+Before any of the trust/merge logic below, every row is filtered to
+`rs_correctable` (RS-uncorrectable frames are dropped) and a `data_hex` that
+starts with CTS-SAT-1's own CSP header (`CTS1_CSP_HEADER_HEX`), so noise
+from other satellites/garbage decodes never enters the clustering step.
+
 Trust model:
-  - `sso_rx_replay` is the most trustworthy decoder in both content (its
-    Reed-Solomon-corrected frames are filtered to `rs_corrected_error_count >= 0`,
-    i.e. RS-uncorrectable frames are dropped) and timing (it reports a
-    within-file offset resolved against the observation's own start time).
-    Its packets are the baseline: two sso_rx_replay decodes of the same
-    content are only merged if received within `SSO_DEDUPE_TOLERANCE` of
-    each other -- multiple SatNOGS ground stations time-synced to within
-    about a minute of real time commonly all catch the same overpass.
+  - `askew_demod_from_file` and `sso_rx_replay` (in that trust order -- see
+    `BASELINE_DECODERS`) are the most trustworthy decoders in both content
+    and timing (each reports a within-file offset resolved against the
+    observation's own start time). Their packets form the baseline: two
+    baseline-decoder decodes of the same content are merged if received
+    within `BASELINE_DEDUPE_TOLERANCE` of each other -- multiple SatNOGS
+    ground stations time-synced to within about a minute of real time
+    commonly all catch the same overpass. When a merged baseline cluster
+    has an `askew_demod_from_file` decode, its timestamp wins as the
+    cluster's `received_at`; otherwise the earliest `sso_rx_replay` decode
+    is used.
   - Every other decoder is treated as far less trustworthy on timing (some,
     like gr_satellites_pdu, can't localize a frame within its observation at
     all and just report the observation's end time). A same-content packet
-    from another decoder is merged into an sso_rx_replay baseline packet if
-    it falls within `OTHER_DECODER_TOLERANCE` of that baseline packet, or if
-    its own observation's window overlaps the observation window(s) the
-    baseline packet was seen in.
-  - Content with no sso_rx_replay baseline anywhere is still worth keeping
+    from another decoder is merged into a baseline packet if it falls
+    within `OTHER_DECODER_TOLERANCE` of that baseline packet, or if its own
+    observation's window overlaps the observation window(s) the baseline
+    packet was seen in.
+  - Content with no baseline-decoder decode anywhere is still worth keeping
     (a decoder-exclusive packet isn't nothing), so it's clustered against
     itself using the same wide, low-trust tolerance and reported with its
     earliest contributing decode as a best-effort `received_at`.
@@ -66,12 +74,21 @@ if TYPE_CHECKING:
 DEFAULT_OUTPUT_DIR = step_1_pipeline.DEFAULT_DB_PATH.parent
 OUTPUT_FILENAME = "distinct_packets_over_time.parquet"
 
+ASKEW_DECODER = "askew_demod_from_file"
 SSO_DECODER = "sso_rx_replay"
 DEMOD_DECODER = "satnogs_data_demod"
 
+# Both have trustworthy within-file timing, so both anchor the baseline
+# clustering below -- in this trust order (highest first) for picking a
+# cluster's authoritative received_at/decoders when both are present.
+BASELINE_DECODERS = (ASKEW_DECODER, SSO_DECODER)
+
+# CTS-SAT-1's CSP header, as the leading bytes of every genuine `data_hex`.
+CTS1_CSP_HEADER_HEX = "c2a28a00"
+
 # Multiple ground stations recording the same overpass are all assumed
 # time-synced to within about a minute of real time.
-SSO_DEDUPE_TOLERANCE = timedelta(minutes=1)
+BASELINE_DEDUPE_TOLERANCE = timedelta(minutes=1)
 
 # Everything else gets a much wider berth, since e.g. gr_satellites_pdu
 # reports the observation's end time for every single frame.
@@ -169,14 +186,30 @@ def _cluster_by_content_and_time(
 
 
 def _cluster_baseline(baseline: pl.DataFrame) -> pl.DataFrame:
-    """Cluster sso_rx_replay rows into distinct baseline packet events."""
+    """Cluster askew_demod_from_file/sso_rx_replay rows into distinct baseline
+    packet events.
+
+    Both decoders have trustworthy timing, so they're clustered together by
+    content+time same as a single decoder would be. Within a cluster, rows
+    are reordered so `BASELINE_DECODERS`' highest-trust decoder present
+    sorts first -- `.first()` below then picks that decoder's own
+    received_at/metadata/decoder name (`received_at_source`) as the
+    cluster's authoritative values, falling back to the next-most-trusted
+    decoder present.
+    """
     clustered = _cluster_by_content_and_time(
-        baseline, tolerance=SSO_DEDUPE_TOLERANCE, cluster_col="cluster_id"
+        baseline, tolerance=BASELINE_DEDUPE_TOLERANCE, cluster_col="cluster_id"
     )
+    trust_rank = pl.col("decoder").replace_strict(
+        {decoder: rank for rank, decoder in enumerate(BASELINE_DECODERS)},
+        return_dtype=pl.UInt32,
+    )
+    clustered = clustered.sort(["data_hex", "cluster_id", trust_rank, "received_at"])
     return (
         clustered.group_by(["data_hex", "cluster_id"], maintain_order=True)
         .agg(
-            pl.col("received_at").first(),  # earliest -- rows are time-sorted
+            pl.col("received_at").first(),  # highest-trust decoder's own time
+            pl.col("decoder").first().alias("received_at_source"),
             pl.col("data_length_bytes").first(),
             pl.col("csp_crc_valid").first(),
             pl.col("csp_crc_source").first(),
@@ -186,6 +219,7 @@ def _cluster_baseline(baseline: pl.DataFrame) -> pl.DataFrame:
             pl.col("obs_start").min().alias("cluster_obs_start"),
             pl.col("obs_end").max().alias("cluster_obs_end"),
             pl.col("observation_id").unique().alias("baseline_observation_ids"),
+            pl.col("decoder").unique().alias("baseline_decoders"),
             pl.col("_source").alias("sources"),
         )
         .drop("cluster_id")
@@ -272,7 +306,7 @@ def _attach_others_to_baseline(
 
     return attached.with_columns(
         decoders=pl.col("_other_decoders")
-        .list.concat(pl.lit([SSO_DECODER]))
+        .list.concat(pl.col("baseline_decoders"))
         .list.unique()
         .list.sort(),
         observation_ids=pl.concat_list(
@@ -281,7 +315,6 @@ def _attach_others_to_baseline(
         .list.unique()
         .list.sort(),
         sources=pl.concat_list([pl.col("sources"), pl.col("_other_sources")]),
-        received_at_source=pl.lit(SSO_DECODER),
     ).select(
         "data_hex",
         "received_at",
@@ -299,7 +332,7 @@ def _attach_others_to_baseline(
 
 
 def _cluster_leftover_others(unmatched: pl.DataFrame) -> pl.DataFrame:
-    """Distinct-packet rows for content with no sso_rx_replay baseline at
+    """Distinct-packet rows for content with no baseline-decoder decode at
     all: clustered against themselves with the wide, low-trust tolerance,
     reporting the earliest contributing decode as a best-effort `received_at`.
     """
@@ -382,17 +415,19 @@ def compute_distinct_packets(
     )
 
     packets_df = packets_df.filter(
-        pl.col("data_hex").is_not_null() & (pl.col("data_hex") != "")
+        pl.col("data_hex").is_not_null()
+        & (pl.col("data_hex") != "")
+        & pl.col("data_hex").str.starts_with(CTS1_CSP_HEADER_HEX)
+        & pl.col("rs_correctable")
     )
     packets_df = _complete_missing_crc(packets_df)
-    is_sso = pl.col("decoder") == SSO_DECODER
-    packets_df = packets_df.filter(~is_sso | (pl.col("rs_corrected_error_count") >= 0))
+    is_baseline = pl.col("decoder").is_in(BASELINE_DECODERS)
 
     packets_df = packets_df.join(observations_df, on="observation_id", how="left")
     packets_df = _with_source_struct(packets_df)
 
-    baseline = packets_df.filter(is_sso).with_row_index("_row_id")
-    others = packets_df.filter(~is_sso).with_row_index("_row_id")
+    baseline = packets_df.filter(is_baseline).with_row_index("_row_id")
+    others = packets_df.filter(~is_baseline).with_row_index("_row_id")
 
     baseline_clusters = _cluster_baseline(baseline)
     matched, unmatched = _match_others_to_baseline(others, baseline_clusters)

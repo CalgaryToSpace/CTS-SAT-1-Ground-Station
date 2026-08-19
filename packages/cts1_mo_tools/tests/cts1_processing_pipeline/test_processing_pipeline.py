@@ -45,8 +45,24 @@ def test_parse_forensics_line_frame() -> None:
     assert row == {
         "time_in_file_ms": 45802.229,
         "rssi": -2.1,
-        "rs_corrected_error_count": -2,
+        "rs_corrected_error_count": None,
         "rs_correctable": False,
+        "data_hex": "c2228a001091",
+        "data_length_bytes": 6,
+    }
+
+
+def test_parse_forensics_line_frame_rs_corrected() -> None:
+    line = (
+        '{"filename":"sample.ogg","time_in_file_ms":45802.229,'
+        '"rssi":-2.1,"rs":3,"data_base64":"wiKKABCR"}'
+    )
+    row = parse_forensics_line(line)
+    assert row == {
+        "time_in_file_ms": 45802.229,
+        "rssi": -2.1,
+        "rs_corrected_error_count": 3,
+        "rs_correctable": True,
         "data_hex": "c2228a001091",
         "data_length_bytes": 6,
     }
