@@ -9,9 +9,10 @@ to grow fields over time):
     append-only.
   - decoder_runs: one row per (observation_id, decoder) that has been run,
     upserted by that pair (primary key), along with the decoder tool's
-    version at the time. Recorded unconditionally -- even when a decoder
-    finds no packets -- so an observation/decoder pair with no output isn't
-    retried on every subsequent run.
+    version and how long the decode took (`runtime_ms`) at the time.
+    Recorded unconditionally -- even when a decoder finds no packets -- so
+    an observation/decoder pair with no output isn't retried on every
+    subsequent run.
 """
 
 from __future__ import annotations
@@ -209,6 +210,8 @@ def record_decoder_runs(
     con: duckdb.DuckDBPyConnection,
     observation_id: int,
     decoder_versions: Mapping[str, str | None],
+    *,
+    runtime_ms: int | None = None,
 ) -> None:
     """Record that each decoder in `decoder_versions` has been run.
 
@@ -216,9 +219,14 @@ def record_decoder_runs(
     (e.g. the first line of `<tool> --version`), or None when the decoder
     has no versioned external tool.
 
+    `runtime_ms` is how long (in milliseconds) the whole decode of this
+    observation took -- all decoders in `decoder_versions` are dispatched
+    together as a single unit of work, so the same value is stamped onto
+    each of their rows.
+
     Upserted by (observation_id, decoder): rerunning a pair (e.g. via
-    --force-rerun-decoders) just bumps `run_at`/`version` rather than adding
-    a duplicate row.
+    --force-rerun-decoders) just bumps `run_at`/`version`/`runtime_ms`
+    rather than adding a duplicate row.
     """
     run_at = datetime.now(UTC)
     rows = [
@@ -227,6 +235,7 @@ def record_decoder_runs(
             "decoder": decoder,
             "run_at": run_at,
             "version": version,
+            "runtime_ms": runtime_ms,
         }
         for decoder, version in decoder_versions.items()
     ]
@@ -239,17 +248,21 @@ def record_decoder_runs(
         if not _table_exists(con, DECODER_RUNS_TABLE):
             con.execute(
                 f"CREATE TABLE {_quote_ident(DECODER_RUNS_TABLE)} ("
-                f"observation_id BIGINT, "
-                f"decoder VARCHAR, "
+                f"observation_id BIGINT NOT NULL, "
+                f"decoder VARCHAR NOT NULL, "
                 f"run_at TIMESTAMPTZ NOT NULL, "
-                f"version VARCHAR, "
+                f"version VARCHAR NOT NULL, "
+                f"runtime_ms INTEGER NOT NULL, "
                 f"PRIMARY KEY (observation_id, decoder))"
             )
+        else:
+            _add_missing_columns(con, DECODER_RUNS_TABLE, "_incoming_decoder_runs")
         con.execute(
             f"INSERT INTO {_quote_ident(DECODER_RUNS_TABLE)} BY NAME "  # noqa: S608
             f"SELECT * FROM _incoming_decoder_runs "
             f"ON CONFLICT (observation_id, decoder) "
-            f"DO UPDATE SET run_at = excluded.run_at, version = excluded.version"
+            f"DO UPDATE SET run_at = excluded.run_at, version = excluded.version, "
+            f"runtime_ms = excluded.runtime_ms"
         )
     finally:
         con.unregister("_incoming_decoder_runs")

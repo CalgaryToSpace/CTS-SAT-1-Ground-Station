@@ -21,6 +21,7 @@ __all__ = ["DEFAULT_DB_PATH", "run"]
 import concurrent.futures
 import re
 import tempfile
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -51,7 +52,8 @@ DECODERS = (
 )
 # Command each decoder's underlying tool is invoked as `<cmd> --version`
 # with, for `decoder_runs.version`. None means the decoder has no versioned
-# external tool (satnogs_data_demod just downloads pre-decoded packet URLs).
+# external tool (satnogs_data_demod just downloads pre-decoded packet URLs
+# from SatNOGS -- see _SATNOGS_DATA_DEMOD_VERSION below for its version).
 _DECODER_VERSION_COMMAND = {
     "askew_demod_from_file": "askew_demod_from_file",
     "sso_rx_replay": "sso_rx_replay",
@@ -59,6 +61,9 @@ _DECODER_VERSION_COMMAND = {
     "gr_satellites_kiss": "gr_satellites",
     "satnogs_data_demod": None,
 }
+# satnogs_data_demod has no local versioned tool -- it downloads packets
+# already decoded by SatNOGS's own (continuously-deployed) infrastructure.
+_SATNOGS_DATA_DEMOD_VERSION = "SatNOGS Rolling Release"
 
 
 def _resolve_decoder_versions() -> dict[str, str | None]:
@@ -66,6 +71,9 @@ def _resolve_decoder_versions() -> dict[str, str | None]:
     version_by_command: dict[str, str | None] = {}
     versions: dict[str, str | None] = {}
     for decoder, command in _DECODER_VERSION_COMMAND.items():
+        if decoder == "satnogs_data_demod":
+            versions[decoder] = _SATNOGS_DATA_DEMOD_VERSION
+            continue
         if command is None:
             versions[decoder] = None
             continue
@@ -302,6 +310,17 @@ def _process_fast(
     return rows
 
 
+def _process_fast_timed(
+    obs: dict[str, Any],
+    temp_dir: Path | None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Run `_process_fast` and report how long it took, in milliseconds."""
+    started_at = time.monotonic()
+    rows = _process_fast(obs, temp_dir)
+    runtime_ms = round((time.monotonic() - started_at) * 1000)
+    return rows, runtime_ms
+
+
 def _select_candidates(
     page: list[dict[str, Any]],
     *,
@@ -389,15 +408,16 @@ def run(  # noqa: C901, PLR0913, PLR0915
                 return
             logger.info(f"Dispatching a batch of {len(batch)} observation(s)...")
             futures = {
-                fast_executor.submit(_process_fast, obs, temp_dir): obs for obs in batch
+                fast_executor.submit(_process_fast_timed, obs, temp_dir): obs
+                for obs in batch
             }
             for future in concurrent.futures.as_completed(futures):
                 obs = futures[future]
                 try:
-                    rows = future.result()
+                    rows, runtime_ms = future.result()
                 except Exception:  # noqa: BLE001
                     logger.exception(f"Failed processing observation {obs['id']}")
-                    rows = []
+                    rows, runtime_ms = [], None
                 if rows:
                     df = pl.DataFrame(rows, infer_schema_length=None)
                     df = df.with_columns(
@@ -406,7 +426,9 @@ def run(  # noqa: C901, PLR0913, PLR0915
                         .alias("csp_crc_valid")
                     )
                     db.append_packets(con, df)
-                db.record_decoder_runs(con, obs["id"], decoder_versions)
+                db.record_decoder_runs(
+                    con, obs["id"], decoder_versions, runtime_ms=runtime_ms
+                )
                 for decoder in DECODERS:
                     done.add((obs["id"], decoder))
                 total_decoded += 1
