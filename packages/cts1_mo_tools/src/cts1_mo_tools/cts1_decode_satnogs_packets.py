@@ -458,7 +458,9 @@ def verify_csp_packet_crc32c(packet: bytes) -> tuple[bool, int, int]:
 # -- Decoders -----------------------------------------------------------------
 
 
-def decode_beacon_basic_packet(payload: bytes) -> dict[str, Any]:
+def decode_beacon_basic_packet(
+    payload: bytes, _full_payload: bytes | None = None
+) -> dict[str, Any]:
     """Decode a COMMS_beacon_basic_packet_t payload (CSP header already stripped)."""
     if len(payload) < BEACON_TOTAL_STRUCT_SIZE:
         msg = (
@@ -563,7 +565,9 @@ def decode_beacon_basic_packet(payload: bytes) -> dict[str, Any]:
     return data  # noqa: RET504
 
 
-def decode_beacon_extended_packet(payload: bytes) -> dict[str, Any]:
+def decode_beacon_extended_packet(
+    payload: bytes, _full_payload: bytes | None = None
+) -> dict[str, Any]:
     """Decode a COMMS_beacon_extended_packet_t payload (CSP header already stripped).
 
     Layout: the same fixed part + friendly_message + end_message as
@@ -771,20 +775,9 @@ def decode_beacon_extended_packet(payload: bytes) -> dict[str, Any]:
     return data  # noqa: RET504
 
 
-def decode_beacon_peripheral_packet(payload: bytes) -> dict[str, Any]:
-    """Decode a COMMS_PACKET_TYPE_BEACON_PERIPHERAL payload.
-
-    No struct is defined in the header for this type yet; we surface the raw
-    bytes so the row is still tagged correctly rather than silently dropped.
-    """
-    return {
-        "packet_type": "BEACON_PERIPHERAL",
-        "raw_payload_hex": payload.hex(),
-        "_note": "BEACON_PERIPHERAL struct not yet defined; raw bytes preserved",
-    }
-
-
-def decode_log_message_packet(payload: bytes) -> dict[str, Any]:
+def decode_log_message_packet(
+    payload: bytes, _full_payload: bytes | None = None
+) -> dict[str, Any]:
     """Decode a COMMS_log_message_packet_t payload (CSP header already stripped).
 
     Layout:
@@ -818,7 +811,9 @@ def decode_log_message_packet(payload: bytes) -> dict[str, Any]:
     }
 
 
-def decode_tcmd_response_packet(payload: bytes) -> dict[str, Any]:
+def decode_tcmd_response_packet(
+    payload: bytes, _full_payload: bytes | None = None
+) -> dict[str, Any]:
     """Decode a COMMS_tcmd_response_packet_t payload (CSP header already stripped).
 
     Layout:
@@ -871,7 +866,9 @@ def decode_tcmd_response_packet(payload: bytes) -> dict[str, Any]:
     }
 
 
-def decode_bulk_file_downlink_packet(payload: bytes) -> dict[str, Any]:
+def decode_bulk_file_downlink_packet(
+    payload: bytes, full_payload: bytes
+) -> dict[str, Any]:
     """Decode a COMMS_bulk_file_downlink_packet_t payload (CSP header already stripped).
 
     Layout:
@@ -892,9 +889,15 @@ def decode_bulk_file_downlink_packet(payload: bytes) -> dict[str, Any]:
         msg = f"Unexpected packet_type byte for BULK_FILE_DOWNLINK: {packet_type:#04x}"
         raise ValueError(msg)
 
-    data_bytes = payload[
-        BULK_DOWNLINK_HEADER_SIZE : BULK_DOWNLINK_HEADER_SIZE + BULK_DOWNLINK_MAX_DATA
-    ]
+    data_bytes = payload[BULK_DOWNLINK_HEADER_SIZE:]
+
+    # If the full_payload has a CRC32C on its end, we must chop it off. Critical for the
+    # final packet in any bulk downlink series.
+    # This branch is always true in the nominal re-demodulating pipeline, but SatNOGS
+    # stations are inconsistent whether they've pre-chopped the CRC. Thus, we must
+    # check and chop here.
+    if crc32c(full_payload[:-4]) == int.from_bytes(full_payload[-4:], "big"):
+        data_bytes = data_bytes[:-4]
 
     return {
         "packet_type": "BULK_FILE_DOWNLINK",
@@ -907,7 +910,7 @@ def decode_bulk_file_downlink_packet(payload: bytes) -> dict[str, Any]:
 # Map packet_type byte → decoder function (payload = post-CSP bytes).
 _PACKET_DECODERS = {
     0x01: decode_beacon_basic_packet,
-    0x02: decode_beacon_peripheral_packet,
+    # Not implemented - 0x02
     0x03: decode_log_message_packet,
     0x04: decode_tcmd_response_packet,
     0x10: decode_bulk_file_downlink_packet,
@@ -939,7 +942,7 @@ def decode_packet_safe(hex_str: str) -> dict[str, Any] | None:
     decoder = _PACKET_DECODERS.get(packet_type_byte)
     if decoder is not None:
         try:
-            decoded = decoder(payload)
+            decoded = decoder(payload, raw)
         except (ValueError, struct.error) as exc:
             logger.warning(
                 f"Failed to decode packet type {packet_type_byte:#04x}: {exc}"
