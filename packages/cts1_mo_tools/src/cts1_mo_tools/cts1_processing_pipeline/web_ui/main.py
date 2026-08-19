@@ -601,7 +601,9 @@ def _header_candidates_table(candidates: list[BulkHeaderCandidate]) -> str | Non
     return best.sha256 if best is not None else None
 
 
-def _reassembler_results(path: Path, ranges: list[tuple[datetime, datetime]]) -> None:
+def _reassembler_results(
+    path: Path, ranges: list[tuple[datetime, datetime]], *, headers_only: bool = False
+) -> None:
     if not ranges:
         ui.label(
             "No time range selected yet -- fill in a start and end above "
@@ -610,13 +612,17 @@ def _reassembler_results(path: Path, ranges: list[tuple[datetime, datetime]]) ->
         ).classes("text-caption text-grey")
         return
 
-    chunks = beacon_data.load_bulk_file_downlink_packets(path, ranges=ranges)
     tcmd_responses = beacon_data.load_tcmd_response_packets(path, ranges=ranges)
     candidates = find_header_candidates(tcmd_responses)
 
     with ui.card().classes("w-full"):
         ui.label("Header candidates").classes("text-lg font-bold")
         expected_sha256 = _header_candidates_table(candidates)
+
+    if headers_only:
+        return
+
+    chunks = beacon_data.load_bulk_file_downlink_packets(path, ranges=ranges)
 
     with ui.card().classes("w-full"):
         ui.label("BULK_FILE_DOWNLINK chunks").classes("text-lg font-bold")
@@ -724,21 +730,36 @@ def _build_file_reassembler_page(args: Args) -> None:
             on_click=lambda: (rows.append(_TimeRangeRow()), range_editor.refresh()),
         ).props("flat")
 
+    search_state = {"headers_only": False}
+
     @ui.refreshable
     def results() -> None:
-        _reassembler_results(args.parquet_path, _valid_ranges(rows))
+        _reassembler_results(
+            args.parquet_path,
+            _valid_ranges(rows),
+            headers_only=search_state["headers_only"],
+        )
+
+    def _search(*, headers_only: bool) -> None:
+        search_state["headers_only"] = headers_only
+        results.refresh()
 
     with _page_shell():
         ui.label("File Reassembler").classes("text-2xl font-bold")
         ui.label(
-            "Pick one or more UTC time ranges covering a single bulk file "
-            "download. Missing time boundaries on a row mean that row is "
-            "ignored, so an empty first row (the default) selects nothing "
-            "until you fill one in."
+            "Pick one or more UTC time ranges covering a single bulk file download."
         ).classes("text-caption text-grey")
         with ui.card().classes("w-full"):
             range_editor()
-        ui.button("Analyze", icon="search", on_click=results.refresh)
+        with ui.row().classes("items-center gap-2"):
+            ui.button(
+                "Search (Headers only)",
+                icon="search",
+                on_click=lambda: _search(headers_only=True),
+            ).props("outline")
+            ui.button(
+                "Search", icon="search", on_click=lambda: _search(headers_only=False)
+            )
         results()
 
 
