@@ -76,7 +76,7 @@ def _latest_beacon_card(path: Path) -> None:
                 received_at = row["received_at"]
                 ui.label(
                     f"{received_at:%Y-%m-%d %H:%M:%S} UTC ({_age_str(received_at)})"
-                ).classes("text-sm text-gray-400")
+                ).classes("text-caption text-grey")
             ui.label(row.get("friendly_message") or "").classes("text-sm italic")
 
         stats = [
@@ -92,7 +92,7 @@ def _latest_beacon_card(path: Path) -> None:
         with ui.row().classes("w-full gap-8 flex-wrap mt-2"):
             for label, value in stats:
                 with ui.column().classes("gap-0"):
-                    ui.label(label).classes("text-xs text-gray-400 uppercase")
+                    ui.label(label).classes("text-caption text-grey text-uppercase")
                     ui.label(str(value)).classes("text-base font-medium")
 
 
@@ -204,6 +204,11 @@ def _window_label_for_hours(hours: float | None) -> str:
     return "Last 24h"
 
 
+def _page_shell() -> ui.column:
+    """The column every page's content sits in: centered, capped width."""
+    return ui.column().classes("w-full max-w-6xl mx-auto gap-4 p-4")
+
+
 def _build_home_page(args: Args) -> None:
     state: dict[str, float | None] = {"hours": args.hours}
 
@@ -238,7 +243,7 @@ def _build_home_page(args: Args) -> None:
         state["hours"] = WINDOW_CHOICES[label]
         chart_section.refresh()
 
-    with ui.column().classes("w-full max-w-6xl mx-auto gap-4 p-4"):
+    with _page_shell():
         with ui.row().classes("w-full items-center justify-between"):
             ui.label("CTS-SAT-1 Ground Station").classes("text-2xl font-bold")
             with ui.row().classes("items-center gap-4"):
@@ -258,20 +263,20 @@ def _build_home_page(args: Args) -> None:
 
 
 def _build_file_reassembler_page() -> None:
-    with ui.column().classes("w-full max-w-6xl mx-auto gap-4 p-4"):
+    with _page_shell():
         ui.label("File Reassembler").classes("text-2xl font-bold")
         with ui.card().classes("w-full items-center p-12"):
-            ui.icon("construction", size="xl").classes("text-gray-400")
-            ui.label("Coming soon").classes("text-xl text-gray-400")
+            ui.icon("construction", size="xl", color="grey")
+            ui.label("Coming soon").classes("text-xl text-grey")
             ui.label(
                 "This tool will reassemble downlinked bulk files from "
                 "BULK_FILE_DOWNLINK packet chunks."
-            ).classes("text-sm text-gray-400")
+            ).classes("text-caption text-grey")
 
 
 def _build_pages(args: Args) -> None:
     def _drawer() -> None:
-        with ui.left_drawer(value=True).classes("bg-gray-900"):
+        with ui.left_drawer(value=True):
             ui.link("Home", "/").classes("text-lg p-2")
             ui.link("File Reassembler", "/file-reassembler").classes("text-lg p-2")
 
