@@ -21,7 +21,7 @@ from __future__ import annotations
 __all__ = ["main"]
 
 import base64
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path  # noqa: TC003 -- tyro needs this at runtime, see below
 from typing import TYPE_CHECKING
@@ -282,6 +282,22 @@ class _TimeRangeRow:
 
 RANGE_INPUT_MASK = "####-##-## ##:##:##"
 RANGE_INPUT_PLACEHOLDER = "YYYY-MM-DD HH:MM:SS"
+RANGE_INPUT_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+
+def _format_range_input(value: datetime) -> str:
+    return value.strftime(RANGE_INPUT_FORMAT)
+
+
+def _default_time_range_row() -> _TimeRangeRow:
+    """The last 24h (UTC, up to now) -- a reasonable starting guess so the
+    page shows something on first load instead of an empty selection.
+    """
+    now = datetime.now(UTC)
+    return _TimeRangeRow(
+        start=_format_range_input(now - timedelta(hours=24)),
+        end=_format_range_input(now),
+    )
 
 
 def _parse_range_input(value: str | None) -> datetime | None:
@@ -553,9 +569,109 @@ def _best_named_candidate(
     return max(named, key=_score)
 
 
+def _is_truncated(candidate: BulkHeaderCandidate) -> bool:
+    """Whether this candidate's SHA-256 looks cut off -- the only field
+    truncation is currently detectable in (see the module docstring: a
+    long file path pushes TCMD_RESPONSE's 186-byte cap into the sha256
+    value before it's fully written).
+    """
+    return candidate.sha256 is not None and len(candidate.sha256) < 64  # noqa: PLR2004
+
+
+@dataclass(frozen=True, slots=True)
+class _HeaderGroup:
+    """One or more consecutive (by `received_at`) candidates that all agree
+    on action/file/size/crc16/sha256 -- distinct receipts of what's
+    presumably the same underlying header, kept together as one row with
+    the individual timestamps available on expand.
+    """
+
+    action: str | None
+    file: str | None
+    file_size: int | None
+    crc16: str | None
+    sha256: str | None
+    truncated: bool
+    members: tuple[BulkHeaderCandidate, ...]
+
+
+def _group_key(
+    c: BulkHeaderCandidate,
+) -> tuple[str | None, str | None, int | None, str | None, str | None]:
+    return (c.action, c.file, c.file_size, c.crc16, c.sha256)
+
+
+def _group_consecutive_candidates(
+    candidates_by_time: list[BulkHeaderCandidate],
+) -> list[_HeaderGroup]:
+    """Group *consecutive* (in `candidates_by_time`'s order) candidates that
+    share action/file/file_size/crc16/sha256. Candidates with the same
+    values but separated by a different one in between stay in separate
+    groups -- e.g. two genuinely distinct downloads of the same file don't
+    get merged just because they match.
+    """
+    groups: list[_HeaderGroup] = []
+    for c in candidates_by_time:
+        if groups and _group_key(groups[-1].members[-1]) == _group_key(c):
+            groups[-1] = replace(groups[-1], members=(*groups[-1].members, c))
+        else:
+            groups.append(
+                _HeaderGroup(
+                    action=c.action,
+                    file=c.file,
+                    file_size=c.file_size,
+                    crc16=c.crc16,
+                    sha256=c.sha256,
+                    truncated=_is_truncated(c),
+                    members=(c,),
+                )
+            )
+    return groups
+
+
+# A `+`/`-` expand toggle per group row, native to NiceGUI/Quasar's own
+# expandable-row pattern (custom header/body slots) rather than a separate
+# `ui.expansion` per group -- keeps every group in the one table, and a
+# single-member group (nothing more to reveal) just gets a blank cell
+# instead of a button that would expand to repeat itself.
+_HEADER_TABLE_HEADER_SLOT = r"""
+    <q-tr :props="props">
+        <q-th auto-width />
+        <q-th v-for="col in props.cols" :key="col.name" :props="props">
+            {{ col.label }}
+        </q-th>
+    </q-tr>
+"""
+_HEADER_TABLE_BODY_SLOT = r"""
+    <q-tr :props="props">
+        <q-td auto-width>
+            <q-btn v-if="props.row.member_count > 1" size="sm" color="primary"
+                round dense flat
+                @click="props.expand = !props.expand"
+                :icon="props.expand ? 'remove' : 'add'" />
+        </q-td>
+        <q-td v-for="col in props.cols" :key="col.name" :props="props"
+            :class="col.name === 'sha256' ? 'ellipsis' : ''"
+            :style="col.name === 'sha256' ? 'max-width: 220px' : ''">
+            {{ col.value }}
+        </q-td>
+    </q-tr>
+    <q-tr v-show="props.expand" :props="props">
+        <q-td colspan="100%">
+            <div v-for="ts in props.row.member_timestamps" :key="ts"
+                class="text-left text-caption q-pl-lg">
+                {{ ts }}
+            </div>
+        </q-td>
+    </q-tr>
+"""
+
+
 def _header_candidates_table(candidates: list[BulkHeaderCandidate]) -> str | None:
-    """Render the found header candidates and return the SHA-256 (possibly
-    None/truncated) of whichever one looks most trustworthy -- see
+    """Render the found header candidates -- sorted by Received, consecutive
+    look-alike entries collapsed into one row expandable (via a `+`/`-`
+    button) to its individual timestamps -- and return the SHA-256
+    (possibly None/truncated) of whichever one looks most trustworthy, per
     `_best_named_candidate`.
     """
     if not candidates:
@@ -566,36 +682,44 @@ def _header_candidates_table(candidates: list[BulkHeaderCandidate]) -> str | Non
         ).classes("text-caption text-grey")
         return None
 
+    candidates_by_time = sorted(candidates, key=lambda c: c.received_at)
+    groups = _group_consecutive_candidates(candidates_by_time)
+
     columns = [
         {"name": "received_at", "label": "Received", "field": "received_at"},
         {"name": "action", "label": "Action", "field": "action"},
         {"name": "file", "label": "File", "field": "file"},
         {"name": "file_size", "label": "Size (bytes)", "field": "file_size"},
         {"name": "crc16", "label": "CRC-16", "field": "crc16"},
-        {
-            "name": "sha256",
-            "label": "SHA-256",
-            "field": "sha256",
-            # The full value, not manually truncated -- the browser ellipses
-            # it if the column is too narrow to fit (see Quasar's `.ellipsis`
-            # utility class), rather than us guessing how much to cut.
-            "classes": "ellipsis",
-            "headerClasses": "ellipsis",
-            "style": "max-width: 220px",
-        },
+        {"name": "sha256", "label": "SHA-256", "field": "sha256"},
+        {"name": "truncated", "label": "Truncated?", "field": "truncated"},
     ]
     rows = [
         {
-            "received_at": f"{c.received_at:%Y-%m-%d %H:%M:%S}",
-            "action": c.action or "",
-            "file": c.file or "",
-            "file_size": f"{c.file_size:,}" if c.file_size is not None else "",
-            "crc16": c.crc16 or "",
-            "sha256": c.sha256 or "",
+            "id": i,
+            "received_at": (
+                f"{group.members[0].received_at:%Y-%m-%d %H:%M:%S}"
+                if len(group.members) == 1
+                else f"{len(group.members)}x, "
+                f"{group.members[0].received_at:%Y-%m-%d %H:%M:%S} - "
+                f"{group.members[-1].received_at:%Y-%m-%d %H:%M:%S}"
+            ),
+            "action": group.action or "",
+            "file": group.file or "",
+            "file_size": f"{group.file_size:,}" if group.file_size is not None else "",
+            "crc16": group.crc16 or "",
+            "sha256": group.sha256 or "",
+            "truncated": "yes" if group.truncated else "",
+            "member_count": len(group.members),
+            "member_timestamps": [
+                f"{c.received_at:%Y-%m-%d %H:%M:%S}" for c in group.members
+            ],
         }
-        for c in candidates
+        for i, group in enumerate(groups)
     ]
-    ui.table(columns=columns, rows=rows, row_key="received_at").classes("w-full")
+    table = ui.table(columns=columns, rows=rows, row_key="id").classes("w-full")
+    table.add_slot("header", _HEADER_TABLE_HEADER_SLOT)
+    table.add_slot("body", _HEADER_TABLE_BODY_SLOT)
 
     best = _best_named_candidate(candidates)
     return best.sha256 if best is not None else None
@@ -667,7 +791,7 @@ def _reassembler_results(
 
 
 def _build_file_reassembler_page(args: Args) -> None:
-    rows: list[_TimeRangeRow] = [_TimeRangeRow()]
+    rows: list[_TimeRangeRow] = [_default_time_range_row()]
 
     @ui.refreshable
     def range_editor() -> None:
