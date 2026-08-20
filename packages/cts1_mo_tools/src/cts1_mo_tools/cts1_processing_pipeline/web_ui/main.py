@@ -854,10 +854,20 @@ def _build_file_reassembler_page(args: Args) -> None:
             on_click=lambda: (rows.append(_TimeRangeRow()), range_editor.refresh()),
         ).props("flat")
 
-    search_state = {"headers_only": False}
+    search_state = {"headers_only": False, "has_searched": False}
 
     @ui.refreshable
     def results() -> None:
+        if not search_state["has_searched"]:
+            # The range fields are pre-filled (see `_default_time_range_row`)
+            # purely as a starting guess -- not run automatically, since
+            # that'd mean every page load kicks off a query (potentially a
+            # large one) before the user asked for anything.
+            ui.label(
+                "Fields are pre-filled with the last 24h -- click one of the "
+                "Search buttons above to run it."
+            ).classes("text-caption text-grey")
+            return
         _reassembler_results(
             args.parquet_path,
             _valid_ranges(rows),
@@ -866,6 +876,7 @@ def _build_file_reassembler_page(args: Args) -> None:
 
     def _search(*, headers_only: bool) -> None:
         search_state["headers_only"] = headers_only
+        search_state["has_searched"] = True
         results.refresh()
 
     with _page_shell():
