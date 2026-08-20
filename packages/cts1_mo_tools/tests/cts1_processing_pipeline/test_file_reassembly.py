@@ -196,8 +196,8 @@ def _tcmd_row(
     *,
     text: str,
     ts_sent: int = 1,
-    seq_num: int = 0,
-    max_seq_num: int = 0,
+    seq_num: int = 1,  # real firmware numbers frames 1..max_seq_num, not 0-based
+    max_seq_num: int = 1,
     received_at: str = "2026-01-01T00:00:00",
 ) -> dict[str, Any]:
     return {
@@ -273,32 +273,46 @@ def test_truncated_json_still_yields_partial_fields() -> None:
     assert len(c.sha256) < 64
 
 
-def test_multi_fragment_response_is_reassembled_by_seq_num() -> None:
-    full_text = (
-        '{"action":"bulk_downlink_start_blob","file":"mpi_data/2026-08-08.mpi",'
-        '"file_size":1443001,"sha256":'
-        '"97B1681F8D5E95F7EA5443DDDA92FE2071697E5FB22B4B8137356E3D6E83C508",'
-        '"offset":185055,"length":1170}'
-    )
-    mid = len(full_text) // 2
+def test_only_first_frame_is_parsed_later_frames_are_ignored() -> None:
+    # Real firmware numbers frames 1..max_seq_num. The header fields this
+    # module looks for are always written before TCMD_RESPONSE's 186-byte
+    # cap bites, so seq_num 1 alone is trusted -- a later frame (here,
+    # seq_num 2, arriving on its own row/timestamp) is never even looked at,
+    # rather than being joined on or tried as its own candidate.
     df = _tcmd_df(
         [
-            # Deliberately out of order in the input -- seq_num must drive
-            # reassembly order, not row order.
-            _tcmd_row(text=full_text[mid:], ts_sent=42, seq_num=1, max_seq_num=1),
-            _tcmd_row(text=full_text[:mid], ts_sent=42, seq_num=0, max_seq_num=1),
+            _tcmd_row(
+                text='{"action":"adcs_get_latest_sd_file_blob","file":"ADCS/log_aa21'
+                '.TLM","file_size":26470,"crc16":"0xaa21","sha256":'
+                '"74aa7f5b1ae416a9864a05b71cc2bfe8729d921f52d6405d2de1ddee2d4bc3'
+                'c2","sd_car',
+                ts_sent=7,
+                seq_num=1,
+                max_seq_num=2,
+                received_at="2026-01-01T00:00:00",
+            ),
+            _tcmd_row(
+                text='d_index":19}',  # trailing bytes only, no captured field
+                ts_sent=7,
+                seq_num=2,
+                max_seq_num=2,
+                received_at="2026-01-01T00:00:05",
+            ),
         ]
     )
     candidates = find_header_candidates(df)
-    # Both the reassembled (full-text) candidate and each individual
-    # fragment's own best-effort parse are returned -- the fragment alone
-    # doesn't reach the "offset"/"length" fields, so the reassembled one is
-    # identified as whichever candidate has them.
-    reassembled = next(c for c in candidates if c.offset is not None)
-    assert reassembled.file == "mpi_data/2026-08-08.mpi"
-    assert reassembled.file_size == 1443001
-    assert reassembled.offset == 185055
-    assert reassembled.length == 1170
+    assert len(candidates) == 1
+    assert candidates[0].file == "ADCS/log_aa21.TLM"
+    assert candidates[0].received_at == _dt("2026-01-01T00:00:00")
+
+
+def test_second_frame_alone_is_not_a_candidate() -> None:
+    # A row whose seq_num isn't 1 is skipped outright, even if its own text
+    # happens to look header-shaped in isolation.
+    df = _tcmd_df(
+        [_tcmd_row(text='{"file":"x","file_size":1}', seq_num=2, max_seq_num=2)]
+    )
+    assert find_header_candidates(df) == []
 
 
 def test_multiple_distinct_headers_are_all_returned() -> None:

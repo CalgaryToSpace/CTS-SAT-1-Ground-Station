@@ -25,10 +25,18 @@ this module does is:
     with the data packets, or be missing outright -- and even when present,
     `TCMD_RESPONSE`'s payload is a hard-capped 186 bytes, so a descriptor
     naming a long file path routinely runs out of room before its `sha256`
-    is fully written. This is a best-effort scan for whatever recognizable
-    fields (`file`, `file_size`, `sha256`, ...) show up in that text,
-    tolerant of the JSON being incomplete/truncated -- surfaced to the user
-    as candidates to cross-check against, not as ground truth.
+    is fully written. A long response spans multiple downlinked frames
+    (`tcmd_response_seq_num` 1..`tcmd_response_max_seq_num`, sharing one
+    `tcmd_ts_sent`), but only the *first* frame (`seq_num == 1`) is ever
+    parsed here -- the header fields this module cares about are always
+    written before the size cap bites, so later frames only ever add bytes
+    past what's already been captured (e.g. a `sha256` continuation), and
+    including them just produced duplicate-looking candidates for the same
+    real header. This is a best-effort scan for whatever recognizable
+    fields (`file`, `file_size`, `sha256`, ...) show up in that first
+    frame's text, tolerant of the JSON being incomplete/truncated --
+    surfaced to the user as candidates to cross-check against, not as
+    ground truth.
 
   - `render_coverage_png()`: a byte-per-pixel bitmap of which bytes are
     covered vs. missing, one pixel per byte -- the web UI scales it up 3x
@@ -429,49 +437,42 @@ def _parse_header_text(text: str) -> dict[str, Any] | None:
 
 
 def find_header_candidates(tcmd_df: pl.DataFrame) -> list[BulkHeaderCandidate]:
-    """Every `TCMD_RESPONSE` row in `tcmd_df` that looks like a bulk-download
-    file descriptor, oldest first.
+    """Every first-frame `TCMD_RESPONSE` row in `tcmd_df` that looks like a
+    bulk-download file descriptor, oldest first.
 
-    `tcmd_df` must have `received_at`, `tcmd_ts_sent`, `tcmd_response_seq_num`,
-    and `tcmd_response_text` columns. A response that spans multiple frames
-    (`tcmd_response_seq_num`/`_max_seq_num` > 0, all sharing one
-    `tcmd_ts_sent`) is concatenated in sequence-number order before parsing
-    -- but since a fragment can itself go missing, each individual fragment
-    is *also* tried on its own, so a still-recognizable field isn't lost
-    just because a sibling fragment didn't make it down.
+    `tcmd_df` must have `received_at`, `tcmd_response_seq_num`, and
+    `tcmd_response_text` columns. A response that spans multiple downlinked
+    frames numbers them `tcmd_response_seq_num` 1..`tcmd_response_max_seq_num`
+    -- only `seq_num == 1` is parsed, since the fields this module looks for
+    are always written before `TCMD_RESPONSE`'s 186-byte cap bites, so later
+    frames only ever add bytes past what's already captured.
     """
     if tcmd_df.is_empty():
         return []
 
+    first_frames = tcmd_df.filter(pl.col("tcmd_response_seq_num") == 1)
     candidates: list[BulkHeaderCandidate] = []
-    grouped = tcmd_df.sort("tcmd_response_seq_num").group_by(
-        "tcmd_ts_sent", maintain_order=True
-    )
-    for _, group in grouped:
-        received_at = group.select(pl.col("received_at").min()).item()
-        fragments = [t for t in group["tcmd_response_text"].to_list() if t]
-        # The full reassembly first (it's the one worth trusting when
-        # complete), then each fragment on its own -- deduped, but keeping
-        # this order rather than a set's arbitrary one so a caller picking
-        # "the last/best candidate" reliably lands on the fullest parse.
-        candidate_texts = list(dict.fromkeys(["".join(fragments), *fragments]))
-        for text in candidate_texts:
-            if not text:
-                continue
-            parsed = _parse_header_text(text)
-            if parsed is None:
-                continue
-            candidates.append(
-                BulkHeaderCandidate(
-                    received_at=received_at,
-                    action=parsed.get("action"),
-                    file=parsed.get("file"),
-                    file_size=parsed.get("file_size"),
-                    sha256=parsed.get("sha256"),
-                    crc16=parsed.get("crc16"),
-                    offset=parsed.get("offset"),
-                    length=parsed.get("length"),
-                )
+    for text, received_at in zip(
+        first_frames["tcmd_response_text"].to_list(),
+        first_frames["received_at"].to_list(),
+        strict=True,
+    ):
+        if not text:
+            continue
+        parsed = _parse_header_text(text)
+        if parsed is None:
+            continue
+        candidates.append(
+            BulkHeaderCandidate(
+                received_at=received_at,
+                action=parsed.get("action"),
+                file=parsed.get("file"),
+                file_size=parsed.get("file_size"),
+                sha256=parsed.get("sha256"),
+                crc16=parsed.get("crc16"),
+                offset=parsed.get("offset"),
+                length=parsed.get("length"),
             )
+        )
     candidates.sort(key=lambda c: c.received_at)
     return candidates
