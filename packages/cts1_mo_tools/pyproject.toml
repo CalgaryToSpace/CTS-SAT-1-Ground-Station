@@ -20,6 +20,7 @@ dependencies = [
     "tzdata",
     "duckdb>=1.5.5",
     "pyarrow>=25.0.1",
+    "xlsxwriter>=3.2.0",
 ]
 
 [project.scripts]

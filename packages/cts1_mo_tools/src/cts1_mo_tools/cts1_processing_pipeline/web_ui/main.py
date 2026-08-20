@@ -3,8 +3,8 @@
 A NiceGUI dashboard over `everything_decoded.parquet` (step 3's output):
 recent beacon(s) at a glance, plus line/scatter charts for every field in
 the basic and extended beacon packets, grouped by subsystem -- see
-`beacon_stats_page`, `file_reassembler_page`, and `pipeline_status_page` for
-the individual pages.
+`beacon_stats_page`, `file_reassembler_page`, `pipeline_status_page`, and
+`export_page` for the individual pages.
 
 Usage (uv):
     uv run cts1_data_web_ui
@@ -30,6 +30,7 @@ from nicegui import ui
 
 from . import data as beacon_data
 from .beacon_stats_page import build_beacon_stats_page
+from .export_page import build_export_page
 from .file_reassembler_page import build_file_reassembler_page
 from .pipeline_status_page import build_pipeline_status_page
 
@@ -54,6 +55,7 @@ def _build_pages(args: Args) -> None:
             ui.link("Beacon Stats", "/").classes("text-lg p-2")
             ui.link("File Reassembler", "/file-reassembler").classes("text-lg p-2")
             ui.link("Pipeline Status", "/pipeline-status").classes("text-lg p-2")
+            ui.link("Export Data", "/export").classes("text-lg p-2")
 
     @ui.page("/")
     def beacon_stats_page() -> None:
@@ -69,6 +71,11 @@ def _build_pages(args: Args) -> None:
     def pipeline_status_page() -> None:
         _drawer()
         build_pipeline_status_page(args.parquet_path)
+
+    @ui.page("/export")
+    def export_page() -> None:
+        _drawer()
+        build_export_page(args.parquet_path)
 
 
 def main() -> None:
