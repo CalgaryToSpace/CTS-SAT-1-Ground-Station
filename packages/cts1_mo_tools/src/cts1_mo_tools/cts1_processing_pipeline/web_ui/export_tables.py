@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING, Literal, assert_never
 
 import duckdb
 import polars as pl
-import xlsxwriter
+import xlsxwriter  # pyright: ignore[reportMissingTypeStubs]
 
 from cts1_mo_tools.cts1_decode_satnogs_packets import PACKET_TYPE_MAP
 from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
@@ -101,7 +101,7 @@ TABLE_SPECS: tuple[TableSpec, ...] = (
     TableSpec(
         key="decoder_runs",
         step="Step 1 -- Download & Demodulate",
-        description="One row per decoder tool invocation per observation -- run time, version, and duration.",
+        description="One row per decoder tool invocation per observation.",
         filename=pipeline_status.DECODER_RUNS_FILENAME,
         time_column="run_at",
         has_packet_type=False,
@@ -133,7 +133,13 @@ TABLE_SPECS: tuple[TableSpec, ...] = (
 )
 
 ExportFormat = Literal["csv", "excel", "parquet", "sqlite", "duckdb"]
-EXPORT_FORMATS: tuple[ExportFormat, ...] = ("csv", "excel", "parquet", "sqlite", "duckdb")
+EXPORT_FORMATS: tuple[ExportFormat, ...] = (
+    "csv",
+    "excel",
+    "parquet",
+    "sqlite",
+    "duckdb",
+)
 
 _MEDIA_TYPES: dict[ExportFormat, str] = {
     "csv": "text/csv",
@@ -184,7 +190,7 @@ def _drop_all_null_columns(df: pl.DataFrame) -> pl.DataFrame:
     return df.select(keep_columns)
 
 
-def load_filtered_table(
+def load_filtered_table(  # noqa: PLR0913
     spec: TableSpec,
     output_dir: Path,
     *,
@@ -235,11 +241,13 @@ def _excel_sheet_name(key: str) -> str:
 
 
 def _write_csv_files(tables: Mapping[TableSpec, pl.DataFrame]) -> dict[str, bytes]:
-    return {f"{spec.key}.csv": df.write_csv().encode("utf-8") for spec, df in tables.items()}
+    return {
+        f"{spec.key}.csv": df.write_csv().encode("utf-8") for spec, df in tables.items()
+    }
 
 
 def _write_parquet_files(tables: Mapping[TableSpec, pl.DataFrame]) -> dict[str, bytes]:
-    files = {}
+    files: dict[str, bytes] = {}
     for spec, df in tables.items():
         buf = io.BytesIO()
         df.write_parquet(buf)
@@ -264,8 +272,8 @@ def _write_excel_file(tables: Mapping[TableSpec, pl.DataFrame]) -> dict[str, byt
     buf = io.BytesIO()
     workbook = xlsxwriter.Workbook(buf, {"in_memory": True})
     for spec, df in tables.items():
-        df = _drop_timezones(df)
-        df.write_excel(workbook=workbook, worksheet=_excel_sheet_name(spec.key))
+        df_write = _drop_timezones(df)
+        df_write.write_excel(workbook=workbook, worksheet=_excel_sheet_name(spec.key))
     workbook.close()
     return {"export.xlsx": buf.getvalue()}
 
@@ -281,7 +289,9 @@ def _write_sqlite_file(tables: Mapping[TableSpec, pl.DataFrame]) -> dict[str, by
             for spec, df in tables.items():
                 view_name = f"_export_{spec.key}"
                 con.register(view_name, df)
-                con.execute(f'CREATE TABLE sq."{spec.key}" AS SELECT * FROM {view_name}')
+                con.execute(
+                    f'CREATE TABLE sq."{spec.key}" AS SELECT * FROM {view_name}'  # noqa: S608
+                )
             con.execute("DETACH sq")
         finally:
             con.close()
@@ -296,7 +306,7 @@ def _write_duckdb_file(tables: Mapping[TableSpec, pl.DataFrame]) -> dict[str, by
             for spec, df in tables.items():
                 view_name = f"_export_{spec.key}"
                 con.register(view_name, df)
-                con.execute(f'CREATE TABLE "{spec.key}" AS SELECT * FROM {view_name}')
+                con.execute(f'CREATE TABLE "{spec.key}" AS SELECT * FROM {view_name}')  # noqa: S608
         finally:
             con.close()
         return {"export.duckdb": db_path.read_bytes()}
@@ -310,7 +320,7 @@ def _zip_files(files: Mapping[str, bytes]) -> bytes:
     return buf.getvalue()
 
 
-def build_export(
+def build_export(  # noqa: C901
     tables: Mapping[TableSpec, pl.DataFrame],
     *,
     export_format: ExportFormat,
@@ -376,7 +386,9 @@ def build_export(
                 "or packet-type filter."
             )
             raise ValueError(msg)
-        return ExportResult(filename="export.zip", data=data, media_type="application/zip")
+        return ExportResult(
+            filename="export.zip", data=data, media_type="application/zip"
+        )
 
     ((filename, data),) = files.items()
     if len(data) > MAX_OUTPUT_BYTES:
@@ -386,10 +398,12 @@ def build_export(
             "compress it, or narrow the time range/packet-type filter."
         )
         raise ValueError(msg)
-    return ExportResult(filename=filename, data=data, media_type=_MEDIA_TYPES[export_format])
+    return ExportResult(
+        filename=filename, data=data, media_type=_MEDIA_TYPES[export_format]
+    )
 
 
-def export_selected_tables(
+def export_selected_tables(  # noqa: PLR0913
     specs: Sequence[TableSpec],
     output_dir: Path,
     *,

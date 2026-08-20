@@ -11,6 +11,7 @@ from __future__ import annotations
 
 __all__ = ["build_export_page"]
 
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path  # noqa: TC003 -- tyro needs this at runtime elsewhere
 
@@ -76,10 +77,8 @@ def _tables_section(selected: dict[str, bool]) -> None:
     with ui.card().classes("w-full"):
         ui.label("Tables").classes("text-lg font-bold")
         ui.label(
-            "Pick one or more tables to export below, ordered by which "
-            "pipeline step produces them. Each table's ⚡ link streams "
-            "its parquet file exactly as the pipeline wrote it, straight "
-            "off disk -- no filtering, no format conversion, no row limit."
+            "Pick tables to export. Each table's ⚡ link streams "
+            "the entire table as a parquet file."
         ).classes("text-caption text-grey")
 
         current_step: str | None = None
@@ -93,7 +92,7 @@ def _tables_section(selected: dict[str, bool]) -> None:
                 ui.checkbox(
                     value=selected[spec.key],
                     on_change=lambda e, key=spec.key: selected.__setitem__(
-                        key, e.value
+                        key, bool(e.value)
                     ),
                 ).classes("mt-1")
                 with ui.column().classes("gap-0"):
@@ -120,7 +119,7 @@ def _packet_type_filter(selected_types: dict[str, bool]) -> None:
                     packet_type,
                     value=selected_types[packet_type],
                     on_change=lambda e, pt=packet_type: selected_types.__setitem__(
-                        pt, e.value
+                        pt, bool(e.value)
                     ),
                 )
 
@@ -177,25 +176,40 @@ def _time_filter_section(time_state: dict[str, str | None]) -> None:
             )
 
 
-def _options_section(options_state: dict[str, object]) -> None:
+@dataclass
+class _ExportOptions:
+    """The (mutable) export-format/zip/drop-nulls state `_options_section`
+    edits -- typed fields instead of a `dict[str, object]` so each widget's
+    `value=`/`on_change=` can stay bool/str-typed all the way through,
+    rather than every read needing an `object` cast.
+    """
+
+    export_format: export_tables.ExportFormat = export_tables.EXPORT_FORMATS[0]
+    zip_output: bool = False
+    drop_null_columns: bool = True
+
+
+def _options_section(options: _ExportOptions) -> None:
     with ui.card().classes("w-full"):
         ui.label("Export options").classes("text-lg font-bold")
         with ui.row().classes("items-center gap-6 flex-wrap mt-2"):
             ui.select(
                 list(export_tables.EXPORT_FORMATS),
-                value=options_state["format"],
+                value=options.export_format,
                 label="Format",
-                on_change=lambda e: options_state.__setitem__("format", e.value),
+                on_change=lambda e: setattr(options, "export_format", e.value),
             ).classes("w-40")
             ui.checkbox(
                 "Zip output",
-                value=options_state["zip"],
-                on_change=lambda e: options_state.__setitem__("zip", e.value),
+                value=options.zip_output,
+                on_change=lambda e: setattr(options, "zip_output", bool(e.value)),
             )
             ui.checkbox(
                 "Drop irrelevant columns (all-null after filtering)",
-                value=options_state["drop_null"],
-                on_change=lambda e: options_state.__setitem__("drop_null", e.value),
+                value=options.drop_null_columns,
+                on_change=lambda e: setattr(
+                    options, "drop_null_columns", bool(e.value)
+                ),
             )
         ui.label(
             "CSV and Parquet write one file per table -- selecting more "
@@ -215,11 +229,7 @@ def build_export_page(parquet_path: Path) -> None:
         export_tables.PACKET_TYPES, True
     )
     time_state: dict[str, str | None] = {"start": None, "end": None}
-    options_state: dict[str, object] = {
-        "format": export_tables.EXPORT_FORMATS[0],
-        "zip": False,
-        "drop_null": True,
-    }
+    options = _ExportOptions()
 
     def _run_export() -> None:
         specs = [
@@ -245,16 +255,18 @@ def build_export_page(parquet_path: Path) -> None:
                 start=start,
                 end=end,
                 packet_types=packet_types,
-                drop_all_null_columns=bool(options_state["drop_null"]),
-                export_format=options_state["format"],  # type: ignore[arg-type]
-                zip_output=bool(options_state["zip"]),
+                drop_all_null_columns=options.drop_null_columns,
+                export_format=options.export_format,
+                zip_output=options.zip_output,
             )
         except ValueError as exc:
             ui.notify(str(exc), type="negative")
             return
 
         ui.download.content(result.data, filename=result.filename)
-        ui.notify(f"Exported {result.filename} ({len(result.data):,} bytes).", type="positive")
+        ui.notify(
+            f"Exported {result.filename} ({len(result.data):,} bytes).", type="positive"
+        )
 
     with page_shell():
         ui.label("Export Data").classes("text-2xl font-bold")
@@ -270,6 +282,6 @@ def build_export_page(parquet_path: Path) -> None:
         _tables_section(selected_tables)
         _packet_type_filter(selected_packet_types)
         _time_filter_section(time_state)
-        _options_section(options_state)
+        _options_section(options)
 
         ui.button("Export", icon="download", on_click=_run_export).classes("mt-2")

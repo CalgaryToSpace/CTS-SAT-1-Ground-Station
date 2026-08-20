@@ -12,10 +12,10 @@ from __future__ import annotations
 
 __all__ = [
     "DECODER_RUNS_FILENAME",
+    "DEFAULT_OUTPUT_DIR",
     "DISTINCT_PACKETS_FILENAME",
     "RAW_OBSERVATIONS_FILENAME",
     "RAW_PACKETS_FILENAME",
-    "DEFAULT_OUTPUT_DIR",
     "DecoderToolStats",
     "PipelineCounts",
     "decoder_tool_stats",
@@ -167,9 +167,7 @@ def decoder_tool_stats(output_dir: Path = DEFAULT_OUTPUT_DIR) -> list[DecoderToo
     runs_lf = _scan(output_dir / DECODER_RUNS_FILENAME)
 
     raw_counts = (
-        raw_lf.group_by("decoder")
-        .agg(pl.len().alias("raw_decode_count"))
-        .collect()
+        raw_lf.group_by("decoder").agg(pl.len().alias("raw_decode_count")).collect()
         if raw_lf is not None
         else pl.DataFrame(schema={"decoder": pl.String, "raw_decode_count": pl.UInt32})
     )
@@ -214,13 +212,19 @@ def decoder_tool_stats(output_dir: Path = DEFAULT_OUTPUT_DIR) -> list[DecoderToo
         | set(run_stats["decoder"].to_list())
     )
 
-    raw_map = dict(zip(raw_counts["decoder"], raw_counts["raw_decode_count"], strict=True))
+    raw_map = dict(
+        zip(raw_counts["decoder"], raw_counts["raw_decode_count"], strict=True)
+    )
     distinct_map = dict(
-        zip(distinct_counts["decoder"], distinct_counts["distinct_packet_count"], strict=True)
+        zip(
+            distinct_counts["decoder"],
+            distinct_counts["distinct_packet_count"],
+            strict=True,
+        )
     )
     run_map = {row["decoder"]: row for row in run_stats.to_dicts()}
 
-    stats = []
+    stats: list[DecoderToolStats] = []
     for decoder in decoders:
         distinct_count = distinct_map.get(decoder, 0)
         run_row = run_map.get(decoder)
@@ -234,7 +238,9 @@ def decoder_tool_stats(output_dir: Path = DEFAULT_OUTPUT_DIR) -> list[DecoderToo
                 ),
                 last_run_at=run_row["last_run_at"] if run_row is not None else None,
                 last_version=run_row["last_version"] if run_row is not None else None,
-                avg_runtime_ms=run_row["avg_runtime_ms"] if run_row is not None else None,
+                avg_runtime_ms=run_row["avg_runtime_ms"]
+                if run_row is not None
+                else None,
             )
         )
 

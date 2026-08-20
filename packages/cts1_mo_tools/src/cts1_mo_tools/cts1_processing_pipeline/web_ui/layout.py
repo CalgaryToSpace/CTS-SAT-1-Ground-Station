@@ -8,5 +8,5 @@ from nicegui import ui
 
 
 def page_shell() -> ui.column:
-    """The column every page's content sits in: centered, capped width."""
-    return ui.column().classes("w-full max-w-6xl mx-auto gap-4 p-4")
+    """The column every page's content sits in: full page width."""
+    return ui.column().classes("w-full gap-4 p-4")

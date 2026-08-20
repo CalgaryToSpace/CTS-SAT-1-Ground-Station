@@ -11,20 +11,14 @@ supporting any of the filtering `export_tables.export_selected_tables` does
 (or downloading more than one table per request).
 """
 
-from __future__ import annotations
-
 __all__ = ["RAW_EXPORT_PATH", "raw_export_url", "register_raw_export_route"]
 
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 
 from . import export_tables
-
-if TYPE_CHECKING:
-    from fastapi import FastAPI
 
 RAW_EXPORT_PATH = "/raw-export"
 
@@ -40,7 +34,6 @@ def register_raw_export_route(app: FastAPI, output_dir: Path) -> None:
     that table's parquet file straight off disk via `FileResponse`.
     """
 
-    @app.get(RAW_EXPORT_PATH + "/{table_key}")
     def raw_export(table_key: str) -> FileResponse:
         spec = _SPECS_BY_KEY.get(table_key)
         if spec is None:
@@ -56,3 +49,9 @@ def register_raw_export_route(app: FastAPI, output_dir: Path) -> None:
         return FileResponse(
             path, filename=spec.filename, media_type="application/octet-stream"
         )
+
+    # Registered via `add_api_route` rather than the `@app.get(...)` decorator
+    # form so `raw_export` is passed as an argument (visibly "used") instead
+    # of a decorated-but-never-called nested function, which pyright's
+    # `reportUnusedFunction` otherwise flags.
+    app.add_api_route(RAW_EXPORT_PATH + "/{table_key}", raw_export, methods=["GET"])

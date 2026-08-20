@@ -90,9 +90,13 @@ def _counts_section(counts: status_data.PipelineCounts) -> None:
 
         ui.separator().classes("mt-2")
         ui.label("Freshness").classes("text-base font-medium mt-2")
-        _freshness_row("Latest observation end (SatNOGS)", counts.latest_observation_end)
+        _freshness_row(
+            "Latest observation end (SatNOGS)", counts.latest_observation_end
+        )
         _freshness_row("Latest packet received", counts.latest_packet_received_at)
-        _freshness_row("Latest packet ingested locally", counts.latest_packet_ingested_at)
+        _freshness_row(
+            "Latest packet ingested locally", counts.latest_packet_ingested_at
+        )
         _freshness_row("Latest decoder run", counts.latest_decoder_run_at)
 
 
@@ -100,9 +104,9 @@ def _decoder_tools_table(stats: list[status_data.DecoderToolStats]) -> None:
     with ui.card().classes("w-full"):
         ui.label("Decoder Tool Scoreboard").classes("text-lg font-bold")
         ui.label(
-            "\"Distinct Packets\" is each tool's share of every distinct "
+            '"Distinct Packets" is each tool\'s share of every distinct '
             "(post-dedup) packet ever seen -- the meaningful score, since "
-            "\"Raw Decodes\" double-counts the same packet across every "
+            '"Raw Decodes" double-counts the same packet across every '
             "ground station that caught it."
         ).classes("text-caption text-grey")
         if not stats:

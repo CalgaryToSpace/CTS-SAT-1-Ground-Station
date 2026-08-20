@@ -15,15 +15,10 @@ Usage (uv):
 # pyright: standard
 # NiceGUI doesn't support pyright strict very well.
 
-from __future__ import annotations
-
-# tyro resolves dataclass field annotations at runtime (via get_type_hints),
-# so imports used only in annotations below still need to be real imports.
-
 __all__ = ["main"]
 
 from dataclasses import dataclass
-from pathlib import Path  # noqa: TC003 -- tyro needs this at runtime, see below
+from pathlib import Path
 
 import tyro
 from nicegui import app, ui
@@ -34,6 +29,13 @@ from .export_page import build_export_page
 from .export_raw import register_raw_export_route
 from .file_reassembler_page import build_file_reassembler_page
 from .pipeline_status_page import build_pipeline_status_page
+
+NAV_LINKS = (
+    ("Beacon Stats", "/"),
+    ("File Reassembler", "/file-reassembler"),
+    ("Pipeline Status", "/pipeline-status"),
+    ("Export Data", "/export"),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,31 +53,31 @@ class Args:
 
 
 def _build_pages(args: Args) -> None:
-    def _drawer() -> None:
-        with ui.left_drawer(value=True):
-            ui.link("Beacon Stats", "/").classes("text-lg p-2")
-            ui.link("File Reassembler", "/file-reassembler").classes("text-lg p-2")
-            ui.link("Pipeline Status", "/pipeline-status").classes("text-lg p-2")
-            ui.link("Export Data", "/export").classes("text-lg p-2")
+    def _nav() -> None:
+        with ui.header().classes("items-center gap-4"):
+            ui.label("FrontierSat Data").classes("text-lg font-bold")
+            with ui.row().classes("items-center gap-4 ml-4"):
+                for label, path in NAV_LINKS:
+                    ui.link(label, path).classes("text-white text-body1 no-underline")
 
     @ui.page("/")
     def beacon_stats_page() -> None:
-        _drawer()
+        _nav()
         build_beacon_stats_page(args.parquet_path, args.hours)
 
     @ui.page("/file-reassembler")
     def file_reassembler_page() -> None:
-        _drawer()
+        _nav()
         build_file_reassembler_page(args.parquet_path)
 
     @ui.page("/pipeline-status")
     def pipeline_status_page() -> None:
-        _drawer()
+        _nav()
         build_pipeline_status_page(args.parquet_path)
 
     @ui.page("/export")
     def export_page() -> None:
-        _drawer()
+        _nav()
         build_export_page(args.parquet_path)
 
     register_raw_export_route(app, args.parquet_path.parent)
@@ -85,7 +87,7 @@ def main() -> None:
     """Entry point: parse CLI args, build pages, and start the NiceGUI server."""
     args = tyro.cli(Args)
     _build_pages(args)
-    ui.run(title="CTS-SAT-1 Ground Station", dark=True, port=args.port, reload=False)
+    ui.run(title="FrontierSat Data", dark=True, port=args.port, reload=False)
 
 
 if __name__ in {"__main__", "__mp_main__"}:
