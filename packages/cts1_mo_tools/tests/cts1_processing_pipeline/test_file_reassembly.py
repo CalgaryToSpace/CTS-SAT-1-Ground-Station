@@ -391,11 +391,46 @@ def test_coverage_png_marks_gaps_and_covered_bytes_correctly() -> None:
 
 def test_coverage_png_pads_last_row_without_marking_it_covered_or_gap() -> None:
     # A span that doesn't divide evenly into COVERAGE_ROW_WIDTH_BYTES --
-    # the padding pixels (index 2) must be distinguishable from both real
-    # states so they don't get misread as "covered" or "missing".
+    # the padding pixels (index 3) must be distinguishable from the other
+    # (covered/gap/conflict) states so they don't get misread as one of them.
     df = _chunks_df([_chunk(offset=0, data=b"A" * 10)])
     result = reassemble_bulk_chunks(df)
     _width, height, rows = _decode_indexed_png(render_coverage_png(result))
     assert height == 1
     assert rows[0][:10] == bytes([1]) * 10
-    assert set(rows[0][10:]) == {2}
+    assert set(rows[0][10:]) == {3}
+
+
+def test_coverage_png_marks_conflicting_range_yellow() -> None:
+    df = _chunks_df(
+        [
+            _chunk(offset=0, data=b"AAAA"),
+            _chunk(offset=0, data=b"ZZZZ"),  # conflicts with the row above
+            _chunk(offset=4, data=b"BBBB"),  # clean, no conflict
+        ]
+    )
+    result = reassemble_bulk_chunks(df)
+    assert result.conflict_ranges == ((0, 4),)
+
+    _width, _height, rows = _decode_indexed_png(render_coverage_png(result))
+    assert list(rows[0][0:4]) == [2, 2, 2, 2]  # conflict index
+    assert list(rows[0][4:8]) == [1, 1, 1, 1]  # covered (clean) index
+
+
+def test_conflict_ranges_merges_contiguous_conflicting_offsets() -> None:
+    # Two back-to-back conflicting offsets (0..4 and 4..8) should merge into
+    # a single reported range, not two adjacent ones.
+    df = _chunks_df(
+        [
+            _chunk(offset=0, data=b"AAAA"),
+            _chunk(offset=0, data=b"ZZZZ"),
+            _chunk(offset=4, data=b"BBBB"),
+            _chunk(offset=4, data=b"YYYY"),
+            # A separate, non-adjacent conflict shouldn't merge with those.
+            _chunk(offset=20, data=b"CCCC"),
+            _chunk(offset=20, data=b"XXXX"),
+        ]
+    )
+    result = reassemble_bulk_chunks(df)
+    assert len(result.conflicts) == 3
+    assert result.conflict_ranges == ((0, 8), (20, 24))

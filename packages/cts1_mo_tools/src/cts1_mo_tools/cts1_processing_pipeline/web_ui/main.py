@@ -440,7 +440,7 @@ def _build_chunks_table(result: ReassemblyResult) -> Callable[[], None]:
                 "label": "Distinct Contents Count",
                 "field": "distinct_contents_count",
             },
-            {"name": "consistent", "label": "Agree?", "field": "consistent"},
+            {"name": "consistent", "label": "Chunk Status", "field": "consistent"},
         ]
         rows = [
             {
@@ -448,11 +448,22 @@ def _build_chunks_table(result: ReassemblyResult) -> Callable[[], None]:
                 "length": ", ".join(str(n) for n in o.lengths),
                 "count": o.count,
                 "distinct_contents_count": o.distinct_contents_count,
-                "consistent": "yes" if o.consistent else "CONFLICTING BYTES",
+                "consistent": "Good" if o.consistent else "Conflicting",
             }
             for o in page_offsets
         ]
-        ui.table(columns=columns, rows=rows, row_key="offset").classes("w-full")
+        table = ui.table(columns=columns, rows=rows, row_key="offset").classes("w-full")
+        # Color "Chunk Status" the same green/yellow as the coverage map above
+        # -- ties this table's rows back to the graphic's blocks at a glance.
+        table.add_slot(
+            "body-cell-consistent",
+            r"""
+                <q-td :props="props"
+                    :class="props.value === 'Good' ? 'text-positive' : 'text-warning'">
+                    {{ props.value }}
+                </q-td>
+            """,
+        )
 
         if total_pages == 1:
             ui.label(f"{total:,} distinct offset(s).").classes("text-caption text-grey")
@@ -479,33 +490,56 @@ def _build_chunks_table(result: ReassemblyResult) -> Callable[[], None]:
     return chunks_table
 
 
-COVERAGE_BLOCK_PX = 3  # on-screen size of one byte's block; may change later
+COVERAGE_BLOCK_WIDTH_PX = 3  # on-screen width of one byte's block; may change later
+COVERAGE_BLOCK_HEIGHT_PX = 2  # shorter than wide -- rows are the scarce vertical space
 
 
 def _coverage_map(result: ReassemblyResult) -> None:
     """A byte-coverage map: one block per byte, green if covered, red if
-    still a gap, `COVERAGE_ROW_WIDTH_BYTES` blocks per row.
+    still a gap, yellow if covered but conflicting (multiple disagreeing
+    values), `COVERAGE_ROW_WIDTH_BYTES` blocks per row.
 
     `render_coverage_png` encodes one *pixel* per byte -- small and cheap to
-    ship even for a 20+ MB file -- and the `COVERAGE_BLOCK_PX`-per-byte
-    on-screen size is applied here purely with CSS
-    (`image-rendering: pixelated` keeps the block edges crisp instead of
-    blurring the upscale).
+    ship even for a 20+ MB file -- and the on-screen block size is applied
+    here purely with CSS (`image-rendering: pixelated` keeps the block
+    edges crisp instead of blurring the upscale). The block is shorter than
+    it is wide on purpose: width already reads fine at
+    `COVERAGE_BLOCK_WIDTH_PX`, and a file's row count (hence the image's
+    total height) grows with its size, so trimming just the height keeps
+    large files from needing as much scrolling without shrinking each row.
     """
     if result.span_bytes == 0:
         return
     data_uri = "data:image/png;base64," + base64.b64encode(
         render_coverage_png(result)
     ).decode("ascii")
-    width_px = COVERAGE_ROW_WIDTH_BYTES * COVERAGE_BLOCK_PX
-    height_px = -(-result.span_bytes // COVERAGE_ROW_WIDTH_BYTES) * COVERAGE_BLOCK_PX
+    width_px = COVERAGE_ROW_WIDTH_BYTES * COVERAGE_BLOCK_WIDTH_PX
+    row_count = -(-result.span_bytes // COVERAGE_ROW_WIDTH_BYTES)
+    height_px = row_count * COVERAGE_BLOCK_HEIGHT_PX
     with ui.row().classes("w-full overflow-x-auto"):
         ui.image(data_uri).style(
             f"width: {width_px}px; height: {height_px}px; image-rendering: pixelated;"
         )
+    with ui.row().classes("items-center gap-4"):
+        for color_class, label in (
+            ("text-positive", "covered"),
+            ("text-negative", "missing (needs re-downlink)"),
+            ("text-warning", "conflicting (multiple values)"),
+        ):
+            with ui.row().classes("items-center gap-1"):
+                ui.icon("square", color=color_class.removeprefix("text-")).classes(
+                    "text-xs"
+                )
+                ui.label(label).classes(f"text-caption {color_class}")
 
 
 def _gaps_section(result: ReassemblyResult) -> None:
+    """Byte ranges never received at all -- distinct from `_conflict_ranges_section`
+    (ranges that *were* received, just with disagreeing values); the two are
+    rendered as clearly separate blocks since they call for different next
+    steps -- re-downlink one, narrow the time range for the other.
+    """
+    ui.label("Missing byte ranges").classes("text-base font-medium")
     if result.is_gapless:
         with ui.row().classes("items-center gap-2"):
             ui.icon("check_circle", color="positive")
@@ -517,13 +551,42 @@ def _gaps_section(result: ReassemblyResult) -> None:
     with ui.row().classes("items-center gap-2"):
         ui.icon("warning", color="warning")
         ui.label(
-            f"{len(result.gaps)} missing byte range(s) -- these need to be "
+            f"{len(result.gaps)} range(s) never received -- these need to be "
             "re-downlinked:"
         ).classes("text-warning")
     for start, end in result.gaps[:50]:
         ui.label(_byte_range_str(start, end)).classes("font-mono text-sm")
     if len(result.gaps) > 50:  # noqa: PLR2004
         ui.label(f"...and {len(result.gaps) - 50} more.").classes(
+            "text-caption text-grey"
+        )
+
+
+def _conflict_ranges_section(result: ReassemblyResult) -> None:
+    """Byte ranges that *were* received but with more than one disagreeing
+    value -- see `_gaps_section` for the (deliberately separate) list of
+    ranges never received at all.
+    """
+    ui.label("Conflicting byte ranges").classes("text-base font-medium")
+    if not result.has_conflicts:
+        with ui.row().classes("items-center gap-2"):
+            ui.icon("check_circle", color="positive")
+            ui.label("No conflicts -- every received byte agrees.").classes(
+                "text-positive"
+            )
+        return
+
+    with ui.row().classes("items-center gap-2"):
+        ui.icon("error", color="negative")
+        ui.label(
+            f"{len(result.conflict_ranges)} range(s) have multiple, "
+            "disagreeing values -- narrow the time range(s) until these "
+            "agree:"
+        ).classes("text-negative")
+    for start, end in result.conflict_ranges[:50]:
+        ui.label(_byte_range_str(start, end)).classes("font-mono text-sm")
+    if len(result.conflict_ranges) > 50:  # noqa: PLR2004
+        ui.label(f"...and {len(result.conflict_ranges) - 50} more.").classes(
             "text-caption text-grey"
         )
 
@@ -766,6 +829,8 @@ def _reassembler_results(
         _coverage_map(result)
         _build_chunks_table(result)()
         _gaps_section(result)
+        ui.separator()
+        _conflict_ranges_section(result)
         _sha256_comparison(result, expected_sha256)
 
         best = _best_named_candidate(candidates)

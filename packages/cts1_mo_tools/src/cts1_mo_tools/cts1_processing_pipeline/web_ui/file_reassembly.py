@@ -60,7 +60,20 @@ from typing import TYPE_CHECKING, Any
 import polars as pl
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
     from datetime import datetime
+
+
+def _merge_ranges(ranges: Iterable[tuple[int, int]]) -> tuple[tuple[int, int], ...]:
+    """Sort `ranges` and merge any that touch or overlap into one."""
+    merged: list[list[int]] = []
+    for start, end in sorted(ranges):
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return tuple((start, end) for start, end in merged)
+
 
 # A corrupted/garbage `bulk_file_offset` (a raw uint32 straight off the
 # wire) could claim to be near 4 GiB; refuse to allocate a buffer anywhere
@@ -128,6 +141,19 @@ class ReassemblyResult:
     @property
     def has_conflicts(self) -> bool:
         return bool(self.conflicts)
+
+    @property
+    def conflict_ranges(self) -> tuple[tuple[int, int], ...]:
+        """Byte ranges covered by `.conflicts`, sorted and merged -- each
+        conflicting offset's own range runs to the *longest* of its
+        disagreeing copies' lengths (so the whole range any of them could
+        have written to is flagged, not just the shortest one's), and
+        touching/overlapping offsets' ranges are merged into one, the same
+        way `.gaps` already are.
+        """
+        return _merge_ranges(
+            (o.offset, o.offset + max(o.lengths)) for o in self.conflicts
+        )
 
     @property
     def is_gapless(self) -> bool:
@@ -201,15 +227,9 @@ def reassemble_bulk_chunks(df: pl.DataFrame) -> ReassemblyResult:
     # Interval-merge for coverage/gaps (cheap: one interval per chunk, not
     # per byte) -- the byte buffer itself still needs an O(bytes) slice
     # assignment per chunk, which is unavoidable since it *is* the output.
-    intervals = sorted(
+    merged = _merge_ranges(
         (offset, offset + length) for offset, (length, _hex) in by_offset.items()
     )
-    merged: list[list[int]] = []
-    for start, end in intervals:
-        if merged and start <= merged[-1][1]:
-            merged[-1][1] = max(merged[-1][1], end)
-        else:
-            merged.append([start, end])
 
     buf = bytearray(span)
     for offset, (_length, hex_str) in by_offset.items():
@@ -241,18 +261,20 @@ def reassemble_bulk_chunks(df: pl.DataFrame) -> ReassemblyResult:
 
 COVERAGE_ROW_WIDTH_BYTES = 195 * 2  # 195 == BULK_DOWNLINK_MAX_DATA, one row = 2 packets
 
-# Palette indices/colors for the coverage bitmap -- index 2 ("no data yet",
+# Palette indices/colors for the coverage bitmap -- index 3 ("no data yet",
 # past the end of the file but needed to fill out the last row's width) is
 # marked fully transparent via tRNS so it doesn't paint a visible block.
 _COVERAGE_GAP_INDEX = 0
 _COVERAGE_COVERED_INDEX = 1
-_COVERAGE_PAD_INDEX = 2
+_COVERAGE_CONFLICT_INDEX = 2
+_COVERAGE_PAD_INDEX = 3
 _COVERAGE_PALETTE = (
     (0xC1, 0x00, 0x15),  # gap: Quasar "negative" red
     (0x21, 0xBA, 0x45),  # covered: Quasar "positive" green
+    (0xF2, 0xC0, 0x37),  # conflict: Quasar "warning" yellow
     (0x00, 0x00, 0x00),  # padding: color irrelevant, alpha 0 makes it invisible
 )
-_COVERAGE_ALPHA = (255, 255, 0)
+_COVERAGE_ALPHA = (255, 255, 255, 0)
 
 
 def _png_chunk(chunk_type: bytes, data: bytes) -> bytes:
@@ -304,11 +326,12 @@ def render_coverage_png(
     result: ReassemblyResult, *, row_width_bytes: int = COVERAGE_ROW_WIDTH_BYTES
 ) -> bytes:
     """A one-pixel-per-byte PNG of `result`'s coverage: green where a byte
-    was received, red where it's still a gap, `row_width_bytes` pixels per
-    row. The caller (the web UI) is expected to scale this up with CSS
-    (`image-rendering: pixelated`) rather than baking the zoom into the
-    image -- keeps the actual PNG small regardless of the on-screen block
-    size.
+    was received, red where it's still a gap, yellow where it was received
+    but with multiple disagreeing values (see `.conflict_ranges`),
+    `row_width_bytes` pixels per row. The caller (the web UI) is expected
+    to scale this up with CSS (`image-rendering: pixelated`) rather than
+    baking the zoom into the image -- keeps the actual PNG small regardless
+    of the on-screen block size.
 
     Returns a 1x1 (single covered-color pixel) PNG if `result` is empty,
     rather than a 0-byte image some browsers may refuse to render.
@@ -322,6 +345,15 @@ def render_coverage_png(
     pixels = bytearray([_COVERAGE_COVERED_INDEX]) * span
     for start, end in result.gaps:
         pixels[start:end] = bytes([_COVERAGE_GAP_INDEX]) * (end - start)
+    # Painted after gaps: a conflicting offset has *some* data (just
+    # disagreeing data), so it should never actually overlap a real gap,
+    # but painting it last keeps that true even if it somehow did.
+    for start, end in result.conflict_ranges:
+        # A corrupt/oversized length shouldn't overrun the buffer.
+        clamped_end = min(end, span)
+        pixels[start:clamped_end] = bytes([_COVERAGE_CONFLICT_INDEX]) * (
+            clamped_end - start
+        )
 
     remainder = span % row_width_bytes
     if remainder:
