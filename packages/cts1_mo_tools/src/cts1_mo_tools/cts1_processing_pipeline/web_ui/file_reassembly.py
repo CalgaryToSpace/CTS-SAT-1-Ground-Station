@@ -53,6 +53,7 @@ __all__ = [
     "BulkHeaderCandidate",
     "OffsetSummary",
     "ReassemblyResult",
+    "detect_picam_image",
     "find_header_candidates",
     "reassemble_bulk_chunks",
     "render_coverage_png",
@@ -66,6 +67,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import polars as pl
+
+from cts1_mo_tools.cts1_picam_to_jpg import parse_picam_ascii_to_jpg_bytes
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -476,3 +479,30 @@ def find_header_candidates(tcmd_df: pl.DataFrame) -> list[BulkHeaderCandidate]:
         )
     candidates.sort(key=lambda c: c.received_at)
     return candidates
+
+
+# -- PiCAM image detection -----------------------------------------------------
+
+
+def detect_picam_image(data: bytes) -> bytes | None:
+    """Best-effort detection of a PiCAM ASCII-format image inside reassembled
+    bulk-download `data`, decoded to JPG bytes if so.
+
+    Heuristic: `data` decodes as ASCII text starting with the `START_CAM:`
+    sentinel line, with at least one `@FACE...` end-of-telemetry line -- see
+    `cts1_picam_to_jpg.parse_picam_ascii_to_jpg_bytes` for the actual
+    per-line decode. Returns None if either condition fails (not a PiCAM
+    image, or a download that's still missing its start/end -- e.g. gaps
+    still need filling in).
+    """
+    try:
+        text = data.decode("ascii")
+    except UnicodeDecodeError:
+        return None
+
+    if not text.startswith("START_CAM:"):
+        return None
+    if not any(line.startswith("@FACE") for line in text.splitlines()):
+        return None
+
+    return parse_picam_ascii_to_jpg_bytes(text, enable_logs=False)

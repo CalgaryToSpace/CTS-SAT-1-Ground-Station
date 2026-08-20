@@ -18,7 +18,7 @@ from loguru import logger
 PICAM_STRIPPED_LINE_LENGTH = 65  # @ + 64 hex chars
 
 
-def parse_picam_ascii_to_jpg_bytes(text: str) -> bytes:
+def parse_picam_ascii_to_jpg_bytes(text: str, *, enable_logs: bool) -> bytes:  # noqa: C901
     """Parse PiCAM ASCII-format image data (as a string) into raw JPG bytes.
 
     Each line is expected to look like ``@SSSSTTTT<hex image data>``, where
@@ -37,17 +37,20 @@ def parse_picam_ascii_to_jpg_bytes(text: str) -> bytes:
 
         # CTS-SAT-1 firmware header string in file:
         if line == "START_CAM:":
-            logger.debug(f"Line {line_num}: Start of image data.")
+            if enable_logs:
+                logger.debug(f"Line {line_num}: Start of image data.")
             continue
 
         if not line.startswith("@"):
-            logger.error(f"Line {line_num} doesn't start with an @ sign. Skipping.")
+            if enable_logs:
+                logger.error(f"Line {line_num} doesn't start with an @ sign. Skipping.")
             continue
 
         if len(line) != PICAM_STRIPPED_LINE_LENGTH:
-            logger.warning(
-                f"Line {line_num} is wrong length ({len(line)} chars). Skipping."
-            )
+            if enable_logs:
+                logger.warning(
+                    f"Line {line_num} is wrong length ({len(line)} chars). Skipping."
+                )
             continue
 
         line = line[1:]  # remove '@' sign
@@ -57,14 +60,16 @@ def parse_picam_ascii_to_jpg_bytes(text: str) -> bytes:
         img_data_hex = line[8:].strip()
 
         if sentence_num_hex == "FACE":
-            logger.info(f"Reached end telemetry seq on Line {line_num}.")
+            if enable_logs:
+                logger.info(f"Reached end telemetry seq on Line {line_num}.")
             # FIXME: Optionally parse this line per the datasheet's spec.
             continue
 
-        logger.info(
-            f"Line {line_num}: sentence_num={int(sentence_num_hex, 16)}, "
-            f"total_sentences={int(total_sentences_hex, 16)}"
-        )
+        if enable_logs:
+            logger.info(
+                f"Line {line_num}: sentence_num={int(sentence_num_hex, 16)}, "
+                f"total_sentences={int(total_sentences_hex, 16)}"
+            )
 
         jpg_data += binascii.unhexlify(img_data_hex)
 
@@ -75,7 +80,7 @@ def read_and_parse_image(text_file_in: Path, jpg_file_out: Path) -> None:
     """Read PiCAM ASCII data from `text_file_in` and write the decoded JPG to
     `jpg_file_out`."""
     text = text_file_in.read_text()
-    jpg_data = parse_picam_ascii_to_jpg_bytes(text)
+    jpg_data = parse_picam_ascii_to_jpg_bytes(text, enable_logs=True)
     jpg_file_out.write_bytes(jpg_data)
 
 

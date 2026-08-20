@@ -35,6 +35,7 @@ from .file_reassembly import (
     COVERAGE_ROW_WIDTH_BYTES,
     BulkHeaderCandidate,
     ReassemblyResult,
+    detect_picam_image,
     find_header_candidates,
     reassemble_bulk_chunks,
     render_coverage_png,
@@ -788,6 +789,28 @@ def _header_candidates_table(candidates: list[BulkHeaderCandidate]) -> str | Non
     return best.sha256 if best is not None else None
 
 
+def _picam_image_section(jpg_bytes: bytes, filename_hint: str | None) -> None:
+    """A detected PiCAM image: rendered inline, plus a JPG download button --
+    see `file_reassembly.detect_picam_image` for the detection heuristic.
+    """
+    jpg_filename = (
+        Path(filename_hint).with_suffix(".jpg").name
+        if filename_hint
+        else "picam_image.jpg"
+    )
+    with ui.card().classes("w-full"):
+        ui.label("Detected PiCAM image").classes("text-lg font-bold")
+        data_uri = "data:image/jpeg;base64," + base64.b64encode(jpg_bytes).decode(
+            "ascii"
+        )
+        ui.image(data_uri).classes("max-w-full")
+        ui.button(
+            "Download as JPG",
+            icon="photo_camera",
+            on_click=lambda: ui.download.content(jpg_bytes, filename=jpg_filename),
+        )
+
+
 def _reassembler_results(
     path: Path, ranges: list[tuple[datetime, datetime]], *, headers_only: bool = False
 ) -> None:
@@ -853,6 +876,10 @@ def _reassembler_results(
                 "will still work (missing bytes are filled with 0x00), but "
                 "isn't a verified, complete copy of the file yet."
             ).classes("text-caption text-grey")
+
+        picam_jpg = detect_picam_image(result.data)
+        if picam_jpg is not None:
+            _picam_image_section(picam_jpg, filename)
 
 
 def _build_file_reassembler_page(args: Args) -> None:
