@@ -1084,14 +1084,26 @@ def _bulk_data_hex_to_general_message(hex_str: str) -> str:
     if not data_bytes:
         return ""
 
+    binary_string_msg = f"BINARY DATA: {len(data_bytes)} bytes"
+
+    # Attempt to identify the type of binary data (can be many):
+    if "0cffff0c" in hex_str.lower():  # MPI sync word.
+        binary_string_msg += ", maybe MPI data"
+    # MPI data could also match like: "uptime_ms":252000748,"timestamp":"1786257055000+3594260776_E","datetime":"2026-08-09T063612.182Z_E","timestamp_ms":1786257  # noqa: E501
+
+    if "aa4412" in hex_str.lower():  # GNSS binary data sync word.
+        binary_string_msg += ", maybe binary GNSS data"
+
+    binary_string_msg = f"<{binary_string_msg}>"
+
     try:
         text = data_bytes.decode("utf-8")
     except UnicodeDecodeError:
-        return f"<BINARY DATA: {len(data_bytes)} bytes>"
+        return binary_string_msg
 
     printable_count = sum(1 for char in text if char.isprintable() or char in "\n\r\t")
     if printable_count / len(text) < 0.85:  # noqa: PLR2004
-        return f"<BINARY DATA: {len(data_bytes)} bytes>"
+        return binary_string_msg
 
     return text
 
