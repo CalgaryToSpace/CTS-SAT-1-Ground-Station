@@ -1099,13 +1099,14 @@ def _bulk_data_hex_to_general_message(hex_str: str) -> str:
     return text
 
 
-def decode_to_csv(
+def decode_to_df(
     df: pl.DataFrame,
-    output_csv: Path,
     *,
     sort_setting: Literal["no_sort", "by_timestamp"],
-) -> None:
+) -> pl.DataFrame:
     """Decode CTS-SAT-1 packets already loaded into a dataframe."""
+    input_columns_at_start = df.columns
+
     # Create a separate dataframe of decoded packets.
     decoded_packets: dict[str, dict[str, Any]] = {
         # Keys: hex_str, Vals: decoded packet
@@ -1123,6 +1124,24 @@ def decode_to_csv(
         ],
         infer_schema_length=None,  # Use all rows.
     )
+
+    # `general_message` below unconditionally references these three --
+    # guarantee they all exist even if this particular batch didn't happen
+    # to contain any packet of that type (plausible, e.g. early in a
+    # mission before any bulk file downlinks have occurred), and even if
+    # nothing in the batch decoded at all (which would otherwise leave
+    # `df_decoded` with no columns whatsoever, not even `hex_payload`,
+    # since `pl.DataFrame([])` on an empty list of dicts has none).
+    for required_col in (
+        "hex_payload",
+        "log_message",
+        "tcmd_response_text",
+        "bulk_data_hex",
+    ):
+        if required_col not in df_decoded.columns:
+            df_decoded = df_decoded.with_columns(
+                pl.lit(None, dtype=pl.String).alias(required_col)
+            )
 
     df = df.join(
         df_decoded,
@@ -1147,13 +1166,7 @@ def decode_to_csv(
     )
 
     # Hard-code the column order here.
-    force_start_col_names = [
-        "received_timestamp",
-        "observation_id",
-        "packet_type",
-        "general_message",
-    ]
-
+    force_start_col_names = ["packet_type", "general_message"]
     end_cols = ["log_message", "tcmd_response_text", "bulk_data_hex", "hex_payload"]
     tcmd_col_names = [
         col for col in df.columns if col.startswith("tcmd_") and (col not in end_cols)
@@ -1161,21 +1174,24 @@ def decode_to_csv(
     bulk_col_names = [
         col for col in df.columns if col.startswith("bulk_") and (col not in end_cols)
     ]
+    force_positioned_columns = OrderedSet(
+        force_start_col_names + tcmd_col_names + bulk_col_names + end_cols
+    )
 
     df = df.select(
+        *(OrderedSet(input_columns_at_start) - force_positioned_columns),
         *force_start_col_names,
         *tcmd_col_names,
         *bulk_col_names,
         *(
-            # All the general columns (includes the beacons).
             OrderedSet(df.columns)
-            - set(force_start_col_names)
-            - set(tcmd_col_names)
-            - set(bulk_col_names)
-            - set(end_cols)
+            - force_positioned_columns
+            - set(input_columns_at_start)
         ),
         *end_cols,
     )
+
+    assert set(df.columns) >= set(input_columns_at_start), "Columns were removed - bug?"
 
     if sort_setting == "by_timestamp":
         df = df.sort("received_timestamp", descending=True)
@@ -1184,6 +1200,18 @@ def decode_to_csv(
         logger.debug("Not sorted")
     else:
         assert_never(sort_setting)
+
+    return df
+
+
+def decode_to_csv(
+    df: pl.DataFrame,
+    output_csv: Path,
+    *,
+    sort_setting: Literal["no_sort", "by_timestamp"],
+) -> None:
+    """Decode CTS-SAT-1 packets already loaded into a dataframe."""
+    df = decode_to_df(df, sort_setting=sort_setting)
 
     if output_csv:
         df.write_csv(output_csv)

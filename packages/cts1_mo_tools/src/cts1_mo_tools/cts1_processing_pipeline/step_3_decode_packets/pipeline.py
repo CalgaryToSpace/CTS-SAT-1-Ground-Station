@@ -1,12 +1,12 @@
 """Step 3: decode every distinct packet's payload.
 
 Runs step 2's output (`distinct_packets_over_time.parquet` -- one row per
-distinct received packet, `data_hex` already CRC-complete) through the
-CTS-SAT-1 packet decoder in `cts1_mo_tools.cts1_decode_satnogs_packets`.
-That decoder is a plain Python module (struct-unpacking `COMMS_*_packet_t`
-layouts), not a CLI tool like the audio decoders step 1 shells out to, so
-it's called directly in-process here -- no subprocess involved, just an
-ordinary Python function call per distinct packet.
+distinct received packet, `data_hex` already CRC-complete) through
+`decode_to_df()`, the same CTS-SAT-1 packet decoder the standalone
+`cts1_decode_satnogs_packets` CLI uses. That decoder is a plain Python
+module (struct-unpacking `COMMS_*_packet_t` layouts), not a CLI tool like
+the audio decoders step 1 shells out to, so it's called directly in-process
+here -- no subprocess involved.
 
 The result is an "everything decoded" table: every column step 2 already
 produced (trust/traceability columns, `received_at`, ...) plus every field
@@ -29,12 +29,12 @@ __all__ = [
     "run",
 ]
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import polars as pl
 from loguru import logger
 
-from cts1_mo_tools.cts1_decode_satnogs_packets import decode_packet_safe
+from cts1_mo_tools.cts1_decode_satnogs_packets import decode_to_df
 from cts1_mo_tools.cts1_processing_pipeline.step_2_deduplicate_packets import (
     pipeline as step_2_pipeline,
 )
@@ -46,35 +46,6 @@ DEFAULT_OUTPUT_DIR = step_2_pipeline.DEFAULT_OUTPUT_DIR
 OUTPUT_FILENAME = "everything_decoded.parquet"
 
 
-def _decode_unique_payloads(data_hex_values: list[str]) -> pl.DataFrame:
-    """Run `decode_packet_safe` once per unique `data_hex`, in-process.
-
-    A hex value that doesn't decode at all (too short, malformed) is simply
-    absent from the result rather than included with all-null fields -- the
-    left join in `compute_decoded_packets` produces the same effect (null
-    decoded columns) without this function needing to know that table's
-    schema.
-    """
-    decoded: dict[str, dict[str, Any]] = {}
-    for data_hex in data_hex_values:
-        fields = decode_packet_safe(data_hex)
-        if fields is None:
-            continue
-        # Already have a verified `csp_crc_valid` from step 2, computed over
-        # these same CRC-completed bytes; drop the decoder's redundant copy
-        # so it doesn't collide on the join below.
-        fields.pop("csp_crc_valid", None)
-        decoded[data_hex] = fields
-
-    if not decoded:
-        return pl.DataFrame(schema={"data_hex": pl.String})
-
-    return pl.DataFrame(
-        [{"data_hex": data_hex, **fields} for data_hex, fields in decoded.items()],
-        infer_schema_length=None,
-    )
-
-
 def compute_decoded_packets(distinct_packets: pl.DataFrame) -> pl.DataFrame:
     """Pure computation: distinct packets -> distinct packets + decoded fields.
 
@@ -83,12 +54,35 @@ def compute_decoded_packets(distinct_packets: pl.DataFrame) -> pl.DataFrame:
             step 2.
 
     Returns:
-        The same rows, left-joined with every field `decode_packet_safe`
-        could pull out of each row's `data_hex` (null where decoding failed
-        or the packet type isn't one the decoder knows the layout of).
+        The same rows, plus every field `decode_to_df` could pull out of
+        each row's `data_hex` (null where decoding failed or the packet
+        type isn't one the decoder knows the layout of).
     """
-    decoded = _decode_unique_payloads(distinct_packets["data_hex"].unique().to_list())
-    return distinct_packets.join(decoded, on="data_hex", how="left")
+    if distinct_packets.is_empty():
+        return distinct_packets
+
+    # `decode_to_df` expects a few different column names. Rename to its dialect,
+    # then rename back at the end.
+    renamed = distinct_packets.rename(
+        {
+            "data_hex": "hex_payload",
+            "received_at": "received_timestamp",
+            "csp_crc_valid": "csp_crc_valid_from_caller",
+        }
+    )
+
+    decoded = decode_to_df(renamed, sort_setting="no_sort")
+
+    return decoded.drop(
+        # Drop the one from within the decoder pipeline.
+        "csp_crc_valid",
+    ).rename(
+        {
+            "hex_payload": "data_hex",
+            "received_timestamp": "received_at",
+            "csp_crc_valid_from_caller": "csp_crc_valid",
+        }
+    )
 
 
 def _write_parquet_atomic(df: pl.DataFrame, path: Path) -> None:
