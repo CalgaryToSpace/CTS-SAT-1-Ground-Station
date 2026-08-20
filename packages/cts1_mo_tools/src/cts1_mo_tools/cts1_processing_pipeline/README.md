@@ -26,6 +26,12 @@
 * Output: `everything_decoded.parquet`
 
 
+### Daemon
+
+* Runs steps 1-3 continuously instead of one-off: an initial backfill of `--start` (default: 24h), then every `--interval` minutes (default: 15), requeries step 1 for observations starting in the trailing `interval + 30` minutes and reruns steps 2 and 3.
+* The 30-minute overlap on every requery catches a SatNOGS observation that was still uploading/being vetted during the previous poll; it doesn't waste decode time since step 1 already skips any observation/decoder pair already recorded in `decoder_runs`.
+* Runs until interrupted (Ctrl+C).
+
 ### Web UI
 
 * Read any/all of the above parquet files/tables.

@@ -10,6 +10,8 @@ Usage (uv):
     uv run cts1_processing_pipeline step_1 --limit 5 --debug
     uv run cts1_processing_pipeline step_2
     uv run cts1_processing_pipeline step_3
+    uv run cts1_processing_pipeline daemon
+    uv run cts1_processing_pipeline daemon --start "3 days" --interval 5
 """
 
 from __future__ import annotations
@@ -30,6 +32,7 @@ from dotenv import load_dotenv
 from loguru import logger
 from tyro.conf import OmitSubcommandPrefixes
 
+from . import daemon
 from .step_1_download_and_demodulate import pipeline as step_1_download_and_demodulate
 from .step_2_deduplicate_packets import pipeline as step_2_deduplicate_packets
 from .step_3_decode_packets import pipeline as step_3_decode_packets
@@ -77,6 +80,39 @@ class Step3Args:
     """Step 3: decode distinct_packets_over_time into everything_decoded."""
 
 
+@dataclass(frozen=True, slots=True)
+class DaemonArgs:
+    """Daemon: run steps 1-3 continuously -- an initial backfill of
+    `--start`, then a periodic requery + full steps 1-3 rerun every
+    `--interval` minutes."""
+
+    norad_id: Annotated[str, tyro.conf.Positional] = "69015"
+    """NORAD catalog ID of the satellite (default: 69015, CTS-SAT-1)."""
+
+    start: str = "24 hours"
+    """How far back the initial backfill reaches: a duration like '3 days'
+    (relative to now) or an ISO 8601 date/datetime -- same syntax as step
+    1's own --start."""
+
+    interval: float = 15.0
+    """Minutes between requeries. Each requery re-pulls observations
+    starting in the trailing (interval + 30) minutes -- the 30-minute
+    overlap catches a SatNOGS observation still uploading/being vetted
+    during the previous poll -- then reruns steps 2 and 3."""
+
+    limit: int | None = None
+    """Cap the number of observations decoded per step-1 run (for testing)."""
+
+    workers: int = 4
+    """Concurrency for the decoders, same as step 1."""
+
+    temp_dir: Path | None = None
+    """Directory to create per-observation temp dirs under, same as step 1."""
+
+    force_rerun_decoders: bool = False
+    """Same as step 1's --force-rerun-decoders, applied to every requery."""
+
+
 # Add further steps as additional
 # `Annotated[StepNArgs, tyro.conf.subcommand(name="step_n", prefix_name=False)]`
 # members below.
@@ -84,6 +120,7 @@ Command = (
     Annotated[Step1Args, tyro.conf.subcommand(name="step_1", prefix_name=False)]
     | Annotated[Step2Args, tyro.conf.subcommand(name="step_2", prefix_name=False)]
     | Annotated[Step3Args, tyro.conf.subcommand(name="step_3", prefix_name=False)]
+    | Annotated[DaemonArgs, tyro.conf.subcommand(name="daemon", prefix_name=False)]
 )
 
 
@@ -129,8 +166,19 @@ def main() -> None:
             )
         elif isinstance(args.command, Step2Args):
             step_2_deduplicate_packets.run(output_dir=args.db_path.parent)
-        elif isinstance(args.command, Step3Args):  # pyright: ignore[reportUnnecessaryIsInstance]
+        elif isinstance(args.command, Step3Args):
             step_3_decode_packets.run(output_dir=args.db_path.parent)
+        elif isinstance(args.command, DaemonArgs):  # pyright: ignore[reportUnnecessaryIsInstance]
+            daemon.run(
+                norad_id=args.command.norad_id,
+                db_path=args.db_path,
+                start=args.command.start,
+                interval=args.command.interval,
+                limit=args.command.limit,
+                workers=args.command.workers,
+                temp_dir=args.command.temp_dir,
+                force_rerun=args.command.force_rerun_decoders,
+            )
         else:
             assert_never(args.command)
     except KeyboardInterrupt:
