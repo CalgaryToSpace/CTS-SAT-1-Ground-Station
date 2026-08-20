@@ -26,11 +26,12 @@ from dataclasses import dataclass
 from pathlib import Path  # noqa: TC003 -- tyro needs this at runtime, see below
 
 import tyro
-from nicegui import ui
+from nicegui import app, ui
 
 from . import data as beacon_data
 from .beacon_stats_page import build_beacon_stats_page
 from .export_page import build_export_page
+from .export_raw import register_raw_export_route
 from .file_reassembler_page import build_file_reassembler_page
 from .pipeline_status_page import build_pipeline_status_page
 
@@ -76,6 +77,8 @@ def _build_pages(args: Args) -> None:
     def export_page() -> None:
         _drawer()
         build_export_page(args.parquet_path)
+
+    register_raw_export_route(app, args.parquet_path.parent)
 
 
 def main() -> None:

@@ -17,6 +17,7 @@ from pathlib import Path  # noqa: TC003 -- tyro needs this at runtime elsewhere
 from nicegui import ui
 
 from . import export_tables
+from .export_raw import raw_export_url
 from .layout import page_shell
 
 # A flowchart of every table the pipeline produces and the step that
@@ -75,8 +76,10 @@ def _tables_section(selected: dict[str, bool]) -> None:
     with ui.card().classes("w-full"):
         ui.label("Tables").classes("text-lg font-bold")
         ui.label(
-            "Pick one or more tables to export, ordered by which pipeline "
-            "step produces them."
+            "Pick one or more tables to export below, ordered by which "
+            "pipeline step produces them. Each table's ⚡ link streams "
+            "its parquet file exactly as the pipeline wrote it, straight "
+            "off disk -- no filtering, no format conversion, no row limit."
         ).classes("text-caption text-grey")
 
         current_step: str | None = None
@@ -94,7 +97,11 @@ def _tables_section(selected: dict[str, bool]) -> None:
                     ),
                 ).classes("mt-1")
                 with ui.column().classes("gap-0"):
-                    ui.label(spec.key).classes("font-mono font-medium")
+                    with ui.row().classes("items-baseline gap-2"):
+                        ui.label(spec.key).classes("font-mono font-medium")
+                        ui.link(
+                            "⚡ direct parquet download", raw_export_url(spec.key)
+                        ).classes("text-caption")
                     ui.label(spec.description).classes("text-caption text-grey")
 
 

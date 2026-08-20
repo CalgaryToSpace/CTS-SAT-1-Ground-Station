@@ -15,6 +15,9 @@ from __future__ import annotations
 
 __all__ = [
     "EXPORT_FORMATS",
+    "MAX_OUTPUT_BYTES",
+    "MAX_ROWS_EXCEL",
+    "MAX_ROWS_OTHER",
     "PACKET_TYPES",
     "TABLE_SPECS",
     "ExportFormat",
@@ -140,6 +143,33 @@ _MEDIA_TYPES: dict[ExportFormat, str] = {
     "duckdb": "application/octet-stream",
 }
 
+# Excel chokes/crawls well before its actual 1,048,576-row-per-sheet limit;
+# the other formats are cheap to write at any size we're likely to see, but
+# still get a cap so a "select everything, no filter" click can't spend
+# minutes materializing hundreds of millions of raw_packets rows in the
+# server process. `build_export` checks this against the *filtered* row
+# count, so narrowing the time range/packet-type filter is the way past it
+# -- the raw, unfiltered download (see `export_raw.py`) is the other way,
+# since it never loads rows into polars at all.
+MAX_ROWS_EXCEL = 50_000
+MAX_ROWS_OTHER = 1_000_000
+
+_ROW_LIMITS: dict[ExportFormat, int] = {
+    "csv": MAX_ROWS_OTHER,
+    "parquet": MAX_ROWS_OTHER,
+    "excel": MAX_ROWS_EXCEL,
+    "sqlite": MAX_ROWS_OTHER,
+    "duckdb": MAX_ROWS_OTHER,
+}
+
+# Applies to the final bytes actually being sent back (post-zip, if
+# zipping) -- a belt-and-suspenders check alongside the row limits above,
+# since a handful of very wide/text-heavy rows can still add up to a large
+# payload well under the row cap. The raw, unfiltered download (see
+# `export_raw.py`) has no such limit, since it streams a file straight off
+# disk rather than materializing one in the server process.
+MAX_OUTPUT_BYTES = 100 * 1024 * 1024  # 100 MiB
+
 
 def _drop_all_null_columns(df: pl.DataFrame) -> pl.DataFrame:
     """Drop every column that's entirely null -- a no-op on an empty
@@ -217,10 +247,24 @@ def _write_parquet_files(tables: Mapping[TableSpec, pl.DataFrame]) -> dict[str, 
     return files
 
 
+def _drop_timezones(df: pl.DataFrame) -> pl.DataFrame:
+    """Excel has no timezone-aware datetime type -- normalize every
+    tz-aware Datetime column to naive UTC before handing it to
+    `write_excel`, or xlsxwriter raises trying to format the cell.
+    """
+    exprs = [
+        pl.col(name).dt.convert_time_zone("UTC").dt.replace_time_zone(None)
+        for name, dtype in df.schema.items()
+        if isinstance(dtype, pl.Datetime) and dtype.time_zone is not None
+    ]
+    return df.with_columns(exprs) if exprs else df
+
+
 def _write_excel_file(tables: Mapping[TableSpec, pl.DataFrame]) -> dict[str, bytes]:
     buf = io.BytesIO()
     workbook = xlsxwriter.Workbook(buf, {"in_memory": True})
     for spec, df in tables.items():
+        df = _drop_timezones(df)
         df.write_excel(workbook=workbook, worksheet=_excel_sheet_name(spec.key))
     workbook.close()
     return {"export.xlsx": buf.getvalue()}
@@ -280,12 +324,27 @@ def build_export(
     `export.zip`.
 
     Raises:
-        ValueError: if `tables` is empty, or if csv/parquet produced more
-            than one file and `zip_output` is False -- there's no way to
-            hand back more than one file from a single download otherwise.
+        ValueError: if `tables` is empty, if the combined row count exceeds
+            `MAX_ROWS_EXCEL`/`MAX_ROWS_OTHER` for `export_format`, if the
+            resulting file(s) exceed `MAX_OUTPUT_BYTES`, or if csv/parquet
+            produced more than one file and `zip_output` is False -- there's
+            no way to hand back more than one file from a single download
+            otherwise.
     """
     if not tables:
         msg = "No tables selected."
+        raise ValueError(msg)
+
+    total_rows = sum(df.height for df in tables.values())
+    row_limit = _ROW_LIMITS[export_format]
+    if total_rows > row_limit:
+        msg = (
+            f"{total_rows:,} selected rows exceeds the {row_limit:,}-row "
+            f"limit for {export_format} exports -- narrow the time range "
+            "or packet-type filter, or use the raw unfiltered download "
+            "instead (see export_raw.py), which never loads rows into "
+            "polars at all."
+        )
         raise ValueError(msg)
 
     if export_format == "csv":
@@ -309,11 +368,24 @@ def build_export(
         raise ValueError(msg)
 
     if zip_output:
-        return ExportResult(
-            filename="export.zip", data=_zip_files(files), media_type="application/zip"
-        )
+        data = _zip_files(files)
+        if len(data) > MAX_OUTPUT_BYTES:
+            msg = (
+                f"Even zipped, the export is {len(data):,} bytes, over the "
+                f"{MAX_OUTPUT_BYTES:,}-byte limit -- narrow the time range "
+                "or packet-type filter."
+            )
+            raise ValueError(msg)
+        return ExportResult(filename="export.zip", data=data, media_type="application/zip")
 
     ((filename, data),) = files.items()
+    if len(data) > MAX_OUTPUT_BYTES:
+        msg = (
+            f"The export is {len(data):,} bytes, over the "
+            f'{MAX_OUTPUT_BYTES:,}-byte limit -- check "Zip output" to '
+            "compress it, or narrow the time range/packet-type filter."
+        )
+        raise ValueError(msg)
     return ExportResult(filename=filename, data=data, media_type=_MEDIA_TYPES[export_format])
 
 
