@@ -26,6 +26,7 @@ __all__ = [
 ]
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import polars as pl
@@ -41,7 +42,7 @@ from cts1_mo_tools.cts1_processing_pipeline.step_2_deduplicate_packets import (
 )
 
 if TYPE_CHECKING:
-    from datetime import datetime, timedelta
+    from datetime import timedelta
     from pathlib import Path
 
 # Every one of these lives in the same output directory as step 1's DuckDB
@@ -77,6 +78,19 @@ def _max_datetime(lf: pl.LazyFrame | None, column: str) -> datetime | None:
     return lf.select(pl.col(column).max()).collect().item()
 
 
+def _file_mtime(path: Path) -> datetime | None:
+    """When `path` was last written, or None if it doesn't exist yet.
+
+    Step 3 rewrites `everything_decoded.parquet` from scratch on every run
+    (no per-row "decoded at" column -- see its pipeline module), so the
+    file's own mtime is the only freshness signal for "when did step 3 last
+    run" available without changing that file's schema.
+    """
+    if not path.exists():
+        return None
+    return datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
+
+
 @dataclass(frozen=True, slots=True)
 class PipelineCounts:
     """At-a-glance row counts + freshness timestamps for every pipeline
@@ -98,6 +112,7 @@ class PipelineCounts:
     latest_packet_received_at: datetime | None
     latest_packet_ingested_at: datetime | None
     latest_decoder_run_at: datetime | None
+    latest_decoded_at: datetime | None
 
     @property
     def decode_backlog(self) -> int:
@@ -132,6 +147,7 @@ def pipeline_counts(
         latest_packet_received_at=_max_datetime(raw_packets_lf, "received_at"),
         latest_packet_ingested_at=_max_datetime(raw_packets_lf, "ingested_at"),
         latest_decoder_run_at=_max_datetime(decoder_runs_lf, "run_at"),
+        latest_decoded_at=_file_mtime(decoded_packets_path),
     )
 
 

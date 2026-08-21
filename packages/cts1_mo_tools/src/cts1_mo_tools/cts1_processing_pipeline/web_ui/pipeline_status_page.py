@@ -58,9 +58,19 @@ def _age_str(value: datetime) -> str:
     return f"{_duration_str(int(delta))} ago"
 
 
-def _freshness_row(label: str, value: datetime | None) -> None:
+def _source_icon(source: str) -> None:
+    """A small info icon carrying a tooltip naming the pipeline step + table
+    (+ column, where relevant) a value was pulled from, so a viewer can
+    tell at a glance which stage to go investigate.
+    """
+    ui.icon("info", size="14px", color="grey").classes("cursor-help").tooltip(source)
+
+
+def _freshness_row(label: str, value: datetime | None, *, source: str) -> None:
     with ui.row().classes("w-full items-center justify-between"):
-        ui.label(label).classes("text-caption text-grey text-uppercase")
+        with ui.row().classes("items-center gap-1"):
+            ui.label(label).classes("text-caption text-grey text-uppercase")
+            _source_icon(source)
         if value is None:
             with ui.row().classes("items-center gap-1"):
                 ui.icon("help", color="grey")
@@ -87,13 +97,15 @@ def _stat_tile(label: str, value: str) -> None:
         ui.label(value).classes("text-2xl font-bold")
 
 
-def _plain_row(label: str, value: str | None) -> None:
+def _plain_row(label: str, value: str | None, *, source: str) -> None:
     """Same layout as `_freshness_row`, but with no staleness coloring --
     for facts like "first packet ever" or "largest historical gap" that
     are just informational, not a live health signal to flag yellow/red.
     """
     with ui.row().classes("w-full items-center justify-between"):
-        ui.label(label).classes("text-caption text-grey text-uppercase")
+        with ui.row().classes("items-center gap-1"):
+            ui.label(label).classes("text-caption text-grey text-uppercase")
+            _source_icon(source)
         if value is None:
             with ui.row().classes("items-center gap-1"):
                 ui.icon("help", color="grey")
@@ -148,25 +160,44 @@ def _counts_section(
                 _freshness_row(
                     "Latest observation end (SatNOGS)",
                     counts.latest_observation_end,
+                    source="Step 1 · raw_observations.parquet · end",
                 )
                 _freshness_row(
-                    "Latest packet received", counts.latest_packet_received_at
+                    "Latest packet received",
+                    counts.latest_packet_received_at,
+                    source="Step 1 · raw_packets.parquet · received_at",
                 )
                 _freshness_row(
                     "Latest packet ingested locally",
                     counts.latest_packet_ingested_at,
+                    source="Step 1 · raw_packets.parquet · ingested_at",
                 )
-                _freshness_row("Latest decoder run", counts.latest_decoder_run_at)
+                _freshness_row(
+                    "Latest decoder run",
+                    counts.latest_decoder_run_at,
+                    source="Step 1 · decoder_runs.parquet · run_at",
+                )
+                _freshness_row(
+                    "Latest decode (step 3)",
+                    counts.latest_decoded_at,
+                    source=(
+                        "Step 3 · everything_decoded.parquet · file "
+                        "last-written time (rewritten whole on every run, "
+                        "so no per-row timestamp)"
+                    ),
+                )
 
             with ui.column().classes("flex-1 min-w-72 gap-0"):
                 ui.label("Completeness").classes("text-base font-medium")
                 _plain_row(
                     "First packet ever received",
                     _first_packet_value(completeness.first_received_at),
+                    source="Step 3 · everything_decoded.parquet · received_at",
                 )
                 _plain_row(
                     "Largest gap (entire history)",
                     _largest_gap_value(completeness),
+                    source="Step 3 · everything_decoded.parquet · received_at",
                 )
 
 
