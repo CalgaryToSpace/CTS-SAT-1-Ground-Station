@@ -69,6 +69,11 @@ class Step1Args:
     decoder_runs table is skipped. Set this to rerun every decoder on every
     candidate observation regardless of that history."""
 
+    tools: tuple[str, ...] | None = None
+    """Which decoders to run, from {askew_demod_from_file, sso_rx_replay,
+    gr_satellites_pdu, gr_satellites_kiss, satnogs_data_demod}. Omit to run
+    all of them."""
+
 
 @dataclass(frozen=True, slots=True)
 class Step2Args:
@@ -111,6 +116,9 @@ class DaemonArgs:
 
     force_rerun_decoders: bool = False
     """Same as step 1's --force-rerun-decoders, applied to every requery."""
+
+    tools: tuple[str, ...] | None = None
+    """Same as step 1's --tools, applied to every requery."""
 
 
 # Add further steps as additional
@@ -163,6 +171,7 @@ def main() -> None:
                 workers=args.command.workers,
                 temp_dir=args.command.temp_dir,
                 force_rerun=args.command.force_rerun_decoders,
+                tools=args.command.tools,
             )
         elif isinstance(args.command, Step2Args):
             step_2_deduplicate_packets.run(output_dir=args.db_path.parent)
@@ -178,6 +187,7 @@ def main() -> None:
                 workers=args.command.workers,
                 temp_dir=args.command.temp_dir,
                 force_rerun=args.command.force_rerun_decoders,
+                tools=args.command.tools,
             )
         else:
             assert_never(args.command)

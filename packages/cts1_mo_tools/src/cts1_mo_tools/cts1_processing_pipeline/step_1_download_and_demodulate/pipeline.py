@@ -73,11 +73,16 @@ _DECODER_VERSION_COMMAND = {
 _SATNOGS_DATA_DEMOD_VERSION = "SatNOGS Rolling Release"
 
 
-def _resolve_decoder_versions() -> dict[str, str | None]:
-    """Run `<tool> --version` once per distinct command, first line only."""
+def _resolve_decoder_versions(tools: frozenset[str]) -> dict[str, str | None]:
+    """Run `<tool> --version` once per distinct command, first line only.
+
+    Only resolves versions for decoders in `tools`.
+    """
     version_by_command: dict[str, str | None] = {}
     versions: dict[str, str | None] = {}
     for decoder, command in _DECODER_VERSION_COMMAND.items():
+        if decoder not in tools:
+            continue
         if decoder == "satnogs_data_demod":
             versions[decoder] = _SATNOGS_DATA_DEMOD_VERSION
             continue
@@ -155,20 +160,22 @@ def _received_at(obs: dict[str, Any], *, time_in_file_ms: float | None) -> datet
     return datetime.fromisoformat(obs["end"])
 
 
-def _process_audio(
+def _process_audio(  # noqa: C901, PLR0912
     obs: dict[str, Any],
     temp_dir: Path | None,
+    tools: frozenset[str],
 ) -> list[dict[str, Any]]:
-    """Download one observation's audio and run all three audio decoders on it.
+    """Download one observation's audio and run the enabled audio decoders on it.
 
     askew_demod_from_file, sso_rx_replay, gr_satellites --hexdump, and
     gr_satellites --kiss_out all now finish in a couple of seconds, so they
     all run at normal (small pool) concurrency, sharing one temp dir that's
-    cleaned up before returning.
+    cleaned up before returning. Only the decoders named in `tools` run.
     """
     obs_id = obs["id"]
     audio_url = obs["payload"]
     rows: list[dict[str, Any]] = []
+    needs_wav = "gr_satellites_pdu" in tools or "gr_satellites_kiss" in tools
 
     with tempfile.TemporaryDirectory(prefix="cts1_pipeline_", dir=temp_dir) as tmp_name:
         try:
@@ -177,41 +184,46 @@ def _process_audio(
             logger.exception(f"Failed to download audio for observation {obs_id}")
             return rows
 
-        try:
-            askew_rows = run_askew_demod_from_file(ogg_path)
-        except Exception:  # noqa: BLE001
-            logger.exception(
-                f"askew_demod_from_file decode failed for observation {obs_id}"
-            )
-            askew_rows = []
-        for row in askew_rows:
-            rows.append(  # noqa: PERF401
-                {
-                    "observation_id": obs_id,
-                    "decoder": "askew_demod_from_file",
-                    "audio_url": audio_url,
-                    "ingested_at": datetime.now(UTC),
-                    "received_at": _received_at(
-                        obs, time_in_file_ms=row["time_in_file_ms"]
-                    ),
-                    **row,
-                }
-            )
+        if "askew_demod_from_file" in tools:
+            try:
+                askew_rows = run_askew_demod_from_file(ogg_path)
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    f"askew_demod_from_file decode failed for observation {obs_id}"
+                )
+                askew_rows = []
+            for row in askew_rows:
+                rows.append(  # noqa: PERF401
+                    {
+                        "observation_id": obs_id,
+                        "decoder": "askew_demod_from_file",
+                        "audio_url": audio_url,
+                        "ingested_at": datetime.now(UTC),
+                        "received_at": _received_at(
+                            obs, time_in_file_ms=row["time_in_file_ms"]
+                        ),
+                        **row,
+                    }
+                )
 
-        sso_rows = run_sso_rx_replay(ogg_path, report_filename=ogg_path.name)
-        for row in sso_rows:
-            rows.append(  # noqa: PERF401
-                {
-                    "observation_id": obs_id,
-                    "decoder": "sso_rx_replay",
-                    "audio_url": audio_url,
-                    "ingested_at": datetime.now(UTC),
-                    "received_at": _received_at(
-                        obs, time_in_file_ms=row["time_in_file_ms"]
-                    ),
-                    **row,
-                }
-            )
+        if "sso_rx_replay" in tools:
+            sso_rows = run_sso_rx_replay(ogg_path, report_filename=ogg_path.name)
+            for row in sso_rows:
+                rows.append(  # noqa: PERF401
+                    {
+                        "observation_id": obs_id,
+                        "decoder": "sso_rx_replay",
+                        "audio_url": audio_url,
+                        "ingested_at": datetime.now(UTC),
+                        "received_at": _received_at(
+                            obs, time_in_file_ms=row["time_in_file_ms"]
+                        ),
+                        **row,
+                    }
+                )
+
+        if not needs_wav:
+            return rows
 
         try:
             wav_path = convert_ogg_to_wav(ogg_path)
@@ -219,59 +231,65 @@ def _process_audio(
             logger.exception(f"WAV conversion failed for observation {obs_id}")
             return rows
 
-        try:
-            gr_rows = run_gr_satellites_pdu(wav_path, satcfg=DEFAULT_SATCFG_PATH)
-        except Exception:  # noqa: BLE001
-            logger.exception(
-                f"gr_satellites_pdu decode failed for observation {obs_id}"
-            )
-            gr_rows = []
-        for row in gr_rows:
-            rows.append(  # noqa: PERF401
-                {
-                    "observation_id": obs_id,
-                    "decoder": "gr_satellites_pdu",
-                    "audio_url": audio_url,
-                    "ingested_at": datetime.now(UTC),
-                    "received_at": _received_at(obs, time_in_file_ms=None),
-                    "rs_correctable": True,  # gr_satellites has no uncorrectable frames
-                    **row,
-                }
-            )
+        if "gr_satellites_pdu" in tools:
+            try:
+                gr_rows = run_gr_satellites_pdu(wav_path, satcfg=DEFAULT_SATCFG_PATH)
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    f"gr_satellites_pdu decode failed for observation {obs_id}"
+                )
+                gr_rows = []
+            for row in gr_rows:
+                rows.append(  # noqa: PERF401
+                    {
+                        "observation_id": obs_id,
+                        "decoder": "gr_satellites_pdu",
+                        "audio_url": audio_url,
+                        "ingested_at": datetime.now(UTC),
+                        "received_at": _received_at(obs, time_in_file_ms=None),
+                        "rs_correctable": True,  # gr_satellites has no bad frames
+                        **row,
+                    }
+                )
 
-        try:
-            kiss_rows = run_gr_satellites_kiss(wav_path, satcfg=DEFAULT_SATCFG_PATH)
-        except Exception:  # noqa: BLE001
-            logger.exception(
-                f"gr_satellites_kiss decode failed for observation {obs_id}"
-            )
-            kiss_rows = []
-        for row in kiss_rows:
-            rows.append(  # noqa: PERF401
-                {
-                    "observation_id": obs_id,
-                    "decoder": "gr_satellites_kiss",
-                    "audio_url": audio_url,
-                    "ingested_at": datetime.now(UTC),
-                    "received_at": _received_at(
-                        obs, time_in_file_ms=row["time_in_file_ms"]
-                    ),
-                    "rs_correctable": True,  # gr_satellites has no uncorrectable frames
-                    **row,
-                }
-            )
+        if "gr_satellites_kiss" in tools:
+            try:
+                kiss_rows = run_gr_satellites_kiss(wav_path, satcfg=DEFAULT_SATCFG_PATH)
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    f"gr_satellites_kiss decode failed for observation {obs_id}"
+                )
+                kiss_rows = []
+            for row in kiss_rows:
+                rows.append(  # noqa: PERF401
+                    {
+                        "observation_id": obs_id,
+                        "decoder": "gr_satellites_kiss",
+                        "audio_url": audio_url,
+                        "ingested_at": datetime.now(UTC),
+                        "received_at": _received_at(
+                            obs, time_in_file_ms=row["time_in_file_ms"]
+                        ),
+                        "rs_correctable": True,  # gr_satellites has no bad frames
+                        **row,
+                    }
+                )
 
     return rows
 
 
-def _process_demod(obs: dict[str, Any]) -> list[dict[str, Any]]:
+def _process_demod(obs: dict[str, Any], tools: frozenset[str]) -> list[dict[str, Any]]:
     """Download every already-demodulated packet SatNOGS has for this observation.
 
     Unlike the audio decoders, this needs no download of its own audio and
     no temp dir: each `demoddata` entry is already a standalone packet URL,
     downloaded via a thread pool nested inside this (already-pooled) call
-    (see `run_satnogs_data_demod`).
+    (see `run_satnogs_data_demod`). A no-op unless "satnogs_data_demod" is
+    in `tools`.
     """
+    if "satnogs_data_demod" not in tools:
+        return []
+
     obs_id = obs["id"]
     audio_url = obs.get("payload")
     rows: list[dict[str, Any]] = []
@@ -307,23 +325,25 @@ def _process_demod(obs: dict[str, Any]) -> list[dict[str, Any]]:
 def _process_fast(
     obs: dict[str, Any],
     temp_dir: Path | None,
+    tools: frozenset[str],
 ) -> list[dict[str, Any]]:
-    """Run every decoder for one observation: the audio ones plus satnogs_data_demod."""
+    """Run every enabled decoder for one observation: audio ones plus demod."""
     rows: list[dict[str, Any]] = []
     if obs.get("payload"):
-        rows.extend(_process_audio(obs, temp_dir))
+        rows.extend(_process_audio(obs, temp_dir, tools))
     if obs.get("demoddata"):
-        rows.extend(_process_demod(obs))
+        rows.extend(_process_demod(obs, tools))
     return rows
 
 
 def _process_fast_timed(
     obs: dict[str, Any],
     temp_dir: Path | None,
+    tools: frozenset[str],
 ) -> tuple[list[dict[str, Any]], int]:
     """Run `_process_fast` and report how long it took, in milliseconds."""
     started_at = time.monotonic()
-    rows = _process_fast(obs, temp_dir)
+    rows = _process_fast(obs, temp_dir, tools)
     runtime_ms = round((time.monotonic() - started_at) * 1000)
     return rows, runtime_ms
 
@@ -333,10 +353,12 @@ def _select_candidates(
     *,
     done: set[tuple[int, str]],
     remaining: int | None,
+    tools: frozenset[str],
 ) -> list[dict[str, Any]]:
     """Observations in `page` that have audio and/or demoddata and still need decoding.
 
     Stops early once `remaining` candidates have been picked (None = no cap).
+    Only `tools` are considered when checking whether an observation is done.
     """
     candidates: list[dict[str, Any]] = []
     for obs in page:
@@ -344,7 +366,7 @@ def _select_candidates(
             break
         if not obs.get("payload") and not obs.get("demoddata"):
             continue
-        if all((obs["id"], decoder) in done for decoder in DECODERS):
+        if all((obs["id"], decoder) in done for decoder in tools):
             continue
         candidates.append(obs)
     return candidates
@@ -359,6 +381,7 @@ def run(  # noqa: C901, PLR0913, PLR0915
     workers: int = 4,
     temp_dir: Path | None = None,
     force_rerun: bool = False,
+    tools: tuple[str, ...] | None = None,
 ) -> None:
     """Run the pipeline once.
 
@@ -382,8 +405,23 @@ def run(  # noqa: C901, PLR0913, PLR0915
             observation/decoder pairs have already been run, and rerun every
             decoder on every candidate observation regardless. New runs are
             still recorded to decoder_runs as usual.
+        tools: Which decoders to run, from DECODERS. None (the default) runs
+            all of them.
+
+    Raises:
+        ValueError: If `tools` names something outside DECODERS.
     """
+    if tools is None:
+        enabled_tools = frozenset(DECODERS)
+    else:
+        unknown = set(tools) - set(DECODERS)
+        if unknown:
+            msg = f"Unknown tool(s) {sorted(unknown)}; choose from {DECODERS}"
+            raise ValueError(msg)
+        enabled_tools = frozenset(tools)
+
     logger.info(f"Listing observations for NORAD {norad_id}")
+    logger.info(f"  Using tools: {sorted(enabled_tools)}")
 
     start_gt = _parse_start_filter(start) if start is not None else None
     if start_gt is not None:
@@ -406,7 +444,7 @@ def run(  # noqa: C901, PLR0913, PLR0915
         if force_rerun:
             logger.info("--force-rerun: ignoring decoder_runs history")
 
-        decoder_versions = _resolve_decoder_versions()
+        decoder_versions = _resolve_decoder_versions(enabled_tools)
         logger.info(f"Decoder versions: {decoder_versions}")
 
         def dispatch(batch: list[dict[str, Any]]) -> None:
@@ -415,7 +453,9 @@ def run(  # noqa: C901, PLR0913, PLR0915
                 return
             logger.info(f"Dispatching a batch of {len(batch)} observation(s)...")
             futures = {
-                fast_executor.submit(_process_fast_timed, obs, temp_dir): obs
+                fast_executor.submit(
+                    _process_fast_timed, obs, temp_dir, enabled_tools
+                ): obs
                 for obs in batch
             }
             for future in concurrent.futures.as_completed(futures):
@@ -436,7 +476,7 @@ def run(  # noqa: C901, PLR0913, PLR0915
                 db.record_decoder_runs(
                     con, obs["id"], decoder_versions, runtime_ms=runtime_ms
                 )
-                for decoder in DECODERS:
+                for decoder in enabled_tools:
                     done.add((obs["id"], decoder))
                 total_decoded += 1
                 logger.info(f"[{total_decoded}] observation {obs['id']}")
@@ -470,7 +510,11 @@ def run(  # noqa: C901, PLR0913, PLR0915
                     continue
 
                 remaining = None if limit is None else limit - total_decoded
-                dispatch(_select_candidates(page, done=done, remaining=remaining))
+                dispatch(
+                    _select_candidates(
+                        page, done=done, remaining=remaining, tools=enabled_tools
+                    )
+                )
 
                 if limit is not None and total_decoded >= limit:
                     # A generator-backed fetch, so breaking here stops

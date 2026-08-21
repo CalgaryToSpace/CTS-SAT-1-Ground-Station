@@ -50,6 +50,7 @@ def _run_all_steps(  # noqa: PLR0913
     workers: int,
     temp_dir: Path | None,
     force_rerun: bool,
+    tools: tuple[str, ...] | None,
 ) -> None:
     step_1_pipeline.run(
         norad_id=norad_id,
@@ -59,6 +60,7 @@ def _run_all_steps(  # noqa: PLR0913
         workers=workers,
         temp_dir=temp_dir,
         force_rerun=force_rerun,
+        tools=tools,
     )
     step_2_pipeline.run(output_dir=db_path.parent)
     step_3_pipeline.run(output_dir=db_path.parent)
@@ -74,6 +76,7 @@ def run(  # noqa: PLR0913
     workers: int = 4,
     temp_dir: Path | None = None,
     force_rerun: bool = False,
+    tools: tuple[str, ...] | None = None,
 ) -> None:
     """Run steps 1-3 forever: one backfill of `start`, then a requery of
     the trailing `interval + 30` minutes every `interval` minutes.
@@ -93,6 +96,9 @@ def run(  # noqa: PLR0913
             uses the platform default.
         force_rerun: Passed through to every step-1 run -- see
             `step_1_download_and_demodulate.pipeline.run`.
+        tools: Which step-1 decoders to run, from step 1's DECODERS. None
+            (the default) runs all of them. Passed through to every step-1
+            run.
 
     Runs until interrupted (Ctrl+C / SIGINT) -- `KeyboardInterrupt` is left
     to propagate to the caller (the top-level CLI catches it and exits
@@ -107,6 +113,7 @@ def run(  # noqa: PLR0913
         workers=workers,
         temp_dir=temp_dir,
         force_rerun=force_rerun,
+        tools=tools,
     )
 
     interval_delta = timedelta(minutes=interval)
@@ -126,4 +133,5 @@ def run(  # noqa: PLR0913
             workers=workers,
             temp_dir=temp_dir,
             force_rerun=force_rerun,
+            tools=tools,
         )
