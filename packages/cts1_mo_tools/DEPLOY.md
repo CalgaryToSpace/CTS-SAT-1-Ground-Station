@@ -50,7 +50,8 @@ occasional reload -- e.g. a host cron entry:
 
 ```bash
 git pull
-docker compose up --build -d
+docker compose build
+docker compose up -d
 ```
 
 ## Backup
