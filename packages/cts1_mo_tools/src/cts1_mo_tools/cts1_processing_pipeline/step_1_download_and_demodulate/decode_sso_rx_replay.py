@@ -44,6 +44,14 @@ def parse_forensics_line(line: str) -> dict[str, Any] | None:
         # SSO quirk where it reports the filename even if there are no frames.
         return None
 
+    if "error" in obj:
+        # The file couldn't be read/decoded at all (corrupt/truncated/empty
+        # download, unsupported encoding, ...) -- sso_rx_replay reports this
+        # per-file rather than failing its whole invocation, so this is a
+        # normal "skip this one file" outcome, not something to raise on.
+        logger.warning(f"sso_rx_replay: {obj.get('filename', '?')}: {obj['error']}")
+        return None
+
     data_bytes = base64.b64decode(obj["data_base64"])
     rs = obj["rs"]
 

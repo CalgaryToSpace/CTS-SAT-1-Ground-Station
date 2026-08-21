@@ -1,4 +1,3 @@
-import pytest
 from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate.decode_askew_demod import (  # noqa: E501
     parse_askew_line,
 )
@@ -78,12 +77,15 @@ def test_parse_forensics_line_no_decode() -> None:
 
 
 def test_parse_forensics_line_error() -> None:
-    # An {"filename", "error"} line carries no frame fields, so indexing them
-    # raises rather than silently fabricating a row.
-    with pytest.raises(KeyError):
+    # An {"filename", "error"} line means the file couldn't be read/decoded
+    # at all -- a normal per-file outcome (corrupt/truncated download,
+    # unsupported encoding, ...), not a frame to land in raw_packets.
+    assert (
         parse_forensics_line(
             '{"filename":"bad.ogg","error":"could not decode audio file via libsndfile"}'  # noqa: E501
         )
+        is None
+    )
 
 
 def test_parse_forensics_line_blank_and_malformed() -> None:
