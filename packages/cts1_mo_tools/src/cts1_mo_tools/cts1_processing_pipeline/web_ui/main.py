@@ -28,10 +28,12 @@ from .beacon_stats_page import build_beacon_stats_page
 from .export_page import build_export_page
 from .export_raw import register_raw_export_route
 from .file_reassembler_page import build_file_reassembler_page
+from .packet_browser_page import build_packet_browser_page
 from .pipeline_status_page import build_pipeline_status_page
 
 NAV_LINKS = (
     ("Beacon Stats", "/"),
+    ("Browse Packets", "/browse-packets"),
     ("File Reassembler", "/file-reassembler"),
     ("Pipeline Status", "/pipeline-status"),
     ("Export Data", "/export"),
@@ -64,6 +66,11 @@ def _build_pages(args: Args) -> None:
     def beacon_stats_page() -> None:
         _nav()
         build_beacon_stats_page(args.parquet_path, args.hours)
+
+    @ui.page("/browse-packets")
+    def packet_browser_page() -> None:
+        _nav()
+        build_packet_browser_page(args.parquet_path)
 
     @ui.page("/file-reassembler")
     def file_reassembler_page() -> None:

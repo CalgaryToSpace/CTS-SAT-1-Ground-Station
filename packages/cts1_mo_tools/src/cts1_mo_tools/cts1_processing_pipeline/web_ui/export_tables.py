@@ -39,7 +39,10 @@ import polars as pl
 import xlsxwriter  # pyright: ignore[reportMissingTypeStubs]
 
 from cts1_mo_tools.cts1_decode_satnogs_packets import PACKET_TYPE_MAP
-from cts1_mo_tools.cts1_processing_pipeline.common import connect_duckdb
+from cts1_mo_tools.cts1_processing_pipeline.common import (
+    connect_duckdb,
+    drop_timezones_for_excel,
+)
 from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
     pipeline as step_3_pipeline,
 )
@@ -255,24 +258,11 @@ def _write_parquet_files(tables: Mapping[TableSpec, pl.DataFrame]) -> dict[str, 
     return files
 
 
-def _drop_timezones(df: pl.DataFrame) -> pl.DataFrame:
-    """Excel has no timezone-aware datetime type -- normalize every
-    tz-aware Datetime column to naive UTC before handing it to
-    `write_excel`, or xlsxwriter raises trying to format the cell.
-    """
-    exprs = [
-        pl.col(name).dt.convert_time_zone("UTC").dt.replace_time_zone(None)
-        for name, dtype in df.schema.items()
-        if isinstance(dtype, pl.Datetime) and dtype.time_zone is not None
-    ]
-    return df.with_columns(exprs) if exprs else df
-
-
 def _write_excel_file(tables: Mapping[TableSpec, pl.DataFrame]) -> dict[str, bytes]:
     buf = io.BytesIO()
     workbook = xlsxwriter.Workbook(buf, {"in_memory": True})
     for spec, df in tables.items():
-        df_write = _drop_timezones(df)
+        df_write = drop_timezones_for_excel(df)
         df_write.write_excel(workbook=workbook, worksheet=_excel_sheet_name(spec.key))
     workbook.close()
     return {"export.xlsx": buf.getvalue()}
