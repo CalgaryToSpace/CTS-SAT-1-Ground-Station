@@ -46,6 +46,9 @@ from cts1_mo_tools.cts1_processing_pipeline.common import (
 from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
     pipeline as step_3_pipeline,
 )
+from cts1_mo_tools.cts1_processing_pipeline.step_4_detect_satellite_events import (
+    pipeline as step_4_pipeline,
+)
 
 from . import pipeline_status
 
@@ -132,6 +135,17 @@ TABLE_SPECS: tuple[TableSpec, ...] = (
         filename=step_3_pipeline.OUTPUT_FILENAME,
         time_column="received_at",
         has_packet_type=True,
+    ),
+    TableSpec(
+        key="satellite_events_from_beacons",
+        step="Step 4 -- Detect Satellite Events",
+        description=(
+            "OBC reboot / EPS reboot / uplinked-commands events detected "
+            "from beacon counter drops, one row per event."
+        ),
+        filename=step_4_pipeline.OUTPUT_FILENAME,
+        time_column="detected_at",
+        has_packet_type=False,
     ),
 )
 

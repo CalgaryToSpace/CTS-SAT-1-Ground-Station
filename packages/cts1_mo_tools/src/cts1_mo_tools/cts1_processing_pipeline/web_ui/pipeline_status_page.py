@@ -145,6 +145,7 @@ def _counts_section(
             _stat_tile("Raw decodes", f"{counts.total_raw_decodes:,}")
             _stat_tile("Distinct packets", f"{counts.total_distinct_packets:,}")
             _stat_tile("Decoded packets", f"{counts.total_decoded_packets:,}")
+            _stat_tile("Satellite events", f"{counts.total_satellite_events:,}")
         if counts.decode_backlog:
             with ui.row().classes("items-center gap-2 mt-2"):
                 ui.icon("warning", color="warning")
@@ -184,6 +185,15 @@ def _counts_section(
                         "Step 3 · everything_decoded.parquet · file "
                         "last-written time (rewritten whole on every run, "
                         "so no per-row timestamp)"
+                    ),
+                )
+                _freshness_row(
+                    "Latest satellite events run (step 4)",
+                    counts.latest_satellite_events_at,
+                    source=(
+                        "Step 4 · satellite_events_from_beacons.parquet · "
+                        "file last-written time (rewritten whole on every "
+                        "run, so no per-row timestamp)"
                     ),
                 )
 

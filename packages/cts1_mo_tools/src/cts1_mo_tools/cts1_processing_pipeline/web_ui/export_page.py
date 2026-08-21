@@ -23,7 +23,7 @@ from .layout import page_shell
 
 # A flowchart of every table the pipeline produces and the step that
 # produces it -- kept in sync with `export_tables.TABLE_SPECS` by hand
-# (there are only 3 steps/5 tables total, and the step boundaries rarely
+# (there are only 4 steps/6 tables total, and the step boundaries rarely
 # change), rather than generated from it, since the diagram also needs to
 # show the SatNOGS API as the ultimate source, which isn't a table at all.
 PIPELINE_FLOWCHART = """
@@ -37,6 +37,8 @@ flowchart LR
     step2 --> distinct_packets[("distinct_packets_over_time")]
     distinct_packets --> step3["Step 3\\nDecode Packets"]
     step3 --> everything_decoded[("everything_decoded")]
+    everything_decoded --> step4["Step 4\\nDetect Satellite Events"]
+    step4 --> satellite_events[("satellite_events_from_beacons")]
 """
 
 RANGE_INPUT_MASK = "####-##-## ##:##:##"
@@ -130,7 +132,7 @@ def _time_filter_section(time_state: dict[str, str | None]) -> None:
         ui.label(
             "Applied to each table's own timestamp column -- received_at "
             "for most tables, start for raw_observations, run_at for "
-            "decoder_runs."
+            "decoder_runs, detected_at for satellite_events_from_beacons."
         ).classes("text-caption text-grey")
 
         start_input: ui.input
