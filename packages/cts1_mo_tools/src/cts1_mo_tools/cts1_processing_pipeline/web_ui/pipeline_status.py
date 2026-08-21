@@ -12,8 +12,9 @@ Pure data layer: no NiceGUI/rendering concerns live here, just polars -- see
 from __future__ import annotations
 
 __all__ = [
+    "DECODED_PACKETS_FILENAME",
     "DECODER_RUNS_FILENAME",
-    "DEFAULT_OUTPUT_DIR",
+    "DEFAULT_DATA_DIR",
     "DISTINCT_PACKETS_FILENAME",
     "RAW_OBSERVATIONS_FILENAME",
     "RAW_PACKETS_FILENAME",
@@ -42,6 +43,9 @@ from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate impor
 from cts1_mo_tools.cts1_processing_pipeline.step_2_deduplicate_packets import (
     pipeline as step_2_pipeline,
 )
+from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
+    pipeline as step_3_pipeline,
+)
 from cts1_mo_tools.cts1_processing_pipeline.step_4_detect_satellite_events import (
     pipeline as step_4_pipeline,
 )
@@ -53,11 +57,12 @@ if TYPE_CHECKING:
 # Every one of these lives in the same output directory as step 1's DuckDB
 # export -- see `step_1_download_and_demodulate.db.export_parquets` and
 # `step_2_deduplicate_packets.pipeline` for where each is written.
-DEFAULT_OUTPUT_DIR = step_1_pipeline.DEFAULT_DB_PATH.parent
+DEFAULT_DATA_DIR = step_1_pipeline.DEFAULT_DATA_DIR
 RAW_OBSERVATIONS_FILENAME = f"{step_1_db.RAW_OBSERVATIONS_TABLE}.parquet"
 RAW_PACKETS_FILENAME = f"{step_1_db.RAW_PACKETS_TABLE}.parquet"
 DECODER_RUNS_FILENAME = f"{step_1_db.DECODER_RUNS_TABLE}.parquet"
 DISTINCT_PACKETS_FILENAME = step_2_pipeline.OUTPUT_FILENAME
+DECODED_PACKETS_FILENAME = step_3_pipeline.OUTPUT_FILENAME
 SATELLITE_EVENTS_FILENAME = step_4_pipeline.OUTPUT_FILENAME
 
 
@@ -128,24 +133,17 @@ class PipelineCounts:
         return max(0, self.total_distinct_packets - self.total_decoded_packets)
 
 
-def pipeline_counts(
-    output_dir: Path = DEFAULT_OUTPUT_DIR,
-    *,
-    decoded_packets_path: Path,
-) -> PipelineCounts:
-    """Row counts + freshness timestamps for every pipeline stage.
-
-    `output_dir` is where step 1/2's raw/intermediate parquet files live;
-    `decoded_packets_path` is passed separately since the web UI already
-    lets the user point `--parquet-path` at a non-default
-    `everything_decoded.parquet`.
+def pipeline_counts(data_dir: Path = DEFAULT_DATA_DIR) -> PipelineCounts:
+    """Row counts + freshness timestamps for every pipeline stage, all found
+    by fixed filename inside `data_dir`.
     """
-    raw_observations_lf = _scan(output_dir / RAW_OBSERVATIONS_FILENAME)
-    raw_packets_lf = _scan(output_dir / RAW_PACKETS_FILENAME)
-    distinct_packets_lf = _scan(output_dir / DISTINCT_PACKETS_FILENAME)
-    decoder_runs_lf = _scan(output_dir / DECODER_RUNS_FILENAME)
+    raw_observations_lf = _scan(data_dir / RAW_OBSERVATIONS_FILENAME)
+    raw_packets_lf = _scan(data_dir / RAW_PACKETS_FILENAME)
+    distinct_packets_lf = _scan(data_dir / DISTINCT_PACKETS_FILENAME)
+    decoder_runs_lf = _scan(data_dir / DECODER_RUNS_FILENAME)
+    decoded_packets_path = data_dir / DECODED_PACKETS_FILENAME
     decoded_packets_lf = _scan(decoded_packets_path)
-    satellite_events_path = output_dir / SATELLITE_EVENTS_FILENAME
+    satellite_events_path = data_dir / SATELLITE_EVENTS_FILENAME
     satellite_events_lf = _scan(satellite_events_path)
 
     return PipelineCounts(
@@ -186,15 +184,15 @@ class DecoderToolStats:
     avg_runtime_ms: float | None
 
 
-def decoder_tool_stats(output_dir: Path = DEFAULT_OUTPUT_DIR) -> list[DecoderToolStats]:
+def decoder_tool_stats(data_dir: Path = DEFAULT_DATA_DIR) -> list[DecoderToolStats]:
     """One `DecoderToolStats` per decoder tool that's shown up anywhere
     (raw decodes, distinct-packet contributions, or recorded runs), sorted
     by `distinct_packet_count` descending -- the tool contributing the most
     distinct packets first.
     """
-    raw_lf = _scan(output_dir / RAW_PACKETS_FILENAME)
-    distinct_lf = _scan(output_dir / DISTINCT_PACKETS_FILENAME)
-    runs_lf = _scan(output_dir / DECODER_RUNS_FILENAME)
+    raw_lf = _scan(data_dir / RAW_PACKETS_FILENAME)
+    distinct_lf = _scan(data_dir / DISTINCT_PACKETS_FILENAME)
+    runs_lf = _scan(data_dir / DECODER_RUNS_FILENAME)
 
     raw_counts = (
         raw_lf.group_by("decoder").agg(pl.len().alias("raw_decode_count")).collect()

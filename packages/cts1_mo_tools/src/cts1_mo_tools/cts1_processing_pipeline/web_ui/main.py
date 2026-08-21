@@ -9,7 +9,7 @@ individual pages.
 
 Usage (uv):
     uv run cts1_data_web_ui
-    uv run cts1_data_web_ui --parquet-path output/everything_decoded.parquet
+    uv run cts1_data_web_ui --data-dir output
     uv run cts1_data_web_ui --hours 6
 """
 
@@ -25,7 +25,10 @@ from pathlib import Path
 import tyro
 from nicegui import app, ui
 
-from . import data as beacon_data
+from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate import (
+    pipeline as step_1_pipeline,
+)
+
 from .beacon_stats_page import build_beacon_stats_page
 from .export_page import build_export_page
 from .export_raw import register_raw_export_route
@@ -56,8 +59,9 @@ NAV_LINKS = (
 class Args:
     """CTS-SAT-1 processing pipeline web UI."""
 
-    parquet_path: Path = beacon_data.DEFAULT_PARQUET_PATH
-    """Path to `everything_decoded.parquet` (step 3's output)."""
+    data_dir: Path = step_1_pipeline.DEFAULT_DATA_DIR
+    """Directory every pipeline step reads/writes its file(s) in -- each
+    page finds the file(s) it needs by a fixed filename inside it."""
 
     hours: float = 24.0
     """Default chart time window, in hours. Adjustable in the UI afterward."""
@@ -96,34 +100,34 @@ def _build_pages(args: Args) -> None:
     @ui.page("/")
     def beacon_stats_page() -> None:
         _nav()
-        build_beacon_stats_page(args.parquet_path, args.hours)
+        build_beacon_stats_page(args.data_dir, args.hours)
 
     @ui.page("/browse-packets")
     def packet_browser_page() -> None:
         _nav()
-        build_packet_browser_page(args.parquet_path)
+        build_packet_browser_page(args.data_dir)
 
     @ui.page("/satellite-events")
     def satellite_events_page() -> None:
         _nav()
-        build_satellite_events_page(args.parquet_path.parent)
+        build_satellite_events_page(args.data_dir)
 
     @ui.page("/file-reassembler")
     def file_reassembler_page() -> None:
         _nav()
-        build_file_reassembler_page(args.parquet_path)
+        build_file_reassembler_page(args.data_dir)
 
     @ui.page("/pipeline-status")
     def pipeline_status_page() -> None:
         _nav()
-        build_pipeline_status_page(args.parquet_path)
+        build_pipeline_status_page(args.data_dir)
 
     @ui.page("/export")
     def export_page() -> None:
         _nav()
-        build_export_page(args.parquet_path)
+        build_export_page(args.data_dir)
 
-    register_raw_export_route(app, args.parquet_path.parent)
+    register_raw_export_route(app, args.data_dir)
 
 
 def main() -> None:

@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 DEFAULT_PARQUET_PATH = (
-    step_3_pipeline.DEFAULT_OUTPUT_DIR / step_3_pipeline.OUTPUT_FILENAME
+    step_3_pipeline.DEFAULT_DATA_DIR / step_3_pipeline.OUTPUT_FILENAME
 )
 
 BEACON_PACKET_TYPES = ("BEACON_BASIC", "BEACON_EXTENDED")

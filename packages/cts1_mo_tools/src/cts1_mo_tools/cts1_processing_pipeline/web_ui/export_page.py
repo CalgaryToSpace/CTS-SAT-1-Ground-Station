@@ -220,9 +220,7 @@ def _options_section(options: _ExportOptions) -> None:
         ).classes("text-caption text-grey mt-2")
 
 
-def build_export_page(parquet_path: Path) -> None:
-    output_dir = parquet_path.parent
-
+def build_export_page(data_dir: Path) -> None:
     selected_tables: dict[str, bool] = {
         spec.key: spec.key == export_tables.TABLE_SPECS[-1].key
         for spec in export_tables.TABLE_SPECS
@@ -253,7 +251,7 @@ def build_export_page(parquet_path: Path) -> None:
         try:
             result = export_tables.export_selected_tables(
                 specs,
-                output_dir,
+                data_dir,
                 start=start,
                 end=end,
                 packet_types=packet_types,

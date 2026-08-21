@@ -1,12 +1,14 @@
 """CTS-SAT-1 processing pipeline: top-level CLI.
 
 Dispatches to the pipeline's steps as subcommands, with a handful of args
-shared by every step (currently just `--db-path`/`--debug`) parsed ahead of
-the subcommand.
+shared by every step (currently just `--data-dir`/`--debug`) parsed ahead of
+the subcommand. `--data-dir` is the one directory every step reads/writes
+its DuckDB database and parquet files in -- see each step's own
+`DEFAULT_DATA_DIR`/`OUTPUT_FILENAME` for the fixed filename it looks for.
 
 Usage (uv):
     uv run cts1_processing_pipeline step_1
-    uv run cts1_processing_pipeline --db-path output/cts1.duckdb step_1 --norad-id 69015
+    uv run cts1_processing_pipeline --data-dir output step_1 --norad-id 69015
     uv run cts1_processing_pipeline step_1 --limit 5 --debug
     uv run cts1_processing_pipeline step_2
     uv run cts1_processing_pipeline step_3
@@ -39,7 +41,7 @@ from .step_2_deduplicate_packets import pipeline as step_2_deduplicate_packets
 from .step_3_decode_packets import pipeline as step_3_decode_packets
 from .step_4_detect_satellite_events import pipeline as step_4_detect_satellite_events
 
-DEFAULT_DB_PATH = step_1_download_and_demodulate.DEFAULT_DB_PATH
+DEFAULT_DATA_DIR = step_1_download_and_demodulate.DEFAULT_DATA_DIR
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,11 +147,11 @@ Command = (
 class Args:
     """CTS-SAT-1 processing pipeline."""
 
-    db_path: Path = DEFAULT_DB_PATH
-    """DuckDB database file step 1 appends observations/packets to. Later
-    steps don't touch the database themselves -- they're parquet-in,
-    parquet-out -- but still use this path's directory to find/write the
-    parquet files step 1 exports next to it."""
+    data_dir: Path = DEFAULT_DATA_DIR
+    """Directory every step reads/writes its files in: step 1's DuckDB
+    database (and the parquet files it checkpoints from that), and every
+    later step's parquet-in-parquet-out file -- each step finds its own
+    file(s) by a fixed filename inside this one directory."""
 
     debug: bool = False
     """Enable debug logging."""
@@ -174,7 +176,7 @@ def main() -> None:
         if isinstance(args.command, Step1Args):
             step_1_download_and_demodulate.run(
                 norad_id=args.command.norad_id,
-                db_path=args.db_path,
+                data_dir=args.data_dir,
                 start=args.command.start,
                 limit=args.command.limit,
                 workers=args.command.workers,
@@ -183,15 +185,15 @@ def main() -> None:
                 tools=args.command.tools,
             )
         elif isinstance(args.command, Step2Args):
-            step_2_deduplicate_packets.run(output_dir=args.db_path.parent)
+            step_2_deduplicate_packets.run(data_dir=args.data_dir)
         elif isinstance(args.command, Step3Args):
-            step_3_decode_packets.run(output_dir=args.db_path.parent)
+            step_3_decode_packets.run(data_dir=args.data_dir)
         elif isinstance(args.command, Step4Args):
-            step_4_detect_satellite_events.run(output_dir=args.db_path.parent)
+            step_4_detect_satellite_events.run(data_dir=args.data_dir)
         elif isinstance(args.command, DaemonArgs):  # pyright: ignore[reportUnnecessaryIsInstance]
             daemon.run(
                 norad_id=args.command.norad_id,
-                db_path=args.db_path,
+                data_dir=args.data_dir,
                 start=args.command.start,
                 interval=args.command.interval,
                 limit=args.command.limit,

@@ -45,7 +45,7 @@ REQUERY_OVERLAP = timedelta(minutes=30)
 def _run_all_steps(  # noqa: PLR0913
     *,
     norad_id: str,
-    db_path: Path,
+    data_dir: Path,
     start: str | None,
     limit: int | None,
     workers: int,
@@ -55,7 +55,7 @@ def _run_all_steps(  # noqa: PLR0913
 ) -> None:
     step_1_pipeline.run(
         norad_id=norad_id,
-        db_path=db_path,
+        data_dir=data_dir,
         start=start,
         limit=limit,
         workers=workers,
@@ -63,15 +63,15 @@ def _run_all_steps(  # noqa: PLR0913
         force_rerun=force_rerun,
         tools=tools,
     )
-    step_2_pipeline.run(output_dir=db_path.parent)
-    step_3_pipeline.run(output_dir=db_path.parent)
-    step_4_pipeline.run(output_dir=db_path.parent)
+    step_2_pipeline.run(data_dir=data_dir)
+    step_3_pipeline.run(data_dir=data_dir)
+    step_4_pipeline.run(data_dir=data_dir)
 
 
 def run(  # noqa: PLR0913
     *,
     norad_id: str = "69015",
-    db_path: Path = step_1_pipeline.DEFAULT_DB_PATH,
+    data_dir: Path = step_1_pipeline.DEFAULT_DATA_DIR,
     start: str = "24 hours",
     interval: float = 15.0,
     limit: int | None = None,
@@ -85,8 +85,9 @@ def run(  # noqa: PLR0913
 
     Args:
         norad_id: NORAD catalog ID of the target satellite.
-        db_path: DuckDB database file step 1 appends to; later steps use
-            its directory to find/write their parquet files.
+        data_dir: Directory step 1 reads/writes its DuckDB database in;
+            every later step finds/writes its own parquet file(s) in the
+            same directory.
         start: How far back the initial backfill reaches: a duration like
             "3 days" (relative to now) or an ISO 8601 date/datetime -- see
             `step_1_download_and_demodulate.pipeline._parse_start_filter`.
@@ -109,7 +110,7 @@ def run(  # noqa: PLR0913
     logger.info(f"Daemon: initial backfill, start={start!r}")
     _run_all_steps(
         norad_id=norad_id,
-        db_path=db_path,
+        data_dir=data_dir,
         start=start,
         limit=limit,
         workers=workers,
@@ -129,7 +130,7 @@ def run(  # noqa: PLR0913
         logger.info(f"Daemon: requerying since {requery_start}")
         _run_all_steps(
             norad_id=norad_id,
-            db_path=db_path,
+            data_dir=data_dir,
             start=requery_start,
             limit=limit,
             workers=workers,

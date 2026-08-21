@@ -314,17 +314,15 @@ def _recent_packets_table(recent: pl.DataFrame) -> None:
         )
 
 
-def build_pipeline_status_page(parquet_path: Path) -> None:
-    output_dir = parquet_path.parent
+def build_pipeline_status_page(data_dir: Path) -> None:
+    parquet_path = data_dir / status_data.DECODED_PACKETS_FILENAME
 
     @ui.refreshable
     def content() -> None:
-        counts = status_data.pipeline_counts(
-            output_dir, decoded_packets_path=parquet_path
-        )
+        counts = status_data.pipeline_counts(data_dir)
         completeness = status_data.packet_completeness_summary(parquet_path)
         _counts_section(counts, completeness)
-        _decoder_tools_table(status_data.decoder_tool_stats(output_dir))
+        _decoder_tools_table(status_data.decoder_tool_stats(data_dir))
         _recent_packets_table(
             status_data.latest_packets(parquet_path, n=RECENT_PACKETS_LIMIT)
         )

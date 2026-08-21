@@ -209,7 +209,7 @@ def _drop_all_null_columns(df: pl.DataFrame) -> pl.DataFrame:
 
 def load_filtered_table(  # noqa: PLR0913
     spec: TableSpec,
-    output_dir: Path,
+    data_dir: Path,
     *,
     start: datetime | None,
     end: datetime | None,
@@ -223,7 +223,7 @@ def load_filtered_table(  # noqa: PLR0913
     False -- there's nothing to filter on. Returns an empty DataFrame (no
     rows, no columns) if the file doesn't exist yet.
     """
-    path = output_dir / spec.filename
+    path = data_dir / spec.filename
     if not path.exists():
         return pl.DataFrame()
 
@@ -408,7 +408,7 @@ def build_export(  # noqa: C901
 
 def export_selected_tables(  # noqa: PLR0913
     specs: Sequence[TableSpec],
-    output_dir: Path,
+    data_dir: Path,
     *,
     start: datetime | None,
     end: datetime | None,
@@ -423,7 +423,7 @@ def export_selected_tables(  # noqa: PLR0913
     tables = {
         spec: load_filtered_table(
             spec,
-            output_dir,
+            data_dir,
             start=start,
             end=end,
             packet_types=packet_types,

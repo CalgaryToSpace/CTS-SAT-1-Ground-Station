@@ -29,7 +29,7 @@ def raw_export_url(table_key: str) -> str:
     return f"{RAW_EXPORT_PATH}/{table_key}"
 
 
-def register_raw_export_route(app: FastAPI, output_dir: Path) -> None:
+def register_raw_export_route(app: FastAPI, data_dir: Path) -> None:
     """Register `GET {RAW_EXPORT_PATH}/{table_key}` on `app`, streaming
     that table's parquet file straight off disk via `FileResponse`.
     """
@@ -39,7 +39,7 @@ def register_raw_export_route(app: FastAPI, output_dir: Path) -> None:
         if spec is None:
             raise HTTPException(status_code=404, detail=f"Unknown table: {table_key!r}")
 
-        path = output_dir / spec.filename
+        path = data_dir / spec.filename
         if not path.exists():
             raise HTTPException(
                 status_code=404,

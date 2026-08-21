@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from . import _subprocess_registry
 
-__all__ = ["DEFAULT_DATA_DIR", "DEFAULT_DB_PATH", "run"]
+__all__ = ["DB_FILENAME", "DEFAULT_DATA_DIR", "DEFAULT_DB_PATH", "run"]
 
 import concurrent.futures
 import os
@@ -41,13 +41,15 @@ from .decode_gr_satellites_kiss import run_gr_satellites_kiss
 from .decode_satnogs_data_demod import run_satnogs_data_demod
 from .decode_sso_rx_replay import run_sso_rx_replay
 
-# Every later step (and the web UI) derives its own default parquet paths
-# from this one's directory -- see each step's `DEFAULT_OUTPUT_DIR` -- so
-# pointing every process (the daemon container and the web UI container
-# alike) at the same data directory is one env var, `CTS1_DATA_DIR`, rather
-# than a `--db-path`/`--parquet-path` kept in sync by hand across both.
+# Every step (and the web UI) takes a single `data_dir` argument and finds
+# its own file(s) inside it by a fixed filename -- see each step's
+# `DEFAULT_DATA_DIR`/`OUTPUT_FILENAME` -- so pointing every process (the
+# daemon container and the web UI container alike) at the same directory is
+# one env var, `CTS1_DATA_DIR`, rather than a `--db-path`/`--parquet-path`
+# kept in sync by hand across both.
 DEFAULT_DATA_DIR = Path(os.environ.get("CTS1_DATA_DIR", "output"))
-DEFAULT_DB_PATH = DEFAULT_DATA_DIR / "cts1_processing_pipeline.duckdb"
+DB_FILENAME = "cts1_processing_pipeline.duckdb"
+DEFAULT_DB_PATH = DEFAULT_DATA_DIR / DB_FILENAME
 CHECKPOINT_INTERVAL = 100
 DEMOD_DOWNLOAD_WORKERS = 50
 DECODERS = (
@@ -375,7 +377,7 @@ def _select_candidates(
 def run(  # noqa: C901, PLR0913, PLR0915
     *,
     norad_id: str = "69015",
-    db_path: Path = DEFAULT_DB_PATH,
+    data_dir: Path = DEFAULT_DATA_DIR,
     start: str | None = None,
     limit: int | None = None,
     workers: int = 4,
@@ -387,7 +389,9 @@ def run(  # noqa: C901, PLR0913, PLR0915
 
     Args:
         norad_id: NORAD catalog ID of the target satellite.
-        db_path: DuckDB database file to write raw_observations/raw_packets to.
+        data_dir: Directory to write/find the DuckDB database (`DB_FILENAME`)
+            in -- raw_observations/raw_packets land there, and its checkpoint
+            parquet exports land alongside it.
         start: Only pull observations starting after this point: a duration
             like "3 days" (relative to now) or an ISO 8601 date/datetime.
             None means no lower bound (full history).
@@ -419,6 +423,8 @@ def run(  # noqa: C901, PLR0913, PLR0915
             msg = f"Unknown tool(s) {sorted(unknown)}; choose from {DECODERS}"
             raise ValueError(msg)
         enabled_tools = frozenset(tools)
+
+    db_path = data_dir / DB_FILENAME
 
     logger.info(f"Listing observations for NORAD {norad_id}")
     logger.info(f"  Using tools: {sorted(enabled_tools)}")

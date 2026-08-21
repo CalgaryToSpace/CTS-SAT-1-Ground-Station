@@ -18,6 +18,10 @@ from typing import TYPE_CHECKING
 
 from nicegui import ui
 
+from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
+    pipeline as step_3_pipeline,
+)
+
 from . import data as beacon_data
 from .file_reassembly import (
     COVERAGE_ROW_WIDTH_BYTES,
@@ -645,7 +649,8 @@ def _reassembler_results(
             _picam_image_section(picam_jpg, filename)
 
 
-def build_file_reassembler_page(parquet_path: Path) -> None:
+def build_file_reassembler_page(data_dir: Path) -> None:
+    parquet_path = data_dir / step_3_pipeline.OUTPUT_FILENAME
     rows: list[_TimeRangeRow] = [_default_time_range_row()]
 
     @ui.refreshable

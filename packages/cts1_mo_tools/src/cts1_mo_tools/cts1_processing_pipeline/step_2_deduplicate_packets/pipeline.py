@@ -48,7 +48,7 @@ scratch on every run, so there's no incremental state to reconcile.
 """
 
 __all__ = [
-    "DEFAULT_OUTPUT_DIR",
+    "DEFAULT_DATA_DIR",
     "OUTPUT_FILENAME",
     "compute_distinct_packets",
     "run",
@@ -69,7 +69,7 @@ from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate impor
 
 from .crc32c_vectorized import crc32c_hex_series
 
-DEFAULT_OUTPUT_DIR = step_1_pipeline.DEFAULT_DB_PATH.parent
+DEFAULT_DATA_DIR = step_1_pipeline.DEFAULT_DATA_DIR
 OUTPUT_FILENAME = "distinct_packets_over_time.parquet"
 
 ASKEW_DECODER = "askew_demod_from_file"
@@ -456,15 +456,15 @@ def _write_parquet_atomic(df: pl.DataFrame, path: Path) -> None:
     tmp_path.replace(path)
 
 
-def run(*, output_dir: Path = DEFAULT_OUTPUT_DIR) -> None:
+def run(*, data_dir: Path = DEFAULT_DATA_DIR) -> None:
     """Recompute `distinct_packets_over_time.parquet` from step 1's exports.
 
-    Reads `raw_packets.parquet`/`raw_observations.parquet` from `output_dir`
+    Reads `raw_packets.parquet`/`raw_observations.parquet` from `data_dir`
     (where step 1 exports them) and writes the result back into the same
     directory -- parquet-in-parquet-out, no database involved.
     """
-    packets_path = output_dir / "raw_packets.parquet"
-    observations_path = output_dir / "raw_observations.parquet"
+    packets_path = data_dir / "raw_packets.parquet"
+    observations_path = data_dir / "raw_observations.parquet"
     for path in (packets_path, observations_path):
         if not path.exists():
             msg = f"{path} not found -- run step_1 first."
@@ -481,7 +481,7 @@ def run(*, output_dir: Path = DEFAULT_OUTPUT_DIR) -> None:
 
     result_df = compute_distinct_packets(packets_df, observations_df)
 
-    out_path = output_dir / OUTPUT_FILENAME
+    out_path = data_dir / OUTPUT_FILENAME
     _write_parquet_atomic(result_df, out_path)
 
     logger.info(f"Done. {len(result_df):,} distinct packet(s) written to {out_path}.")

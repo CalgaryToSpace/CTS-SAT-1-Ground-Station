@@ -16,6 +16,10 @@ from typing import TYPE_CHECKING
 
 from nicegui import ui
 
+from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
+    pipeline as step_3_pipeline,
+)
+
 from . import data as beacon_data
 from .charts import BEACON_CHART_GROUPS, OTHER_CHART_GROUPS, chart_option
 from .layout import page_shell
@@ -245,7 +249,8 @@ def _window_label_for_hours(hours: float | None) -> str:
     return "Last 24h"
 
 
-def build_beacon_stats_page(parquet_path: Path, hours: float) -> None:
+def build_beacon_stats_page(data_dir: Path, hours: float) -> None:
+    parquet_path = data_dir / step_3_pipeline.OUTPUT_FILENAME
     state: dict[str, float | None] = {"hours": hours}
 
     # Split in two so the 30s auto-refresh only ever touches the cheap,

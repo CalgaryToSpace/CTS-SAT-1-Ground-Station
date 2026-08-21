@@ -23,7 +23,7 @@ whole dataset is cheap enough to reprocess from scratch on every run.
 from __future__ import annotations
 
 __all__ = [
-    "DEFAULT_OUTPUT_DIR",
+    "DEFAULT_DATA_DIR",
     "OUTPUT_FILENAME",
     "compute_decoded_packets",
     "run",
@@ -42,7 +42,7 @@ from cts1_mo_tools.cts1_processing_pipeline.step_2_deduplicate_packets import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-DEFAULT_OUTPUT_DIR = step_2_pipeline.DEFAULT_OUTPUT_DIR
+DEFAULT_DATA_DIR = step_2_pipeline.DEFAULT_DATA_DIR
 OUTPUT_FILENAME = "everything_decoded.parquet"
 
 
@@ -94,14 +94,14 @@ def _write_parquet_atomic(df: pl.DataFrame, path: Path) -> None:
     tmp_path.replace(path)
 
 
-def run(*, output_dir: Path = DEFAULT_OUTPUT_DIR) -> None:
+def run(*, data_dir: Path = DEFAULT_DATA_DIR) -> None:
     """Recompute `everything_decoded.parquet` from step 2's output.
 
-    Reads `distinct_packets_over_time.parquet` from `output_dir` (where step
+    Reads `distinct_packets_over_time.parquet` from `data_dir` (where step
     2 writes it) and writes the result back into the same directory --
     parquet-in-parquet-out, no database involved.
     """
-    distinct_packets_path = output_dir / step_2_pipeline.OUTPUT_FILENAME
+    distinct_packets_path = data_dir / step_2_pipeline.OUTPUT_FILENAME
     if not distinct_packets_path.exists():
         msg = f"{distinct_packets_path} not found -- run step_2 first."
         raise FileNotFoundError(msg)
@@ -111,7 +111,7 @@ def run(*, output_dir: Path = DEFAULT_OUTPUT_DIR) -> None:
 
     result = compute_decoded_packets(distinct_packets)
 
-    out_path = output_dir / OUTPUT_FILENAME
+    out_path = data_dir / OUTPUT_FILENAME
     _write_parquet_atomic(result, out_path)
 
     decoded_count = (

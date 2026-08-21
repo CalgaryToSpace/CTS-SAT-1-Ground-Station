@@ -47,7 +47,7 @@ and cheap enough to reprocess from scratch on every run.
 from __future__ import annotations
 
 __all__ = [
-    "DEFAULT_OUTPUT_DIR",
+    "DEFAULT_DATA_DIR",
     "OUTPUT_FILENAME",
     "compute_satellite_events",
     "run",
@@ -66,7 +66,7 @@ from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-DEFAULT_OUTPUT_DIR = step_3_pipeline.DEFAULT_OUTPUT_DIR
+DEFAULT_DATA_DIR = step_3_pipeline.DEFAULT_DATA_DIR
 OUTPUT_FILENAME = "satellite_events_from_beacons.parquet"
 
 BEACON_PACKET_TYPES = ("BEACON_BASIC", "BEACON_EXTENDED")
@@ -184,16 +184,16 @@ def _write_parquet_atomic(df: pl.DataFrame, path: Path) -> None:
     tmp_path.replace(path)
 
 
-def run(*, output_dir: Path = DEFAULT_OUTPUT_DIR) -> None:
+def run(*, data_dir: Path = DEFAULT_DATA_DIR) -> None:
     """Recompute `satellite_events_from_beacons.parquet` from step 3's output.
 
-    Reads `everything_decoded.parquet` from `output_dir` (where step 3
+    Reads `everything_decoded.parquet` from `data_dir` (where step 3
     writes it) and writes the result back into the same directory --
     parquet-in-parquet-out, no database involved. The read itself is a lazy
     scan, so the whole filter/sort/diff computation runs as one query plan
     straight off disk rather than materializing the full table first.
     """
-    decoded_path = output_dir / step_3_pipeline.OUTPUT_FILENAME
+    decoded_path = data_dir / step_3_pipeline.OUTPUT_FILENAME
     if not decoded_path.exists():
         msg = f"{decoded_path} not found -- run step_3 first."
         raise FileNotFoundError(msg)
@@ -203,7 +203,7 @@ def run(*, output_dir: Path = DEFAULT_OUTPUT_DIR) -> None:
     if not result_df.height:
         result_df = pl.DataFrame(schema=_OUTPUT_SCHEMA)
 
-    out_path = output_dir / OUTPUT_FILENAME
+    out_path = data_dir / OUTPUT_FILENAME
     _write_parquet_atomic(result_df, out_path)
 
     counts = result_df["event_type"].value_counts().sort("event_type")

@@ -151,7 +151,7 @@ def _event_type_filter(
                 )
 
 
-def build_satellite_events_page(output_dir: Path) -> None:
+def build_satellite_events_page(data_dir: Path) -> None:
     selected_types: dict[str, bool] = {
         event_type: event_type in DEFAULT_ENABLED_EVENT_TYPES
         for event_type in EVENT_TYPES
@@ -159,7 +159,7 @@ def build_satellite_events_page(output_dir: Path) -> None:
 
     @ui.refreshable
     def content() -> None:
-        events = satellite_events.load_events(output_dir)
+        events = satellite_events.load_events(data_dir)
         enabled = [et for et, checked in selected_types.items() if checked]
         if not events.is_empty():
             events = events.filter(pl.col("event_type").is_in(enabled))

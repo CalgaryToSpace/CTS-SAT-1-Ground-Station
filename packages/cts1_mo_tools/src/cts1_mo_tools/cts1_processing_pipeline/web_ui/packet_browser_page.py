@@ -19,6 +19,10 @@ from typing import TYPE_CHECKING
 import polars as pl
 from nicegui import ui
 
+from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
+    pipeline as step_3_pipeline,
+)
+
 from . import packet_browser
 from .layout import page_shell
 
@@ -150,7 +154,8 @@ def _notify_export(*, row_count: int, truncated: bool) -> None:
     ui.notify(message, type="warning" if truncated else "positive")
 
 
-def build_packet_browser_page(parquet_path: Path) -> None:
+def build_packet_browser_page(data_dir: Path) -> None:
+    parquet_path = data_dir / step_3_pipeline.OUTPUT_FILENAME
     packet_types = packet_browser.packet_type_options(parquet_path)
     state = _FilterState()
 

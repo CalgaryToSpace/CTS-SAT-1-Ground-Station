@@ -23,9 +23,9 @@ if TYPE_CHECKING:
 FILENAME = step_4_pipeline.OUTPUT_FILENAME
 
 
-def load_events(output_dir: Path) -> pl.DataFrame:
+def load_events(data_dir: Path) -> pl.DataFrame:
     """Every detected event, newest first -- empty if step 4 hasn't run yet."""
-    path = output_dir / FILENAME
+    path = data_dir / FILENAME
     if not path.exists():
         return pl.DataFrame()
     return pl.read_parquet(path)
