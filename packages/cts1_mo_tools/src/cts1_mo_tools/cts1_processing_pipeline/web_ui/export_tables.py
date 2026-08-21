@@ -35,11 +35,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, assert_never
 
-import duckdb
 import polars as pl
 import xlsxwriter  # pyright: ignore[reportMissingTypeStubs]
 
 from cts1_mo_tools.cts1_decode_satnogs_packets import PACKET_TYPE_MAP
+from cts1_mo_tools.cts1_processing_pipeline.common import connect_duckdb
 from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
     pipeline as step_3_pipeline,
 )
@@ -279,36 +279,35 @@ def _write_excel_file(tables: Mapping[TableSpec, pl.DataFrame]) -> dict[str, byt
 
 
 def _write_sqlite_file(tables: Mapping[TableSpec, pl.DataFrame]) -> dict[str, bytes]:
-    with tempfile.TemporaryDirectory() as tmp_dir:
+    with (
+        tempfile.TemporaryDirectory() as tmp_dir,
+        connect_duckdb() as con,
+    ):
         db_path = Path(tmp_dir) / "export.sqlite"
-        con = duckdb.connect(":memory:")
-        try:
-            con.execute("INSTALL sqlite")
-            con.execute("LOAD sqlite")
-            con.execute(f"ATTACH '{db_path}' AS sq (TYPE SQLITE)")
-            for spec, df in tables.items():
-                view_name = f"_export_{spec.key}"
-                con.register(view_name, df)
-                con.execute(
-                    f'CREATE TABLE sq."{spec.key}" AS SELECT * FROM {view_name}'  # noqa: S608
-                )
-            con.execute("DETACH sq")
-        finally:
-            con.close()
+        con.execute("INSTALL sqlite")
+        con.execute("LOAD sqlite")
+        con.execute(f"ATTACH '{db_path}' AS sq (TYPE SQLITE)")
+        for spec, df in tables.items():
+            view_name = f"_export_{spec.key}"
+            con.register(view_name, df)
+            con.execute(
+                f'CREATE TABLE sq."{spec.key}" AS SELECT * FROM {view_name}'  # noqa: S608
+            )
+        con.execute("DETACH sq")
         return {"export.sqlite": db_path.read_bytes()}
 
 
 def _write_duckdb_file(tables: Mapping[TableSpec, pl.DataFrame]) -> dict[str, bytes]:
     with tempfile.TemporaryDirectory() as tmp_dir:
         db_path = Path(tmp_dir) / "export.duckdb"
-        con = duckdb.connect(str(db_path))
-        try:
+        with connect_duckdb(db_path) as con:
             for spec, df in tables.items():
                 view_name = f"_export_{spec.key}"
                 con.register(view_name, df)
-                con.execute(f'CREATE TABLE "{spec.key}" AS SELECT * FROM {view_name}')  # noqa: S608
-        finally:
-            con.close()
+                con.execute(
+                    f'CREATE TABLE "{spec.key}" AS SELECT * FROM {view_name}'  # noqa: S608
+                )
+            con.close()  # flush to disk before reading the file back below
         return {"export.duckdb": db_path.read_bytes()}
 
 

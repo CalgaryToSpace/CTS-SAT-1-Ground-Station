@@ -36,6 +36,11 @@ import duckdb
 import polars as pl
 from loguru import logger
 
+from cts1_mo_tools.cts1_processing_pipeline.common import (
+    DEFAULT_DUCKDB_MEMORY_LIMIT,
+    connect_duckdb,
+)
+
 if TYPE_CHECKING:
     from collections.abc import Mapping
     from pathlib import Path
@@ -45,9 +50,11 @@ RAW_PACKETS_TABLE = "raw_packets"
 DECODER_RUNS_TABLE = "decoder_runs"
 
 
-def connect(db_path: Path) -> duckdb.DuckDBPyConnection:
+def connect(
+    db_path: Path, *, memory_limit: str = DEFAULT_DUCKDB_MEMORY_LIMIT
+) -> duckdb.DuckDBPyConnection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    return duckdb.connect(str(db_path))
+    return connect_duckdb(db_path, memory_limit=memory_limit)
 
 
 def _quote_ident(name: str) -> str:
