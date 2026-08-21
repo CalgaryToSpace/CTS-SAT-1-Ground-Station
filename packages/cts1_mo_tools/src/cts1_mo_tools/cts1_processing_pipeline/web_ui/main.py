@@ -18,11 +18,14 @@ Usage (uv):
 
 __all__ = ["main"]
 
+import copy
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
 
 import tyro
+import uvicorn.config
 from nicegui import app, ui
 
 from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate import (
@@ -44,6 +47,44 @@ from .satellite_events_page import build_satellite_events_page
 STORAGE_SECRET = os.environ.get(
     "CTS1_WEB_STORAGE_SECRET", "cts1-processing-pipeline-web-ui"
 )
+
+# NiceGUI's own internal traffic -- Socket.IO polling/handshakes and static
+# asset fetches -- lives under these prefixes; at uvicorn's "info" level it
+# floods the access log with lines that aren't real page hits.
+_NOISY_ACCESS_LOG_PREFIXES = ("/_nicegui_ws/", "/_nicegui/")
+
+
+class _AccessLogNoiseFilter(logging.Filter):
+    """Drops access-log records for `_NOISY_ACCESS_LOG_PREFIXES`."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        # uvicorn.logging.AccessFormatter's own record shape:
+        # args = (client_addr, method, full_path, http_version, status_code).
+        try:
+            path = record.args[2]  # type: ignore[index]
+        except (TypeError, IndexError):
+            return True
+        return not str(path).startswith(_NOISY_ACCESS_LOG_PREFIXES)
+
+
+def _build_uvicorn_log_config() -> dict:
+    """uvicorn's own default logging config, with `uvicorn.access` at
+    "info" (so real requests still get logged) while everything else stays
+    at "warning", and NiceGUI's own noisy internal traffic filtered out of
+    the access log -- see `_AccessLogNoiseFilter`.
+
+    Passed as `log_config=` alongside `uvicorn_logging_level=None`: uvicorn
+    applies `log_level` *after* `log_config` and would otherwise clobber
+    the access logger's level right back down to whatever `log_level` is.
+    """
+    config = copy.deepcopy(uvicorn.config.LOGGING_CONFIG)
+    config["loggers"]["uvicorn"]["level"] = "WARNING"
+    config["loggers"]["uvicorn.error"]["level"] = "WARNING"
+    config["loggers"]["uvicorn.access"]["level"] = "INFO"
+    config["filters"] = {"access_log_noise": {"()": _AccessLogNoiseFilter}}
+    config["handlers"]["access"]["filters"] = ["access_log_noise"]
+    return config
+
 
 NAV_LINKS = (
     ("Beacon Stats", "/"),
@@ -134,15 +175,18 @@ def main() -> None:
     """Entry point: parse CLI args, build pages, and start the NiceGUI server."""
     args = tyro.cli(Args)
     _build_pages(args)
-    # "info" (NiceGUI's default is "warning") is what turns on uvicorn's
-    # per-request access log -- one line per HTTP request, to stderr, which
-    # `docker compose logs web` (or the daemon's own log driver -- see
-    # DEPLOY.md) already captures like every other log line in this stack.
+    # Real requests get logged (`docker compose logs web` -- or the
+    # daemon's own log driver, see DEPLOY.md -- already captures this like
+    # every other log line in this stack) without NiceGUI's own
+    # Socket.IO/static-asset traffic flooding it -- see
+    # `_build_uvicorn_log_config`. `uvicorn_logging_level=None` is required
+    # for that log_config's per-logger levels to actually stick.
     ui.run(
         title="FrontierSat Data",
         port=args.port,
         reload=False,
-        uvicorn_logging_level="info",
+        uvicorn_logging_level=None,  # pyright: ignore[reportArgumentType]
+        log_config=_build_uvicorn_log_config(),
         storage_secret=STORAGE_SECRET,
     )
 
