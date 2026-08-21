@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import polars as pl
 from cts1_mo_tools.cts1_processing_pipeline.step_4_detect_satellite_events.pipeline import (  # noqa: E501
@@ -6,6 +7,15 @@ from cts1_mo_tools.cts1_processing_pipeline.step_4_detect_satellite_events.pipel
 )
 
 _BASE = datetime(2024, 1, 1, tzinfo=UTC)
+_BASE_EPOCH_MS = int(_BASE.timestamp() * 1000)
+
+
+def _epoch_ms(seconds: float) -> int:
+    return _BASE_EPOCH_MS + round(seconds * 1000)
+
+
+def _at(seconds: float) -> datetime:
+    return _BASE + timedelta(seconds=seconds)
 
 
 def _beacon(  # noqa: PLR0913
@@ -18,9 +28,13 @@ def _beacon(  # noqa: PLR0913
     reboot_reason: str = "NORMAL",
     eps_reset_cause: str = "NORMAL",
     eps_total_fault_count: int = 0,
-) -> dict:
+    csp_crc_valid: bool = True,
+    unix_epoch_time_ms: int | None = None,
+) -> dict[str, Any]:
     return {
-        "received_at": _BASE + timedelta(seconds=seconds),
+        "unix_epoch_time_ms": (
+            unix_epoch_time_ms if unix_epoch_time_ms is not None else _epoch_ms(seconds)
+        ),
         "packet_type": packet_type,
         "uptime_ms": uptime_ms,
         "eps_uptime_sec": eps_uptime_sec,
@@ -28,13 +42,12 @@ def _beacon(  # noqa: PLR0913
         "reboot_reason": reboot_reason,
         "eps_reset_cause": eps_reset_cause,
         "eps_total_fault_count": eps_total_fault_count,
+        "csp_crc_valid": csp_crc_valid,
     }
 
 
-def _df(rows: list[dict]) -> pl.DataFrame:
-    return pl.DataFrame(
-        rows, schema_overrides={"received_at": pl.Datetime("us", "UTC")}
-    )
+def _df(rows: list[dict[str, Any]]) -> pl.DataFrame:
+    return pl.DataFrame(rows)
 
 
 def test_empty_input_returns_empty_with_expected_schema() -> None:
@@ -49,7 +62,7 @@ def test_no_beacons_returns_no_events() -> None:
     df = pl.DataFrame(
         [
             {
-                "received_at": _BASE,
+                "unix_epoch_time_ms": _epoch_ms(0),
                 "packet_type": "LOG_MESSAGE",
                 "uptime_ms": None,
                 "eps_uptime_sec": None,
@@ -57,9 +70,9 @@ def test_no_beacons_returns_no_events() -> None:
                 "reboot_reason": None,
                 "eps_reset_cause": None,
                 "eps_total_fault_count": None,
+                "csp_crc_valid": True,
             }
-        ],
-        schema_overrides={"received_at": pl.Datetime("us", "UTC")},
+        ]
     )
     assert compute_satellite_events(df).height == 0
 
@@ -86,8 +99,8 @@ def test_obc_reboot_detected_on_uptime_drop() -> None:
     obc = events.filter(pl.col("event_type") == "OBC Reboot")
     assert obc.height == 1
     row = obc.row(0, named=True)
-    assert row["detected_at"] == _BASE + timedelta(seconds=30)
-    assert row["estimated_event_at"] == _BASE + timedelta(seconds=25)
+    assert row["detected_at"] == _at(30)
+    assert row["estimated_event_at"] == _at(25)
     assert row["time_since_event_when_detected_ms"] == 5_000
     assert row["obc_reboot_reason"] == "WATCHDOG"
 
@@ -115,8 +128,8 @@ def test_eps_reboot_detected_on_eps_uptime_drop() -> None:
     eps = events.filter(pl.col("event_type") == "EPS Reboot")
     assert eps.height == 1
     row = eps.row(0, named=True)
-    assert row["detected_at"] == _BASE + timedelta(seconds=90)
-    assert row["estimated_event_at"] == _BASE + timedelta(seconds=85)
+    assert row["detected_at"] == _at(90)
+    assert row["estimated_event_at"] == _at(85)
     assert row["time_since_event_when_detected_ms"] == 5_000
     assert row["eps_reboot_reason"] == "BROWNOUT"
     assert row["eps_reset_count"] == 3
@@ -143,8 +156,8 @@ def test_uplink_detected_on_duration_since_last_uplink_drop() -> None:
     uplink = events.filter(pl.col("event_type") == "Uplinked Commands")
     assert uplink.height == 1
     row = uplink.row(0, named=True)
-    assert row["detected_at"] == _BASE + timedelta(seconds=120)
-    assert row["estimated_event_at"] == _BASE + timedelta(seconds=118, milliseconds=800)
+    assert row["detected_at"] == _at(120)
+    assert row["estimated_event_at"] == _at(118) + timedelta(milliseconds=800)
     assert row["time_since_event_when_detected_ms"] == 1_200
 
 
@@ -206,6 +219,92 @@ def test_basic_and_extended_beacons_both_considered_in_one_timeline() -> None:
     events = compute_satellite_events(df)
     assert events.height == 1
     assert events.row(0, named=True)["detecting_packet_type"] == "BEACON_BASIC"
+
+
+def test_crc_invalid_beacon_ignored_entirely() -> None:
+    # A bit-flipped beacon that still fails its own CSP CRC shouldn't be
+    # trusted for event detection -- its counters could be garbage -- and
+    # shouldn't even count as "the previous beacon" for the next real one.
+    df = _df(
+        [
+            _beacon(
+                seconds=0,
+                uptime_ms=100_000,
+                eps_uptime_sec=100,
+                duration_since_last_uplink_ms=5_000,
+            ),
+            _beacon(
+                seconds=15,
+                uptime_ms=7,  # garbage counter from a corrupted decode
+                eps_uptime_sec=999_999,
+                duration_since_last_uplink_ms=1,
+                csp_crc_valid=False,
+            ),
+            _beacon(
+                seconds=30,
+                uptime_ms=130_000,
+                eps_uptime_sec=130,
+                duration_since_last_uplink_ms=35_000,
+            ),
+        ]
+    )
+    assert compute_satellite_events(df).height == 0
+
+
+def test_invalid_epoch_beacon_ignored_entirely() -> None:
+    # unix_epoch_time_ms == 0 means "not yet time-synced" (same convention
+    # as the decoder's own utc_time == None) -- shouldn't be trusted for
+    # ordering/event detection, and shouldn't count as "the previous
+    # beacon" either.
+    df = _df(
+        [
+            _beacon(
+                seconds=0,
+                uptime_ms=100_000,
+                eps_uptime_sec=100,
+                duration_since_last_uplink_ms=5_000,
+            ),
+            _beacon(
+                seconds=15,
+                uptime_ms=1,
+                eps_uptime_sec=1,
+                duration_since_last_uplink_ms=1,
+                unix_epoch_time_ms=0,
+            ),
+            _beacon(
+                seconds=30,
+                uptime_ms=130_000,
+                eps_uptime_sec=130,
+                duration_since_last_uplink_ms=35_000,
+            ),
+        ]
+    )
+    assert compute_satellite_events(df).height == 0
+
+
+def test_ordering_uses_unix_epoch_time_ms_not_row_order() -> None:
+    # Rows deliberately inserted out of chronological order (mirroring a
+    # low-trust decoder reporting an observation's end time for every
+    # frame in it, which can scramble `received_at` order) -- detection
+    # must still follow the satellite's own clock, not row order.
+    reboot = _beacon(
+        seconds=30,
+        uptime_ms=5_000,
+        eps_uptime_sec=130,
+        duration_since_last_uplink_ms=35_000,
+        reboot_reason="WATCHDOG",
+    )
+    before = _beacon(
+        seconds=0,
+        uptime_ms=100_000,
+        eps_uptime_sec=100,
+        duration_since_last_uplink_ms=5_000,
+    )
+    df = _df([reboot, before])  # inserted newest-first
+    events = compute_satellite_events(df)
+    obc = events.filter(pl.col("event_type") == "OBC Reboot")
+    assert obc.height == 1
+    assert obc.row(0, named=True)["detected_at"] == _at(30)
 
 
 def test_events_sorted_newest_first() -> None:

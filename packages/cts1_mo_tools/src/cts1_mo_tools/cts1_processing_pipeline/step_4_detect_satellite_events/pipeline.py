@@ -1,10 +1,10 @@
 """Step 4: detect satellite events (reboots, uplinks) from beacon counters.
 
 Every beacon (`BEACON_BASIC` and `BEACON_EXTENDED` both carry the same
-fixed timing fields, so both are considered together, sorted by
-`received_at`) carries a handful of counters that only ever count up while
-the satellite keeps running, and reset to (near) zero the instant something
-happens:
+fixed timing fields, so both are considered together, sorted by the
+satellite's own onboard clock) carries a handful of counters that only ever
+count up while the satellite keeps running, and reset to (near) zero the
+instant something happens:
 
   - `uptime_ms`: the OBC's own uptime -- resets on an OBC reboot.
   - `eps_uptime_sec`: the EPS's uptime -- resets on an EPS reboot/reset.
@@ -13,11 +13,32 @@ happens:
 
 The first beacon where one of these counters is lower than the previous
 beacon's is the first beacon received *after* that event -- the event
-itself happened `counter value` before that beacon's own `received_at`.
-This step finds every such drop across the whole beacon history and stacks
-the three kinds of event into one unpivoted table, one row per detected
-event, each carrying the OBC/EPS reboot-reason fields and EPS fault count
-as reported by the detecting beacon.
+itself happened `counter value` before that beacon's own timestamp. This
+step finds every such drop across the whole beacon history and stacks the
+three kinds of event into one unpivoted table, one row per detected event,
+each carrying the OBC/EPS reboot-reason fields and EPS fault count as
+reported by the detecting beacon.
+
+Ordering/timestamps are based on `unix_epoch_time_ms` (the satellite's own
+onboard-clock timestamp, carried in every beacon), not `received_at`:
+`received_at` is step 2's *best guess* at when a packet was actually
+received -- some decoders (e.g. gr_satellites_pdu) can't localize a frame
+within its observation at all and just report the observation's end time
+for every single frame, which can put same-observation beacons in the
+wrong relative order and produce false "drops" that never happened. A
+beacon's own clock has no such ambiguity, so it's used both to order
+beacons and to compute `estimated_event_at`. Beacons with an unset/invalid
+`unix_epoch_time_ms` (not yet time-synced -- see
+`cts1_decode_satnogs_packets.MAX_VALID_EPOCH_MS`) are excluded, same as
+`utc_time` being null for them.
+
+Only beacons with a confirmed-valid CSP CRC (`csp_crc_valid`) are
+considered: step 2 dedupes by content but doesn't itself require a valid
+CRC (unlike step 1's raw_packets filter, which only requires
+`rs_correctable`), so a bit-flipped beacon that still happens to decode
+into *some* fixed-size struct can carry near-random counter values --
+without this filter, that garbage is indistinguishable from a genuine
+reset and floods the output with false events.
 
 Like steps 2 and 3, this is parquet-in-parquet-out: no database involved,
 and cheap enough to reprocess from scratch on every run.
@@ -37,6 +58,7 @@ from typing import TYPE_CHECKING, NamedTuple
 import polars as pl
 from loguru import logger
 
+from cts1_mo_tools.cts1_decode_satnogs_packets import MAX_VALID_EPOCH_MS
 from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
     pipeline as step_3_pipeline,
 )
@@ -79,10 +101,11 @@ _OUTPUT_SCHEMA = {
 }
 
 
-def _events_for_counter(beacons: pl.DataFrame, spec: _EventSpec) -> pl.DataFrame:
+def _events_for_counter(beacons: pl.LazyFrame, spec: _EventSpec) -> pl.LazyFrame:
     """Every row of `beacons` where `spec.counter_column` is lower than the
     immediately preceding beacon's -- the first beacon after a `spec.event_type`
-    event, per the module docstring.
+    event, per the module docstring. `beacons` must already be sorted by
+    `beacon_utc_time`.
     """
     counter = pl.col(spec.counter_column)
     previous = counter.shift(1)
@@ -93,9 +116,9 @@ def _events_for_counter(beacons: pl.DataFrame, spec: _EventSpec) -> pl.DataFrame
     time_since_event_ms = (counter * spec.ms_per_unit).round(0).cast(pl.Int64)
     return dropped.select(
         event_type=pl.lit(spec.event_type),
-        detected_at=pl.col("received_at"),
+        detected_at=pl.col("beacon_utc_time"),
         estimated_event_at=(
-            pl.col("received_at") - pl.duration(milliseconds=time_since_event_ms)
+            pl.col("beacon_utc_time") - pl.duration(milliseconds=time_since_event_ms)
         ),
         time_since_event_when_detected_ms=time_since_event_ms,
         detecting_packet_type=pl.col("packet_type"),
@@ -103,6 +126,35 @@ def _events_for_counter(beacons: pl.DataFrame, spec: _EventSpec) -> pl.DataFrame
         eps_reboot_reason=pl.col("eps_reset_cause"),
         eps_reset_count=pl.col("eps_total_fault_count").cast(pl.Int64),
     )
+
+
+def _compute_events_lazy(lf: pl.LazyFrame) -> pl.LazyFrame:
+    """The sort/diff/filter query plan itself, kept lazy end-to-end so
+    polars can fuse the filter -> derive-timestamp -> sort -> shift ->
+    filter chain (run three times over, once per counter) into one
+    optimized pass instead of materializing between each step.
+    """
+    beacons = (
+        lf.filter(
+            pl.col("packet_type").is_in(BEACON_PACKET_TYPES)
+            & pl.col("csp_crc_valid")
+            & pl.col("unix_epoch_time_ms").is_not_null()
+            & (pl.col("unix_epoch_time_ms") > 0)
+            & (pl.col("unix_epoch_time_ms") <= MAX_VALID_EPOCH_MS)
+        )
+        .with_columns(
+            beacon_utc_time=pl.from_epoch(
+                "unix_epoch_time_ms", time_unit="ms"
+            ).dt.replace_time_zone("UTC")
+        )
+        .sort("beacon_utc_time")
+    )
+
+    events = pl.concat(
+        [_events_for_counter(beacons, spec) for spec in EVENT_SPECS],
+        how="vertical_relaxed",
+    )
+    return events.sort("detected_at", descending=True)
 
 
 def compute_satellite_events(decoded_packets: pl.DataFrame) -> pl.DataFrame:
@@ -119,17 +171,8 @@ def compute_satellite_events(decoded_packets: pl.DataFrame) -> pl.DataFrame:
     if decoded_packets.is_empty():
         return pl.DataFrame(schema=_OUTPUT_SCHEMA)
 
-    beacons = decoded_packets.filter(
-        pl.col("packet_type").is_in(BEACON_PACKET_TYPES)
-    ).sort("received_at")
-    if beacons.is_empty():
-        return pl.DataFrame(schema=_OUTPUT_SCHEMA)
-
-    events = pl.concat(
-        [_events_for_counter(beacons, spec) for spec in EVENT_SPECS],
-        how="vertical_relaxed",
-    )
-    return events.sort("detected_at", descending=True)
+    result = _compute_events_lazy(decoded_packets.lazy()).collect()
+    return result if result.height else pl.DataFrame(schema=_OUTPUT_SCHEMA)
 
 
 def _write_parquet_atomic(df: pl.DataFrame, path: Path) -> None:
@@ -146,7 +189,9 @@ def run(*, output_dir: Path = DEFAULT_OUTPUT_DIR) -> None:
 
     Reads `everything_decoded.parquet` from `output_dir` (where step 3
     writes it) and writes the result back into the same directory --
-    parquet-in-parquet-out, no database involved.
+    parquet-in-parquet-out, no database involved. The read itself is a lazy
+    scan, so the whole filter/sort/diff computation runs as one query plan
+    straight off disk rather than materializing the full table first.
     """
     decoded_path = output_dir / step_3_pipeline.OUTPUT_FILENAME
     if not decoded_path.exists():
@@ -154,9 +199,9 @@ def run(*, output_dir: Path = DEFAULT_OUTPUT_DIR) -> None:
         raise FileNotFoundError(msg)
 
     logger.info(f"Reading {decoded_path}")
-    decoded_packets = pl.read_parquet(decoded_path)
-
-    result_df = compute_satellite_events(decoded_packets)
+    result_df = _compute_events_lazy(pl.scan_parquet(decoded_path)).collect()
+    if not result_df.height:
+        result_df = pl.DataFrame(schema=_OUTPUT_SCHEMA)
 
     out_path = output_dir / OUTPUT_FILENAME
     _write_parquet_atomic(result_df, out_path)

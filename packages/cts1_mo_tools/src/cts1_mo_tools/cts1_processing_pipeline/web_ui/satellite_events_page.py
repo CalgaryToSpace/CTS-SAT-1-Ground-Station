@@ -14,13 +14,25 @@ __all__ = ["build_satellite_events_page"]
 from pathlib import Path  # noqa: TC003 -- tyro needs this at runtime elsewhere
 from typing import TYPE_CHECKING
 
+import polars as pl
 from nicegui import ui
+
+from cts1_mo_tools.cts1_processing_pipeline.step_4_detect_satellite_events.pipeline import (  # noqa: E501
+    EVENT_SPECS,
+)
 
 from . import satellite_events
 from .layout import page_shell
 
 if TYPE_CHECKING:
-    import polars as pl
+    from collections.abc import Callable
+
+EVENT_TYPES = tuple(spec.event_type for spec in EVENT_SPECS)
+
+# Uplinked-commands events are far more frequent (any uplink at all) and
+# much less operationally interesting than a reboot -- start with them
+# hidden so the table opens on the events worth looking at.
+DEFAULT_ENABLED_EVENT_TYPES = frozenset(EVENT_TYPES) - {"Uplinked Commands"}
 
 
 def _duration_str(total_ms: int) -> str:
@@ -40,13 +52,12 @@ def _events_table(events: pl.DataFrame) -> None:
             "Every OBC reboot, EPS reboot, and uplinked-commands event, "
             "detected as the first beacon where the applicable onboard "
             "counter drops -- the event itself is estimated to have "
-            'happened "Time Since Event" before that beacon.'
+            'happened "Event to Beacon ΔT" before that beacon.'
         ).classes("text-caption text-grey")
 
         if events.is_empty():
             ui.label(
-                "No events detected yet -- run the pipeline (step_1..step_4) "
-                "first."
+                "No events detected yet -- run the pipeline (step_1..step_4) first."
             ).classes("text-caption text-grey mt-2")
             return
 
@@ -64,7 +75,7 @@ def _events_table(events: pl.DataFrame) -> None:
             },
             {
                 "name": "time_since_event",
-                "label": "Time Since Event",
+                "label": "Event to Beacon ΔT",
                 "field": "time_since_event",
             },
             {
@@ -112,7 +123,7 @@ def _events_table(events: pl.DataFrame) -> None:
                 <q-td :props="props">
                     <q-badge :color="{
                         'OBC Reboot': 'negative',
-                        'EPS Reboot': 'negative',
+                        'EPS Reboot': 'warning',
                         'Uplinked Commands': 'positive',
                     }[props.value] || 'grey'">
                         {{ props.value }}
@@ -123,13 +134,40 @@ def _events_table(events: pl.DataFrame) -> None:
         ui.label(f"{events.height:,} event(s).").classes("text-caption text-grey mt-2")
 
 
+def _event_type_filter(
+    selected_types: dict[str, bool], *, on_change: Callable[[], object]
+) -> None:
+    with ui.card().classes("w-full"):
+        ui.label("Event type").classes("text-lg font-bold")
+        with ui.row().classes("gap-4 flex-wrap mt-2"):
+            for event_type in EVENT_TYPES:
+                ui.checkbox(
+                    event_type,
+                    value=selected_types[event_type],
+                    on_change=lambda e, et=event_type: (
+                        selected_types.__setitem__(et, bool(e.value)),
+                        on_change(),
+                    ),
+                )
+
+
 def build_satellite_events_page(output_dir: Path) -> None:
+    selected_types: dict[str, bool] = {
+        event_type: event_type in DEFAULT_ENABLED_EVENT_TYPES
+        for event_type in EVENT_TYPES
+    }
+
     @ui.refreshable
     def content() -> None:
-        _events_table(satellite_events.load_events(output_dir))
+        events = satellite_events.load_events(output_dir)
+        enabled = [et for et, checked in selected_types.items() if checked]
+        if not events.is_empty():
+            events = events.filter(pl.col("event_type").is_in(enabled))
+        _events_table(events)
 
     with page_shell():
         with ui.row().classes("w-full items-center justify-between"):
             ui.label("Satellite Events").classes("text-2xl font-bold")
             ui.button("Refresh", icon="refresh", on_click=content.refresh)
+        _event_type_filter(selected_types, on_change=content.refresh)
         content()
