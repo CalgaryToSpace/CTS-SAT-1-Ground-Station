@@ -40,6 +40,19 @@ into *some* fixed-size struct can carry near-random counter values --
 without this filter, that garbage is indistinguishable from a genuine
 reset and floods the output with false events.
 
+Sorting by the satellite's own clock has one more failure mode: a small
+time-sync correction (the OBC nudging its clock back a few seconds/minutes
+to stay aligned with ground truth) can locally reorder two beacons whose
+`unix_epoch_time_ms` are close together, so `.shift(1)` no longer points at
+the actual previous beacon -- producing a "drop" between two beacons that
+were never really adjacent, with a nonsense `detected_at`/`estimated_event_at`
+(e.g. a reboot that looks like it happened days ago). A genuine reset drops
+its counter by far more than a resync ever nudges the clock, so a candidate
+drop is only trusted as real if *either* the counter fell by more than
+`RESYNC_TOLERANCE` or the beacons are more than `RESYNC_TOLERANCE` apart in
+their own reported time -- when both are small, it's a resync artifact, not
+an event.
+
 Like steps 2 and 3, this is parquet-in-parquet-out: no database involved,
 and cheap enough to reprocess from scratch on every run.
 """
@@ -49,10 +62,12 @@ from __future__ import annotations
 __all__ = [
     "DEFAULT_DATA_DIR",
     "OUTPUT_FILENAME",
+    "RESYNC_TOLERANCE",
     "compute_satellite_events",
     "run",
 ]
 
+from datetime import timedelta
 from typing import TYPE_CHECKING, NamedTuple
 
 import polars as pl
@@ -86,6 +101,12 @@ EVENT_SPECS: tuple[_EventSpec, ...] = (
     _EventSpec("duration_since_last_uplink_ms", "Uplinked Commands", 1.0),
 )
 
+# A candidate counter drop is only trusted as a genuine event if the drop
+# itself or the beacon-to-beacon time gap exceeds this -- see the module
+# docstring's discussion of clock-resync false positives.
+RESYNC_TOLERANCE = timedelta(minutes=3)
+_RESYNC_TOLERANCE_MS = RESYNC_TOLERANCE / timedelta(milliseconds=1)
+
 # The output schema, in column order -- also what an empty result (no
 # beacons decoded yet) is built with, so downstream readers always see the
 # same columns regardless of how much history exists.
@@ -106,11 +127,28 @@ def _events_for_counter(beacons: pl.LazyFrame, spec: _EventSpec) -> pl.LazyFrame
     immediately preceding beacon's -- the first beacon after a `spec.event_type`
     event, per the module docstring. `beacons` must already be sorted by
     `beacon_utc_time`.
+
+    Excludes drops explainable by a clock-resync reordering artifact: both
+    the counter drop itself and the beacon-to-beacon `beacon_utc_time` gap
+    fall within `RESYNC_TOLERANCE` -- see the module docstring.
     """
     counter = pl.col(spec.counter_column)
     previous = counter.shift(1)
+    previous_time = pl.col("beacon_utc_time").shift(1)
+
+    counter_drop_ms = (previous - counter) * spec.ms_per_unit
+    time_gap_ms = (
+        (pl.col("beacon_utc_time") - previous_time).dt.total_milliseconds().abs()
+    )
+    is_resync_artifact = (counter_drop_ms <= _RESYNC_TOLERANCE_MS) & (
+        time_gap_ms <= _RESYNC_TOLERANCE_MS
+    )
+
     dropped = beacons.filter(
-        counter.is_not_null() & previous.is_not_null() & (counter < previous)
+        counter.is_not_null()
+        & previous.is_not_null()
+        & (counter < previous)
+        & ~is_resync_artifact
     )
 
     time_since_event_ms = (counter * spec.ms_per_unit).round(0).cast(pl.Int64)

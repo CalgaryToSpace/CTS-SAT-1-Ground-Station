@@ -82,7 +82,7 @@ def test_obc_reboot_detected_on_uptime_drop() -> None:
         [
             _beacon(
                 seconds=0,
-                uptime_ms=100_000,
+                uptime_ms=10_000_000,  # well over RESYNC_TOLERANCE -- a real drop
                 eps_uptime_sec=100,
                 duration_since_last_uplink_ms=5_000,
             ),
@@ -111,7 +111,7 @@ def test_eps_reboot_detected_on_eps_uptime_drop() -> None:
             _beacon(
                 seconds=0,
                 uptime_ms=100_000,
-                eps_uptime_sec=100,
+                eps_uptime_sec=100_000,  # well over RESYNC_TOLERANCE -- a real drop
                 duration_since_last_uplink_ms=5_000,
             ),
             _beacon(
@@ -142,7 +142,7 @@ def test_uplink_detected_on_duration_since_last_uplink_drop() -> None:
                 seconds=0,
                 uptime_ms=100_000,
                 eps_uptime_sec=100,
-                duration_since_last_uplink_ms=95_000,
+                duration_since_last_uplink_ms=10_000_000,  # over RESYNC_TOLERANCE
             ),
             _beacon(
                 seconds=120,
@@ -203,7 +203,7 @@ def test_basic_and_extended_beacons_both_considered_in_one_timeline() -> None:
             _beacon(
                 seconds=0,
                 packet_type="BEACON_EXTENDED",
-                uptime_ms=100_000,
+                uptime_ms=10_000_000,  # well over RESYNC_TOLERANCE -- a real drop
                 eps_uptime_sec=100,
                 duration_since_last_uplink_ms=5_000,
             ),
@@ -282,6 +282,63 @@ def test_invalid_epoch_beacon_ignored_entirely() -> None:
     assert compute_satellite_events(df).height == 0
 
 
+def test_small_clock_resync_does_not_look_like_a_reboot() -> None:
+    # A small onboard time-sync correction (the beacon's own UTC clock
+    # nudged back ~10s) can locally swap two beacons' sort order without
+    # any real event happening -- uptime keeps climbing normally the whole
+    # time. Both the apparent counter "drop" and the beacon-to-beacon time
+    # gap are tiny (well under RESYNC_TOLERANCE), so this must not be
+    # reported as an OBC reboot from ages "ago".
+    df = _df(
+        [
+            _beacon(
+                seconds=100,
+                uptime_ms=5_000_000,
+                eps_uptime_sec=5_000,
+                duration_since_last_uplink_ms=1_000,
+            ),
+            _beacon(
+                # Resynced ~10s backward relative to the beacon above, even
+                # though it was received ~10s *after* it (uptime is 10s
+                # higher, consistent with normal progression).
+                unix_epoch_time_ms=_epoch_ms(90),
+                seconds=90,
+                uptime_ms=5_010_000,
+                eps_uptime_sec=5_010,
+                duration_since_last_uplink_ms=11_000,
+            ),
+        ]
+    )
+    assert compute_satellite_events(df).height == 0
+
+
+def test_large_drop_still_detected_despite_small_time_gap() -> None:
+    # A genuine reset can happen between two beacons received close
+    # together -- the small time gap alone shouldn't suppress it, only a
+    # small time gap *and* a small counter drop together should.
+    df = _df(
+        [
+            _beacon(
+                seconds=0,
+                uptime_ms=10_000_000,
+                eps_uptime_sec=100,
+                duration_since_last_uplink_ms=5_000,
+            ),
+            _beacon(
+                seconds=5,  # well under RESYNC_TOLERANCE
+                uptime_ms=2_000,  # but the drop itself is huge -- still real
+                eps_uptime_sec=100,
+                duration_since_last_uplink_ms=5_005_000,
+                reboot_reason="WATCHDOG",
+            ),
+        ]
+    )
+    events = compute_satellite_events(df)
+    obc = events.filter(pl.col("event_type") == "OBC Reboot")
+    assert obc.height == 1
+    assert obc.row(0, named=True)["obc_reboot_reason"] == "WATCHDOG"
+
+
 def test_ordering_uses_unix_epoch_time_ms_not_row_order() -> None:
     # Rows deliberately inserted out of chronological order (mirroring a
     # low-trust decoder reporting an observation's end time for every
@@ -296,7 +353,7 @@ def test_ordering_uses_unix_epoch_time_ms_not_row_order() -> None:
     )
     before = _beacon(
         seconds=0,
-        uptime_ms=100_000,
+        uptime_ms=10_000_000,  # well over RESYNC_TOLERANCE -- a real drop
         eps_uptime_sec=100,
         duration_since_last_uplink_ms=5_000,
     )
@@ -312,15 +369,15 @@ def test_events_sorted_newest_first() -> None:
         [
             _beacon(
                 seconds=0,
-                uptime_ms=100_000,
+                uptime_ms=10_000_000,  # drops to beacon 1's -- real OBC reboot
                 eps_uptime_sec=100,
                 duration_since_last_uplink_ms=95_000,
             ),
             _beacon(
                 seconds=30,
                 uptime_ms=5_000,
-                eps_uptime_sec=130,
-                duration_since_last_uplink_ms=125_000,
+                eps_uptime_sec=100_000,  # drops to beacon 2's -- real EPS reboot
+                duration_since_last_uplink_ms=10_000_000,  # drops -- real uplink
             ),
             _beacon(
                 seconds=60,
