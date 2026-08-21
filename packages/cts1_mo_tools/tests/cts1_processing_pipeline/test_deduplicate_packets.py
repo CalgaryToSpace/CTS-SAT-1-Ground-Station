@@ -77,7 +77,10 @@ def test_sso_rs_corrected_is_kept() -> None:
 
 def test_sso_dedupes_within_one_minute_across_observations() -> None:
     """Two ground stations catching the same overpass, both sso_rx_replay,
-    within BASELINE_DEDUPE_TOLERANCE of each other, merge into one row.
+    within BASELINE_DEDUPE_TOLERANCE of each other, merge into one row --
+    received_at is their median, not either one's own reading (see
+    `_cluster_baseline` for why: propagation delay is milliseconds, so the
+    "first" copy mostly just reflects clock skew direction).
     """
     observations = _observations_df(
         [
@@ -108,7 +111,7 @@ def test_sso_dedupes_within_one_minute_across_observations() -> None:
 
     assert len(result) == 1
     row = result.row(0, named=True)
-    assert row["received_at"] == _dt("2026-08-12T19:35:00")  # earliest
+    assert row["received_at"] == _dt("2026-08-12T19:35:10")  # median of :00/:20
     assert row["received_at_source"] == "sso_rx_replay"
     assert row["packet_count"] == 2
     assert json.loads(row["observation_ids"]) == [1, 2]
@@ -145,6 +148,52 @@ def test_askew_outranks_sso_as_baseline_within_same_cluster() -> None:
     assert row["received_at_source"] == "askew_demod_from_file"
     assert row["packet_count"] == 2
     assert json.loads(row["decoders"]) == ["askew_demod_from_file", "sso_rx_replay"]
+
+
+def test_received_at_median_is_within_askew_only_not_mixed_with_sso() -> None:
+    """When both askew_demod_from_file and sso_rx_replay decode the same
+    content, with several ground stations for each, received_at is the
+    median of *only* the askew readings -- sso's own (lower-trust) readings
+    don't pull the median even though they're in the same cluster.
+    """
+    observations = _observations_df([_OBS_1])
+    packets = _packets_df(
+        [
+            _packet(
+                decoder="sso_rx_replay",
+                received_at="2026-08-12T19:34:50",
+                data_hex="c2a28a00aa",
+            ),
+            _packet(
+                decoder="sso_rx_replay",
+                received_at="2026-08-12T19:36:00",
+                data_hex="c2a28a00aa",
+            ),
+            _packet(
+                decoder="askew_demod_from_file",
+                received_at="2026-08-12T19:35:00",
+                data_hex="c2a28a00aa",
+            ),
+            _packet(
+                decoder="askew_demod_from_file",
+                received_at="2026-08-12T19:35:02",
+                data_hex="c2a28a00aa",
+            ),
+            _packet(
+                decoder="askew_demod_from_file",
+                received_at="2026-08-12T19:35:10",
+                data_hex="c2a28a00aa",
+            ),
+        ]
+    )
+
+    result = compute_distinct_packets(packets, observations)
+
+    assert len(result) == 1
+    row = result.row(0, named=True)
+    assert row["received_at"] == _dt("2026-08-12T19:35:02")  # median of askew only
+    assert row["received_at_source"] == "askew_demod_from_file"
+    assert row["packet_count"] == 5
 
 
 def test_rssi_db_prefers_max_among_askew_decodes() -> None:

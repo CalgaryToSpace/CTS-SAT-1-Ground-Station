@@ -180,12 +180,16 @@ def _cluster_baseline(baseline: pl.DataFrame) -> pl.DataFrame:
     packet events.
 
     Both decoders have trustworthy timing, so they're clustered together by
-    content+time same as a single decoder would be. Within a cluster, rows
-    are reordered so `BASELINE_DECODERS`' highest-trust decoder present
-    sorts first -- `.first()` below then picks that decoder's own
-    received_at/metadata/decoder name (`received_at_source`) as the
-    cluster's authoritative values, falling back to the next-most-trusted
-    decoder present.
+    content+time same as a single decoder would be. Within a cluster, only
+    rows from `BASELINE_DECODERS`' highest-trust decoder *present* (never a
+    mix of both) contribute to the cluster's `received_at`: their median
+    timestamp. Several ground stations catching the same overpass can be
+    time-synced to within a few seconds of each other rather than exactly,
+    and propagation delay between stations is only milliseconds -- so which
+    single copy arrived "first" mostly reflects which station's clock
+    happens to run behind, not which timestamp is more correct. The median
+    cancels that symmetric clock skew out instead of picking a side of it;
+    with only one copy (the common case) it's just that copy's own time.
 
     `rssi_db` is picked separately: askew_demod_from_file is preferred over
     any other decoder, and if several askew_demod_from_file decodes landed
@@ -201,13 +205,18 @@ def _cluster_baseline(baseline: pl.DataFrame) -> pl.DataFrame:
         {decoder: rank for rank, decoder in enumerate(BASELINE_DECODERS)},
         return_dtype=pl.UInt32,
     )
-    clustered = clustered.sort(["data_hex", "cluster_id", trust_rank, "received_at"])
+    clustered = clustered.with_columns(_trust_rank=trust_rank).sort(
+        ["data_hex", "cluster_id", "_trust_rank", "received_at"]
+    )
     is_askew = pl.col("decoder") == ASKEW_DECODER
+    # The highest-trust decoder's own rows within the cluster -- i.e. every
+    # row tied for the lowest `_trust_rank` present, not just the first one.
+    is_best_rank = pl.col("_trust_rank") == pl.col("_trust_rank").min()
     return (
         clustered.group_by(["data_hex", "cluster_id"], maintain_order=True)
         .agg(
-            pl.col("received_at").first(),  # highest-trust decoder's own time
-            pl.col("decoder").first().alias("received_at_source"),
+            pl.col("received_at").filter(is_best_rank).median().alias("received_at"),
+            pl.col("decoder").filter(is_best_rank).first().alias("received_at_source"),
             pl.col("data_length_bytes").first(),
             pl.col("csp_crc_valid").first(),
             pl.col("csp_crc_source").first(),
