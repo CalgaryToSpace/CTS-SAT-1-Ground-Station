@@ -79,9 +79,11 @@ def _build_pages(args: Args) -> None:
 
         with ui.header().classes("items-center gap-4"):
             ui.label("FrontierSat Data").classes("text-lg font-bold")
-            with ui.row().classes("items-center gap-4 ml-4"):
+            with ui.row().classes("items-center gap-0 ml-4 divide-x divide-white/25"):
                 for label, path in NAV_LINKS:
-                    ui.link(label, path).classes("text-white text-body1 no-underline")
+                    ui.link(label, path).classes(
+                        "text-white text-body1 no-underline px-3"
+                    )
             ui.space()
             ui.button(icon="dark_mode", on_click=_toggle_dark).props(
                 "flat round color=white"
