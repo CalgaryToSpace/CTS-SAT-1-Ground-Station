@@ -31,16 +31,27 @@ STALE_ERROR_AFTER = timedelta(hours=6)
 RECENT_PACKETS_LIMIT = 25
 
 
-def _age_str(value: datetime) -> str:
-    delta = datetime.now(UTC) - value
-    total_sec = int(delta.total_seconds())
+def _duration_str(total_sec: int) -> str:
     if total_sec < 60:  # noqa: PLR2004
-        return f"{total_sec}s ago"
+        return f"{total_sec}s"
     if total_sec < 3600:  # noqa: PLR2004
-        return f"{total_sec // 60}m ago"
+        return f"{total_sec // 60}m"
     if total_sec < 86400:  # noqa: PLR2004
-        return f"{total_sec // 3600}h {(total_sec % 3600) // 60}m ago"
-    return f"{total_sec // 86400}d {(total_sec % 86400) // 3600}h ago"
+        return f"{total_sec // 3600}h {(total_sec % 3600) // 60}m"
+    return f"{total_sec // 86400}d {(total_sec % 86400) // 3600}h"
+
+
+def _age_str(value: datetime) -> str:
+    """ "X ago" for a past `value`, "in X" for a future one -- `value` can
+    legitimately be in the future for `latest_observation_end`: step 1
+    pulls every SatNOGS observation with `start < now`, not `end < now`,
+    so an observation that's already started but hasn't finished yet
+    (status "future"/in-progress) has an `end` still ahead of "now".
+    """
+    delta = (datetime.now(UTC) - value).total_seconds()
+    if delta < 0:
+        return f"in {_duration_str(int(-delta))}"
+    return f"{_duration_str(int(delta))} ago"
 
 
 def _freshness_row(label: str, value: datetime | None) -> None:
