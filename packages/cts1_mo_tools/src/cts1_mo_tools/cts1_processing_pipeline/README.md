@@ -30,10 +30,15 @@ web UI as two containers sharing that directory.
 * Run the logic of the `cts1_decode_satnogs_packets` script to produce a super-wide table of all the packets.
 * Output: `everything_decoded.parquet`
 
+### Step 4: Detect satellite events from beacons
+
+* Read the `everything_decoded.parquet` table from step 3, filtered to `BEACON_BASIC`/`BEACON_EXTENDED` rows (both considered together, one timeline sorted by `received_at`).
+* Logic: find the first beacon where an onboard counter that only ever counts up (`uptime_ms`, `eps_uptime_sec`, `duration_since_last_uplink_ms`) is lower than the previous beacon's -- that beacon is the first one received after an OBC reboot / EPS reboot / uplinked-commands event, respectively. The event's own UTC time is estimated as that beacon's `received_at` minus the counter's value.
+* Output: `satellite_events_from_beacons.parquet` -- one row per detected event (unpivoted across the three event types), with `event_type`, `detected_at`, `estimated_event_at`, `time_since_event_when_detected_ms`, `obc_reboot_reason`, `eps_reboot_reason`, and `eps_reset_count`.
 
 ### Daemon
 
-* Runs steps 1-3 continuously instead of one-off: an initial backfill of `--start` (default: 24h), then every `--interval` minutes (default: 15), requeries step 1 for observations starting in the trailing `interval + 30` minutes and reruns steps 2 and 3.
+* Runs steps 1-4 continuously instead of one-off: an initial backfill of `--start` (default: 24h), then every `--interval` minutes (default: 15), requeries step 1 for observations starting in the trailing `interval + 30` minutes and reruns steps 2 through 4.
 * The 30-minute overlap on every requery catches a SatNOGS observation that was still uploading/being vetted during the previous poll; it doesn't waste decode time since step 1 already skips any observation/decoder pair already recorded in `decoder_runs`.
 * Runs until interrupted (Ctrl+C).
 

@@ -29,6 +29,8 @@ services:
       dockerfile: packages/cts1_mo_tools/Dockerfile.web
     environment:
       CTS1_DATA_DIR: /opt/cts1_processing_pipeline
+    env_file:
+      - .env # CTS1_WEB_STORAGE_SECRET, if you want one unique to this deployment
     volumes:
       - /opt/cts1_processing_pipeline:/opt/cts1_processing_pipeline:ro # read-only: the web UI never writes to it
     ports:

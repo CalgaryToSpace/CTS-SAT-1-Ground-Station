@@ -10,6 +10,7 @@ Usage (uv):
     uv run cts1_processing_pipeline step_1 --limit 5 --debug
     uv run cts1_processing_pipeline step_2
     uv run cts1_processing_pipeline step_3
+    uv run cts1_processing_pipeline step_4
     uv run cts1_processing_pipeline daemon
     uv run cts1_processing_pipeline daemon --start "3 days" --interval 5
 """
@@ -36,6 +37,7 @@ from . import daemon
 from .step_1_download_and_demodulate import pipeline as step_1_download_and_demodulate
 from .step_2_deduplicate_packets import pipeline as step_2_deduplicate_packets
 from .step_3_decode_packets import pipeline as step_3_decode_packets
+from .step_4_detect_satellite_events import pipeline as step_4_detect_satellite_events
 
 DEFAULT_DB_PATH = step_1_download_and_demodulate.DEFAULT_DB_PATH
 
@@ -86,9 +88,15 @@ class Step3Args:
 
 
 @dataclass(frozen=True, slots=True)
+class Step4Args:
+    """Step 4: detect satellite events (reboots, uplinks) from beacon
+    counters into satellite_events_from_beacons."""
+
+
+@dataclass(frozen=True, slots=True)
 class DaemonArgs:
-    """Daemon: run steps 1-3 continuously -- an initial backfill of
-    `--start`, then a periodic requery + full steps 1-3 rerun every
+    """Daemon: run steps 1-4 continuously -- an initial backfill of
+    `--start`, then a periodic requery + full steps 1-4 rerun every
     `--interval` minutes."""
 
     norad_id: Annotated[str, tyro.conf.Positional] = "69015"
@@ -128,6 +136,7 @@ Command = (
     Annotated[Step1Args, tyro.conf.subcommand(name="step_1", prefix_name=False)]
     | Annotated[Step2Args, tyro.conf.subcommand(name="step_2", prefix_name=False)]
     | Annotated[Step3Args, tyro.conf.subcommand(name="step_3", prefix_name=False)]
+    | Annotated[Step4Args, tyro.conf.subcommand(name="step_4", prefix_name=False)]
     | Annotated[DaemonArgs, tyro.conf.subcommand(name="daemon", prefix_name=False)]
 )
 
@@ -177,6 +186,8 @@ def main() -> None:
             step_2_deduplicate_packets.run(output_dir=args.db_path.parent)
         elif isinstance(args.command, Step3Args):
             step_3_decode_packets.run(output_dir=args.db_path.parent)
+        elif isinstance(args.command, Step4Args):
+            step_4_detect_satellite_events.run(output_dir=args.db_path.parent)
         elif isinstance(args.command, DaemonArgs):  # pyright: ignore[reportUnnecessaryIsInstance]
             daemon.run(
                 norad_id=args.command.norad_id,

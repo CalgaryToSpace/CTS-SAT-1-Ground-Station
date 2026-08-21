@@ -1,10 +1,10 @@
-"""Daemon: run steps 1-3 continuously.
+"""Daemon: run steps 1-4 continuously.
 
 First does one backfill of `start` (a duration like "24 hours" or an ISO
 8601 date/datetime -- same syntax as step 1's own `--start`), running steps
-1 through 3 once. Then, every `interval` minutes, requeries step 1 for
+1 through 4 once. Then, every `interval` minutes, requeries step 1 for
 observations starting in the trailing `interval + 30` minutes and reruns
-steps 2 and 3 again -- the 30-minute overlap is there so a SatNOGS
+steps 2 through 4 again -- the 30-minute overlap is there so a SatNOGS
 observation still uploading/being vetted during one poll gets picked up on
 the next one, rather than falling into the gap between two non-overlapping
 windows.
@@ -32,6 +32,7 @@ from loguru import logger
 from .step_1_download_and_demodulate import pipeline as step_1_pipeline
 from .step_2_deduplicate_packets import pipeline as step_2_pipeline
 from .step_3_decode_packets import pipeline as step_3_pipeline
+from .step_4_detect_satellite_events import pipeline as step_4_pipeline
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -64,6 +65,7 @@ def _run_all_steps(  # noqa: PLR0913
     )
     step_2_pipeline.run(output_dir=db_path.parent)
     step_3_pipeline.run(output_dir=db_path.parent)
+    step_4_pipeline.run(output_dir=db_path.parent)
 
 
 def run(  # noqa: PLR0913
@@ -78,7 +80,7 @@ def run(  # noqa: PLR0913
     force_rerun: bool = False,
     tools: tuple[str, ...] | None = None,
 ) -> None:
-    """Run steps 1-3 forever: one backfill of `start`, then a requery of
+    """Run steps 1-4 forever: one backfill of `start`, then a requery of
     the trailing `interval + 30` minutes every `interval` minutes.
 
     Args:
