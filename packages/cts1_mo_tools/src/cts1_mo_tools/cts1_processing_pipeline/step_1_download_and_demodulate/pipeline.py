@@ -16,9 +16,10 @@ from __future__ import annotations
 
 from . import _subprocess_registry
 
-__all__ = ["DEFAULT_DB_PATH", "run"]
+__all__ = ["DEFAULT_DATA_DIR", "DEFAULT_DB_PATH", "run"]
 
 import concurrent.futures
+import os
 import re
 import tempfile
 import time
@@ -40,7 +41,13 @@ from .decode_gr_satellites_kiss import run_gr_satellites_kiss
 from .decode_satnogs_data_demod import run_satnogs_data_demod
 from .decode_sso_rx_replay import run_sso_rx_replay
 
-DEFAULT_DB_PATH = Path("output/cts1_processing_pipeline.duckdb")
+# Every later step (and the web UI) derives its own default parquet paths
+# from this one's directory -- see each step's `DEFAULT_OUTPUT_DIR` -- so
+# pointing every process (the daemon container and the web UI container
+# alike) at the same data directory is one env var, `CTS1_DATA_DIR`, rather
+# than a `--db-path`/`--parquet-path` kept in sync by hand across both.
+DEFAULT_DATA_DIR = Path(os.environ.get("CTS1_DATA_DIR", "output"))
+DEFAULT_DB_PATH = DEFAULT_DATA_DIR / "cts1_processing_pipeline.duckdb"
 CHECKPOINT_INTERVAL = 100
 DEMOD_DOWNLOAD_WORKERS = 50
 DECODERS = (

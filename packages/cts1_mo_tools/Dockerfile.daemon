@@ -1,0 +1,76 @@
+# syntax=docker/dockerfile:1
+
+# Runs the CTS-SAT-1 processing pipeline's `daemon` subcommand (steps 1-3
+# on a loop -- see src/cts1_mo_tools/cts1_processing_pipeline/README.md and
+# ../DEPLOY.md), writing to `CTS1_DATA_DIR`.
+#
+# Build from the repo root (not this directory) -- see DEPLOY.md for why.
+#
+# ************************************************************************
+# * IMPORTANT: this image is NOT complete out of the box.                *
+# ************************************************************************
+# Step 1 shells out to four external decoder tools that this repo doesn't
+# vendor, build, or document an install recipe for:
+#   - sox                     (apt-installable -- included below)
+#   - gr_satellites            (needs GNU Radio + the gr-satellites OOT
+#                                module: https://github.com/daniestevez/gr-satellites)
+#   - askew_demod_from_file    (github.com/... -- ask whoever set up your
+#                                dev machine's PATH for this one)
+#   - sso_rx_replay             (same -- not a pip/apt package as of this
+#                                writing)
+#
+# In local development these are just "on PATH" -- installed by hand,
+# outside of anything `uv sync` manages. This Dockerfile installs what's
+# readily available via apt/pip (sox, a best-effort attempt at
+# gnuradio/gr-satellites) and stops there; add whatever build/COPY steps
+# your environment needs for the other two before this image will
+# actually decode anything. Until then, `docker compose up` will start
+# fine and the daemon will run, but every decode will just come back
+# empty/failed for those two decoders (the other three still work).
+FROM python:3.13-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        sox \
+        gnuradio \
+        gnuradio-dev \
+        libvolk2-dev \
+        pkg-config \
+        build-essential \
+        cmake \
+        git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Best-effort: gr-satellites is a normal pip package, but it needs the
+# `gnuradio` Python bindings installed above to actually be importable at
+# runtime (pip alone can't provide those -- they come from the apt
+# packages above). Verify `gr_satellites --help` actually works in your
+# built image; if it doesn't, your base image/GNU Radio version likely
+# needs adjusting for this to line up.
+RUN pip install --no-cache-dir gr-satellites
+
+# TODO(you): install askew_demod_from_file and sso_rx_replay here, e.g.:
+#   COPY --from=your-build-stage /usr/local/bin/askew_demod_from_file /usr/local/bin/
+#   COPY --from=your-build-stage /usr/local/bin/sso_rx_replay /usr/local/bin/
+
+COPY --from=ghcr.io/astral-sh/uv:0.9 /uv /uvx /bin/
+
+WORKDIR /repo
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PROJECT_ENVIRONMENT=/repo/.venv \
+    PATH=/repo/.venv/bin:$PATH \
+    CTS1_DATA_DIR=/opt/cts1_processing_pipeline
+
+# The whole uv workspace is copied in (not just cts1_mo_tools) since `uv
+# sync` resolves against the workspace's single shared uv.lock -- every
+# member's pyproject.toml needs to be present even though only
+# cts1_mo_tools actually gets installed below.
+COPY . .
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --package cts1_mo_tools
+
+VOLUME ["/opt/cts1_processing_pipeline"]
+
+ENTRYPOINT ["cts1_processing_pipeline", "daemon"]

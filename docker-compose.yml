@@ -1,0 +1,30 @@
+services:
+  daemon:
+    build:
+      context: .
+      dockerfile: packages/cts1_mo_tools/Dockerfile.daemon
+    environment:
+      CTS1_DATA_DIR: /opt/cts1_processing_pipeline
+    env_file:
+      - .env # SATNOGS_NETWORK_API_KEY, if you have one -- see .env.sample
+    volumes:
+      - /opt/cts1_processing_pipeline:/opt/cts1_processing_pipeline
+    command:
+      - "69015" # NORAD catalog ID -- CTS-SAT-1 by default
+      - --start
+      - "24 hours"
+      - --interval
+      - "15"
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: packages/cts1_mo_tools/Dockerfile.web
+    environment:
+      CTS1_DATA_DIR: /opt/cts1_processing_pipeline
+    volumes:
+      - /opt/cts1_processing_pipeline:/opt/cts1_processing_pipeline:ro # read-only: the web UI never writes to it
+    ports:
+      - "8089:8089"
+    restart: unless-stopped

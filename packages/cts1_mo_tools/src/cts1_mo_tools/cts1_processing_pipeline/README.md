@@ -1,5 +1,10 @@
 # `cts1_processing_pipeline`
 
+Every step below defaults its data-file paths (the DuckDB database, every
+parquet file) from the `CTS1_DATA_DIR` environment variable (`./output` if
+unset) -- see [DEPLOY.md](../../../DEPLOY.md) for running the daemon and
+web UI as two containers sharing that directory.
+
 ## Steps
 
 ### Step 1: Download and demodulate.
