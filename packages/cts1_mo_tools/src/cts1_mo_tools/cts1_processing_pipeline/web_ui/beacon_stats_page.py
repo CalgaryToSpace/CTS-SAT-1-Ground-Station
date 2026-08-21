@@ -48,6 +48,22 @@ def _age_str(received_at: datetime) -> str:
     return f"{total_sec // 3600}h {(total_sec % 3600) // 60}m ago"
 
 
+def _format_uptime(uptime_sec: float | None) -> str:
+    """`uptime_sec` as `[Dd] HH:MM:SS` -- the raw seconds count from the
+    beacon field isn't something you can read at a glance once the
+    satellite's been up for days.
+    """
+    if uptime_sec is None:
+        return "?"
+    total = int(uptime_sec)
+    days, remainder = divmod(total, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if days:
+        return f"{days}d {hours:02d}:{minutes:02d}:{seconds:02d}"
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+
 def _latest_beacon_card(path: Path) -> None:
     latest = beacon_data.latest_beacons(path, n=1)
     with ui.card().classes("w-full"):
@@ -69,13 +85,64 @@ def _latest_beacon_card(path: Path) -> None:
 
         stats = [
             ("Satellite", row.get("satellite_name")),
-            ("Uptime", f"{row.get('uptime_sec', '?')} s"),
+            ("Uptime", _format_uptime(row.get("uptime_sec"))),
             ("Battery", f"{row.get('eps_battery_percent', '?')}%"),
             ("Battery Voltage", f"{row.get('eps_battery_voltage_V', '?')} V"),
             ("OBC Temp", f"{row.get('obc_temperature_C', '?')} °C"),
             ("EPS Mode", row.get("eps_mode")),
             ("CTS1 State", row.get("cts1_operation_state")),
-            ("RSSI", f"{row.get('rssi_db', '?')} dB"),
+        ]
+        with ui.row().classes("w-full gap-8 flex-wrap mt-2"):
+            for label, value in stats:
+                with ui.column().classes("gap-0"):
+                    ui.label(label).classes("text-caption text-grey text-uppercase")
+                    ui.label(str(value)).classes("text-base font-medium")
+
+
+def _latest_extended_beacon_card(path: Path) -> None:
+    """The extended-only fields (ADCS, extended EPS/OBC telemetry) only
+    show up on `BEACON_EXTENDED` packets, which are interleaved with more
+    frequent `BEACON_BASIC` ones -- so this looks up the latest *extended*
+    beacon specifically, rather than reusing whatever `_latest_beacon_card`
+    found.
+    """
+    latest = beacon_data.latest_beacons(path, n=1, packet_types=("BEACON_EXTENDED",))
+    with ui.card().classes("w-full"):
+        ui.label("Latest Extended Beacon").classes("text-lg font-bold")
+        if latest.is_empty():
+            ui.label("No extended beacon packets decoded yet.").classes(
+                "text-caption text-grey"
+            )
+            return
+
+        row = latest.to_dicts()[0]
+        received_at = row["received_at"]
+        ui.label(
+            f"{received_at:%Y-%m-%d %H:%M:%S} UTC ({_age_str(received_at)})"
+        ).classes("text-caption text-grey")
+
+        stats = [
+            ("ADC Battery Voltage", f"{row.get('obc_adc_battery_voltage_V', '?')} V"),
+            (
+                "MEMS Angular Rate Norm",
+                f"{row.get('adcs_angular_rate_norm_deg_per_sec', '?')} deg/s",
+            ),
+            (
+                "Angular Rate (x, y, z)",
+                f"{row.get('adcs_estimated_rate_x_deg_per_sec', '?')}, "
+                f"{row.get('adcs_estimated_rate_y_deg_per_sec', '?')}, "
+                f"{row.get('adcs_estimated_rate_z_deg_per_sec', '?')} deg/s",
+            ),
+            ("ADCS Estimation Mode", row.get("adcs_attitude_estimation_mode")),
+            ("ADCS Control Mode", row.get("adcs_control_mode")),
+            (
+                "Net Battery Power (avg)",
+                f"{row.get('eps_total_avg_net_battery_power_W', '?')} W",
+            ),
+            (
+                "Power Distributed (avg)",
+                f"{row.get('eps_total_avg_power_distributed_W', '?')} W",
+            ),
         ]
         with ui.row().classes("w-full gap-8 flex-wrap mt-2"):
             for label, value in stats:
@@ -95,7 +162,7 @@ def _recent_beacons_table(path: Path) -> None:
         columns = [
             {"name": "received_at", "label": "Received", "field": "received_at"},
             {"name": "packet_type", "label": "Type", "field": "packet_type"},
-            {"name": "uptime_sec", "label": "Uptime (s)", "field": "uptime_sec"},
+            {"name": "uptime_sec", "label": "Uptime", "field": "uptime_sec"},
             {
                 "name": "eps_battery_percent",
                 "label": "Battery %",
@@ -112,7 +179,7 @@ def _recent_beacons_table(path: Path) -> None:
             {
                 "received_at": f"{r['received_at']:%Y-%m-%d %H:%M:%S}",
                 "packet_type": r["packet_type"],
-                "uptime_sec": r.get("uptime_sec"),
+                "uptime_sec": _format_uptime(r.get("uptime_sec")),
                 "eps_battery_percent": r.get("eps_battery_percent"),
                 "obc_temperature_C": r.get("obc_temperature_C"),
                 "rssi_db": r.get("rssi_db"),
@@ -197,6 +264,7 @@ def build_beacon_stats_page(parquet_path: Path, hours: float) -> None:
             ).classes("text-lg text-warning")
             return
         _latest_beacon_card(parquet_path)
+        _latest_extended_beacon_card(parquet_path)
         _recent_beacons_table(parquet_path)
 
     @ui.refreshable

@@ -137,18 +137,28 @@ def load_tcmd_response_packets(
     return lf.sort("received_at").collect()
 
 
-def latest_beacons(path: Path = DEFAULT_PARQUET_PATH, n: int = 10) -> pl.DataFrame:
+def latest_beacons(
+    path: Path = DEFAULT_PARQUET_PATH,
+    n: int = 10,
+    *,
+    packet_types: Sequence[str] = BEACON_PACKET_TYPES,
+) -> pl.DataFrame:
     """The `n` most recently received beacon packets, newest first.
 
     Ignores any time window -- this is "whatever the most recent beacon(s)
     are", even if that's older than the chart window -- so the UI can still
     show *something* when nothing has come down in the last 24h.
+
+    `packet_types` narrows which beacon type(s) count -- e.g. pass just
+    `("BEACON_EXTENDED",)` to get the latest beacon carrying the
+    extended-only fields (ADCS, extended EPS/OBC telemetry), skipping over
+    any more-recent `BEACON_BASIC` rows in between.
     """
     lf = _scan(path)
     if lf is None:
         return pl.DataFrame()
     return (
-        lf.filter(pl.col("packet_type").is_in(BEACON_PACKET_TYPES))
+        lf.filter(pl.col("packet_type").is_in(packet_types))
         .sort("received_at", descending=True)
         .head(n)
         .collect()
