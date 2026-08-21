@@ -90,7 +90,7 @@ def _latest_beacon_card(path: Path) -> None:
             ("Battery Voltage", f"{row.get('eps_battery_voltage_V', '?')} V"),
             ("OBC Temp", f"{row.get('obc_temperature_C', '?')} °C"),
             ("EPS Mode", row.get("eps_mode")),
-            ("CTS1 State", row.get("cts1_operation_state")),
+            ("OBC State", row.get("cts1_operation_state")),
         ]
         with ui.row().classes("w-full gap-8 flex-wrap mt-2"):
             for label, value in stats:

@@ -718,10 +718,9 @@ def build_file_reassembler_page(parquet_path: Path) -> None:
             # purely as a starting guess -- not run automatically, since
             # that'd mean every page load kicks off a query (potentially a
             # large one) before the user asked for anything.
-            ui.label(
-                "Fields are pre-filled with the last 24h -- click one of the "
-                "Search buttons above to run it."
-            ).classes("text-caption text-grey")
+            ui.label("Fields are pre-filled with the last 24h.").classes(
+                "text-caption text-grey"
+            )
             return
         _reassembler_results(
             parquet_path,
@@ -737,7 +736,9 @@ def build_file_reassembler_page(parquet_path: Path) -> None:
     with page_shell():
         ui.label("File Reassembler").classes("text-2xl font-bold")
         ui.label(
-            "Pick one or more UTC time ranges covering a single bulk file download."
+            "Pick UTC time ranges covering bulk file download(s). "
+            "Then, filter to just a single file to reassemble it. "
+            "Pro tip: Copy-and-paste time ranges from the Headers list."
         ).classes("text-caption text-grey")
         with ui.card().classes("w-full"):
             range_editor()

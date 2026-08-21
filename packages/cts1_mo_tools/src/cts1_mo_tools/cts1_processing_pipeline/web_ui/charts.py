@@ -78,19 +78,19 @@ BEACON_CHART_GROUPS: list[tuple[str, list[ChartSpec]]] = [
                 ["obc_active_oscillator_MHz"],
                 unit="MHz",
             ),
-            ChartSpec(
-                "OBC ADC Battery Voltage (extended)",
-                ["obc_adc_battery_voltage_V"],
-                unit="V",
-            ),
             ChartSpec("Reboot Reason", ["reboot_reason"], categorical=True),
             ChartSpec("Filesystem Mounted", ["is_fs_mounted"], categorical=True),
         ],
     ),
     (
-        "EPS Battery",
+        "EPS Battery and State",
         [
             ChartSpec("Battery Voltage", ["eps_battery_voltage_V"], unit="V"),
+            ChartSpec(
+                "OBC ADC Battery Voltage (extended)",
+                ["obc_adc_battery_voltage_V"],
+                unit="V",
+            ),
             ChartSpec("Battery Percent", ["eps_battery_percent"], unit="%"),
             ChartSpec(
                 "Battery Temperatures",
@@ -173,10 +173,10 @@ BEACON_CHART_GROUPS: list[tuple[str, list[ChartSpec]]] = [
         ],
     ),
     (
-        "CTS1 State & RF Switch",
+        "Operation State & RF Switch",
         [
             ChartSpec(
-                "CTS1 Operation State", ["cts1_operation_state"], categorical=True
+                "OBC Operation State", ["cts1_operation_state"], categorical=True
             ),
             ChartSpec("RBF Pin State", ["rbf_pin_state"], categorical=True),
             ChartSpec(
