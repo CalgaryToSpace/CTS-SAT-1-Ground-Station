@@ -94,7 +94,17 @@ def main() -> None:
     """Entry point: parse CLI args, build pages, and start the NiceGUI server."""
     args = tyro.cli(Args)
     _build_pages(args)
-    ui.run(title="FrontierSat Data", dark=True, port=args.port, reload=False)
+    # "info" (NiceGUI's default is "warning") is what turns on uvicorn's
+    # per-request access log -- one line per HTTP request, to stderr, which
+    # `docker compose logs web` (or the daemon's own log driver -- see
+    # DEPLOY.md) already captures like every other log line in this stack.
+    ui.run(
+        title="FrontierSat Data",
+        # Disabled for now - dark=True,
+        port=args.port,
+        reload=False,
+        uvicorn_logging_level="info",
+    )
 
 
 if __name__ in {"__main__", "__mp_main__"}:

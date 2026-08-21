@@ -1,3 +1,8 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "30m" # cap each container's log file so it can't fill the disk
+
 services:
   daemon:
     build:
@@ -15,6 +20,7 @@ services:
       - "24 hours"
       - --interval
       - "15"
+    logging: *default-logging
     restart: unless-stopped
 
   web:
@@ -27,6 +33,7 @@ services:
       - /opt/cts1_processing_pipeline:/opt/cts1_processing_pipeline:ro # read-only: the web UI never writes to it
     ports:
       - "127.0.0.1:8089:8089" # localhost only; nginx (below) is the public path
+    logging: *default-logging
     restart: unless-stopped
 
   nginx:
@@ -40,6 +47,7 @@ services:
       - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - /opt/cts1_ssl/letsencrypt:/etc/letsencrypt:ro
       - /opt/cts1_ssl/webroot:/var/www/certbot:ro
+    logging: *default-logging
     restart: unless-stopped
 
   certbot:
@@ -52,4 +60,5 @@ services:
         certbot renew --webroot -w /var/www/certbot --quiet;
         sleep 12h & wait $${!};
       done'
+    logging: *default-logging
     restart: unless-stopped
