@@ -203,7 +203,14 @@ def append_packets(con: duckdb.DuckDBPyConnection, df: pl.DataFrame) -> None:
     finally:
         con.unregister("_incoming_packets")
 
-    logger.info(f"{RAW_PACKETS_TABLE}: appended {len(df)} row(s)")
+    if "decoder" in df.columns:
+        by_decoder = ", ".join(
+            f"{decoder}={count}"
+            for decoder, count in df["decoder"].value_counts().sort("decoder").rows()
+        )
+        logger.info(f"{RAW_PACKETS_TABLE}: appended {len(df)} row(s) ({by_decoder})")
+    else:
+        logger.info(f"{RAW_PACKETS_TABLE}: appended {len(df)} row(s)")
 
 
 def record_decoder_runs(
