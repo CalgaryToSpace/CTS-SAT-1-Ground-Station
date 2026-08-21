@@ -17,9 +17,11 @@ __all__ = [
     "RAW_OBSERVATIONS_FILENAME",
     "RAW_PACKETS_FILENAME",
     "DecoderToolStats",
+    "PacketCompletenessSummary",
     "PipelineCounts",
     "decoder_tool_stats",
     "latest_packets",
+    "packet_completeness_summary",
     "pipeline_counts",
 ]
 
@@ -39,7 +41,7 @@ from cts1_mo_tools.cts1_processing_pipeline.step_2_deduplicate_packets import (
 )
 
 if TYPE_CHECKING:
-    from datetime import datetime
+    from datetime import datetime, timedelta
     from pathlib import Path
 
 # Every one of these lives in the same output directory as step 1's DuckDB
@@ -257,3 +259,65 @@ def latest_packets(path: Path, n: int = 25) -> pl.DataFrame:
     if lf is None:
         return pl.DataFrame()
     return lf.sort("received_at", descending=True).head(n).collect()
+
+
+@dataclass(frozen=True, slots=True)
+class PacketCompletenessSummary:
+    """Whole-history completeness signal, independent of whatever window a
+    "most recent packets" table happens to show: the very first packet
+    ever received, and the largest gap between any two consecutive
+    packets across the *entire* history -- a dropout sitting a thousand
+    rows back would never show up if this were computed over just the
+    latest handful of rows.
+    """
+
+    first_received_at: datetime | None
+    largest_gap: timedelta | None
+    largest_gap_from: datetime | None  # the packet right before the gap
+    largest_gap_to: datetime | None  # the packet right after the gap
+
+
+def packet_completeness_summary(path: Path) -> PacketCompletenessSummary:
+    """Compute `PacketCompletenessSummary` over every row at `path`.
+
+    Stays lazy end-to-end -- sorts the full `received_at` column, pairs
+    each row with the one before it, then reduces straight to a
+    single-row aggregation, so this never materializes more than one
+    row's worth of history into memory regardless of how large the
+    pipeline's packet history has grown.
+    """
+    lf = _scan(path)
+    if lf is None:
+        return PacketCompletenessSummary(None, None, None, None)
+
+    lf = lf.sort("received_at").select(
+        pl.col("received_at"),
+        pl.col("received_at").shift(1).alias("_prev_received_at"),
+        pl.col("received_at").diff().alias("_gap"),
+    )
+    lf = lf.select(
+        pl.col("received_at").first().alias("first_received_at"),
+        pl.col("_gap").max().alias("largest_gap"),
+        pl.col("_prev_received_at")
+        .sort_by(pl.col("_gap"), descending=True, nulls_last=True)
+        .first()
+        .alias("largest_gap_from"),
+        pl.col("received_at")
+        .sort_by(pl.col("_gap"), descending=True, nulls_last=True)
+        .first()
+        .alias("largest_gap_to"),
+    )
+    row = lf.collect()
+
+    first_received_at = row.item(0, "first_received_at")
+    if first_received_at is None:
+        return PacketCompletenessSummary(None, None, None, None)
+
+    largest_gap = row.item(0, "largest_gap")
+    has_gap = largest_gap is not None
+    return PacketCompletenessSummary(
+        first_received_at=first_received_at,
+        largest_gap=largest_gap,
+        largest_gap_from=row.item(0, "largest_gap_from") if has_gap else None,
+        largest_gap_to=row.item(0, "largest_gap_to") if has_gap else None,
+    )

@@ -14,11 +14,15 @@ __all__ = ["build_pipeline_status_page"]
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path  # noqa: TC003 -- tyro needs this at runtime elsewhere
+from typing import TYPE_CHECKING
 
 from nicegui import ui
 
 from . import pipeline_status as status_data
 from .layout import page_shell
+
+if TYPE_CHECKING:
+    import polars as pl
 
 REFRESH_INTERVAL_SEC = 30.0
 
@@ -83,7 +87,45 @@ def _stat_tile(label: str, value: str) -> None:
         ui.label(value).classes("text-2xl font-bold")
 
 
-def _counts_section(counts: status_data.PipelineCounts) -> None:
+def _plain_row(label: str, value: str | None) -> None:
+    """Same layout as `_freshness_row`, but with no staleness coloring --
+    for facts like "first packet ever" or "largest historical gap" that
+    are just informational, not a live health signal to flag yellow/red.
+    """
+    with ui.row().classes("w-full items-center justify-between"):
+        ui.label(label).classes("text-caption text-grey text-uppercase")
+        if value is None:
+            with ui.row().classes("items-center gap-1"):
+                ui.icon("help", color="grey")
+                ui.label("no data yet").classes("text-caption text-grey")
+            return
+        ui.label(value)
+
+
+def _first_packet_value(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    return f"{value:%Y-%m-%d %H:%M:%S} UTC ({_age_str(value)})"
+
+
+def _largest_gap_value(summary: status_data.PacketCompletenessSummary) -> str | None:
+    if (
+        summary.largest_gap is None
+        or summary.largest_gap_from is None
+        or summary.largest_gap_to is None
+    ):
+        return None
+    return (
+        f"{_duration_str(int(summary.largest_gap.total_seconds()))} "
+        f"(from {summary.largest_gap_from:%Y-%m-%d %H:%M:%S} "
+        f"to {summary.largest_gap_to:%Y-%m-%d %H:%M:%S} UTC)"
+    )
+
+
+def _counts_section(
+    counts: status_data.PipelineCounts,
+    completeness: status_data.PacketCompletenessSummary,
+) -> None:
     with ui.card().classes("w-full"):
         ui.label("Pipeline Counts").classes("text-lg font-bold")
         with ui.row().classes("w-full gap-8 flex-wrap mt-2"):
@@ -100,15 +142,32 @@ def _counts_section(counts: status_data.PipelineCounts) -> None:
                 ).classes("text-warning")
 
         ui.separator().classes("mt-2")
-        ui.label("Freshness").classes("text-base font-medium mt-2")
-        _freshness_row(
-            "Latest observation end (SatNOGS)", counts.latest_observation_end
-        )
-        _freshness_row("Latest packet received", counts.latest_packet_received_at)
-        _freshness_row(
-            "Latest packet ingested locally", counts.latest_packet_ingested_at
-        )
-        _freshness_row("Latest decoder run", counts.latest_decoder_run_at)
+        with ui.row().classes("w-full gap-8 flex-wrap items-start mt-2"):
+            with ui.column().classes("flex-1 min-w-72 gap-0"):
+                ui.label("Freshness").classes("text-base font-medium")
+                _freshness_row(
+                    "Latest observation end (SatNOGS)",
+                    counts.latest_observation_end,
+                )
+                _freshness_row(
+                    "Latest packet received", counts.latest_packet_received_at
+                )
+                _freshness_row(
+                    "Latest packet ingested locally",
+                    counts.latest_packet_ingested_at,
+                )
+                _freshness_row("Latest decoder run", counts.latest_decoder_run_at)
+
+            with ui.column().classes("flex-1 min-w-72 gap-0"):
+                ui.label("Completeness").classes("text-base font-medium")
+                _plain_row(
+                    "First packet ever received",
+                    _first_packet_value(completeness.first_received_at),
+                )
+                _plain_row(
+                    "Largest gap (entire history)",
+                    _largest_gap_value(completeness),
+                )
 
 
 def _decoder_tools_table(stats: list[status_data.DecoderToolStats]) -> None:
@@ -176,8 +235,7 @@ def _decoders_display(decoders_json: str | None) -> str:
         return decoders_json
 
 
-def _recent_packets_table(decoded_packets_path: Path) -> None:
-    recent = status_data.latest_packets(decoded_packets_path, n=RECENT_PACKETS_LIMIT)
+def _recent_packets_table(recent: pl.DataFrame) -> None:
     with ui.card().classes("w-full"):
         ui.label("Most Recent Packets").classes("text-lg font-bold")
         if recent.is_empty():
@@ -223,9 +281,12 @@ def build_pipeline_status_page(parquet_path: Path) -> None:
         counts = status_data.pipeline_counts(
             output_dir, decoded_packets_path=parquet_path
         )
-        _counts_section(counts)
+        completeness = status_data.packet_completeness_summary(parquet_path)
+        _counts_section(counts, completeness)
         _decoder_tools_table(status_data.decoder_tool_stats(output_dir))
-        _recent_packets_table(parquet_path)
+        _recent_packets_table(
+            status_data.latest_packets(parquet_path, n=RECENT_PACKETS_LIMIT)
+        )
 
     with page_shell():
         with ui.row().classes("w-full items-center justify-between"):
