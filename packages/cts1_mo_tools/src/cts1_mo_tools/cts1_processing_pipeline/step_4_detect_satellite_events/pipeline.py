@@ -16,8 +16,8 @@ beacon's is the first beacon received *after* that event -- the event
 itself happened `counter value` before that beacon's own timestamp. This
 step finds every such drop across the whole beacon history and stacks the
 three kinds of event into one unpivoted table, one row per detected event,
-each carrying the OBC/EPS reboot-reason fields and EPS fault count as
-reported by the detecting beacon.
+each carrying the OBC/EPS reboot-reason fields as reported by the
+detecting beacon.
 
 Ordering/timestamps are based on `unix_epoch_time_ms` (the satellite's own
 onboard-clock timestamp, carried in every beacon), not `received_at`:
@@ -118,7 +118,6 @@ _OUTPUT_SCHEMA = {
     "detecting_packet_type": pl.String,
     "obc_reboot_reason": pl.String,
     "eps_reboot_reason": pl.String,
-    "eps_reset_count": pl.Int64,
 }
 
 
@@ -162,7 +161,6 @@ def _events_for_counter(beacons: pl.LazyFrame, spec: _EventSpec) -> pl.LazyFrame
         detecting_packet_type=pl.col("packet_type"),
         obc_reboot_reason=pl.col("reboot_reason"),
         eps_reboot_reason=pl.col("eps_reset_cause"),
-        eps_reset_count=pl.col("eps_total_fault_count").cast(pl.Int64),
     )
 
 

@@ -89,11 +89,6 @@ def _events_table(events: pl.DataFrame) -> None:
                 "field": "eps_reboot_reason",
             },
             {
-                "name": "eps_reset_count",
-                "label": "EPS Reset Count",
-                "field": "eps_reset_count",
-            },
-            {
                 "name": "detecting_packet_type",
                 "label": "Detecting Packet",
                 "field": "detecting_packet_type",
@@ -109,7 +104,6 @@ def _events_table(events: pl.DataFrame) -> None:
                 ),
                 "obc_reboot_reason": r["obc_reboot_reason"] or "",
                 "eps_reboot_reason": r["eps_reboot_reason"] or "",
-                "eps_reset_count": r["eps_reset_count"],
                 "detecting_packet_type": r["detecting_packet_type"],
             }
             for r in events.to_dicts()

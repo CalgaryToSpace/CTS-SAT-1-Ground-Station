@@ -27,7 +27,6 @@ def _beacon(  # noqa: PLR0913
     duration_since_last_uplink_ms: int,
     reboot_reason: str = "NORMAL",
     eps_reset_cause: str = "NORMAL",
-    eps_total_fault_count: int = 0,
     csp_crc_valid: bool = True,
     unix_epoch_time_ms: int | None = None,
 ) -> dict[str, Any]:
@@ -41,7 +40,6 @@ def _beacon(  # noqa: PLR0913
         "duration_since_last_uplink_ms": duration_since_last_uplink_ms,
         "reboot_reason": reboot_reason,
         "eps_reset_cause": eps_reset_cause,
-        "eps_total_fault_count": eps_total_fault_count,
         "csp_crc_valid": csp_crc_valid,
     }
 
@@ -69,7 +67,6 @@ def test_no_beacons_returns_no_events() -> None:
                 "duration_since_last_uplink_ms": None,
                 "reboot_reason": None,
                 "eps_reset_cause": None,
-                "eps_total_fault_count": None,
                 "csp_crc_valid": True,
             }
         ]
@@ -120,7 +117,6 @@ def test_eps_reboot_detected_on_eps_uptime_drop() -> None:
                 eps_uptime_sec=5,
                 duration_since_last_uplink_ms=95_000,
                 eps_reset_cause="BROWNOUT",
-                eps_total_fault_count=3,
             ),
         ]
     )
@@ -132,7 +128,6 @@ def test_eps_reboot_detected_on_eps_uptime_drop() -> None:
     assert row["estimated_event_at"] == _at(85)
     assert row["time_since_event_when_detected_ms"] == 5_000
     assert row["eps_reboot_reason"] == "BROWNOUT"
-    assert row["eps_reset_count"] == 3
 
 
 def test_uplink_detected_on_duration_since_last_uplink_drop() -> None:
