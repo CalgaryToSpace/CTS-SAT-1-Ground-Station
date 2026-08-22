@@ -13,7 +13,7 @@ __all__ = ["build_pipeline_status_page"]
 
 import json
 from datetime import UTC, datetime, timedelta
-from pathlib import Path  # noqa: TC003 -- tyro needs this at runtime elsewhere
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from nicegui import ui
@@ -25,6 +25,21 @@ if TYPE_CHECKING:
     import polars as pl
 
 REFRESH_INTERVAL_SEC = 30.0
+
+
+def _read_build_info_file(path: str) -> str:
+    """The contents of a build-info file baked in at image build time (see
+    Dockerfile.web) -- "unknown" if missing, e.g. a plain
+    `uv run cts1_data_web_ui` outside Docker.
+    """
+    try:
+        return Path(path).read_text().strip()
+    except OSError:
+        return "unknown"
+
+
+GIT_COMMIT = _read_build_info_file("/etc/project_git_commit")
+BUILD_DATE = _read_build_info_file("/etc/project_build_date")
 
 # Past these ages, a freshness timestamp is flagged yellow/red -- SatNOGS
 # overpasses aren't constant, so a short gap is normal, but the pipeline
@@ -329,7 +344,11 @@ def build_pipeline_status_page(data_dir: Path) -> None:
 
     with page_shell():
         with ui.row().classes("w-full items-center justify-between"):
-            ui.label("Pipeline Status").classes("text-2xl font-bold")
+            with ui.column().classes("gap-0"):
+                ui.label("Pipeline Status").classes("text-2xl font-bold")
+                ui.label(f"Build {GIT_COMMIT} · {BUILD_DATE}").classes(
+                    "text-caption text-grey"
+                )
             ui.button("Refresh", icon="refresh", on_click=content.refresh)
         content()
 

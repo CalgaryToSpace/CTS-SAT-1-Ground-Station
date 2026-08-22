@@ -12,8 +12,6 @@ docker compose up --build -d
 docker compose logs -f daemon
 ```
 
-Web UI: `http://<host>:8089` -- check the **Pipeline Status** page for freshness.
-
 ## HTTPS + per-IP rate limiting (nginx)
 
 `docker-compose.yml` fronts the `web` service with an `nginx` container that

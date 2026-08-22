@@ -31,6 +31,10 @@ COPY . .
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --package cts1_mo_tools
 
+# Bake the build date and git commit into the image.
+RUN date -u +%Y-%m-%dT%H:%M:%SZ > /etc/project_build_date
+RUN git rev-parse --short HEAD > /etc/project_git_commit
+
 VOLUME ["/opt/cts1_processing_pipeline"]
 EXPOSE 8089
 
