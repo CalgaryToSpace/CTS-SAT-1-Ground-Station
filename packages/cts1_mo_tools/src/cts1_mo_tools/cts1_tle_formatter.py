@@ -61,16 +61,16 @@ def fetch_tle() -> str | None:
             tle_data = response.text.strip()
 
             if "No GP data found" in tle_data or not tle_data:
-                print("Error: No orbital data found for FrontierSat.") # noqa: T201
+                print("Error: No orbital data found for FrontierSat.")  # noqa: T201
                 return None
 
             return tle_data
 
-        print(f"Failed to fetch data. HTTP Status Code: {response.status_code}") # noqa: T201
-        return None # noqa: TRY300
+        print(f"Failed to fetch data. HTTP Status Code: {response.status_code}")  # noqa: T201
+        return None  # noqa: TRY300
 
     except requests.exceptions.RequestException as e:
-        print(f"An error occurred while connecting to CelesTrak: {e}") # noqa: T201
+        print(f"An error occurred while connecting to CelesTrak: {e}")  # noqa: T201
         return None
 
 
@@ -146,13 +146,14 @@ def main() -> None:
     if tle_text is None:
         return
 
-    print("\n--- TLE RETURNED FROM CELESTRAK ---") # noqa: T201
-    print(tle_text) # noqa: T201
+    print("\n--- TLE RETURNED FROM CELESTRAK ---")  # noqa: T201
+    print(tle_text)  # noqa: T201
 
     telecommand = convert_to_telecommand(tle_text)
 
-    print("\n--- FINAL FORMATTED TELECOMMAND ---") # noqa: T201
-    print(f"{telecommand}\n") # noqa: T201
+    print("\n--- FINAL FORMATTED TELECOMMAND ---")  # noqa: T201
+    print(f"{telecommand}\n")  # noqa: T201
+
 
 if __name__ == "__main__":
     main()
