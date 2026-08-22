@@ -45,7 +45,7 @@ ignore = [
     "ANN401", # Allow typing.Any
 ]
 
-[tool.ruff.per-file-ignores]
+[tool.ruff.lint.per-file-ignores]
 "**/tests/**" = [
     "PLR2004", # Magic value used in comparison
 ]
