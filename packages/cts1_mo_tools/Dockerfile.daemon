@@ -16,8 +16,6 @@ RUN cargo install --locked \
 # ----- Final image ----
 FROM python:3.13-slim-bookworm
 
-COPY --from=askew-build /usr/local/cargo/bin/askew_demod_from_file /usr/local/bin/
-
 RUN apt-get update && apt-get install -y --no-install-recommends \
         sox \
         libssl3 \
@@ -63,6 +61,9 @@ RUN cmake .. -DWITH_USRP_B210=OFF
 RUN make -j8 rx_replay
 RUN cp rx_replay /usr/local/bin/sso_rx_replay
 RUN ldconfig
+
+# ---- Copy in built askew-radio-tools ----
+COPY --from=askew-build /usr/local/cargo/bin/askew_demod_from_file /usr/local/bin/
 
 # ----- Validate tool installs -----
 RUN askew_demod_from_file --version
