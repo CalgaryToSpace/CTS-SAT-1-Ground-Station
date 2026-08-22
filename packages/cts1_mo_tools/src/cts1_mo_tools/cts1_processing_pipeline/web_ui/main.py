@@ -50,8 +50,11 @@ STORAGE_SECRET = os.environ.get(
 
 # NiceGUI's own internal traffic -- Socket.IO polling/handshakes and static
 # asset fetches -- lives under these prefixes; at uvicorn's "info" level it
-# floods the access log with lines that aren't real page hits.
-_NOISY_ACCESS_LOG_PREFIXES = ("/_nicegui_ws/", "/_nicegui/")
+# floods the access log with lines that aren't real page hits. "/socket.io/"
+# (root-mounted) covers older NiceGUI versions; current ones mount it under
+# "/_nicegui_ws/" instead -- kept both so this doesn't silently stop working
+# across a NiceGUI version bump either way.
+_NOISY_ACCESS_LOG_PREFIXES = ("/_nicegui_ws/", "/_nicegui/", "/socket.io/")
 
 
 class _AccessLogNoiseFilter(logging.Filter):

@@ -10,6 +10,16 @@
 # See DEPLOY.md for how this is meant to be run alongside Dockerfile.daemon,
 # sharing `CTS1_DATA_DIR` as a bind mount.
 
+# ---- git-commit stage (only stage with git installed, discarded after) ----
+FROM python:3.13-slim AS gitinfo
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /repo
+# Just the git metadata -- git rev-parse needs no working-tree files.
+COPY .git .git
+RUN git rev-parse --short HEAD > /project_git_commit
+
+# ----- Final image ----
 FROM python:3.13-slim
 
 COPY --from=ghcr.io/astral-sh/uv:0.12 /uv /uvx /bin/
@@ -31,9 +41,11 @@ COPY . .
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --package cts1_mo_tools
 
-# Bake the build date and git commit into the image.
+# Bake the build date and git commit into the image -- the commit comes
+# from the `gitinfo` stage above so the final image itself never needs git
+# installed.
 RUN date -u +%Y-%m-%dT%H:%M:%SZ > /etc/project_build_date
-RUN git rev-parse --short HEAD > /etc/project_git_commit
+COPY --from=gitinfo /project_git_commit /etc/project_git_commit
 
 VOLUME ["/opt/cts1_processing_pipeline"]
 EXPOSE 8089
