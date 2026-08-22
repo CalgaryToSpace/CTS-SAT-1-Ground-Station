@@ -1,15 +1,18 @@
-import requests
 from dataclasses import dataclass
 from decimal import Decimal
 
+import requests
+
 """
-Script to fetch FrontierSat TLE from CelesTrak, and format it into the CTS1+adcs_set_sgp4_orbit_params telecommand.
+Script to fetch FrontierSat TLE from CelesTrak, and format it into the
+CTS1+adcs_set_sgp4_orbit_params telecommand.
 
 To run from this file:
 1) Click the play button on the top right to run the python file
 
 To run from CLI:
-1) In the terminal, navigate to the .../CTS-SAT-1-Ground-Station/packages/cts1_mo_tools/src/cts1_mo_tools folder
+1) In the terminal, navigate to the
+.../CTS-SAT-1-Ground-Station/packages/cts1_mo_tools/src/cts1_mo_tools folder
 2) Run 'python cts1_tle_formatter.py'
 
 Debugging:
@@ -46,22 +49,28 @@ def fetch_tle() -> str | None:
     }
 
     try:
-        response = requests.get(url, params=params)
+        response = requests.get(
+            url,
+            params=params,
+            timeout=10,
+        )
 
-        if response.status_code == 200:
+        success_status_code = 200
+
+        if response.status_code == success_status_code:
             tle_data = response.text.strip()
 
             if "No GP data found" in tle_data or not tle_data:
-                print("Error: No orbital data found for FrontierSat.")
+                print("Error: No orbital data found for FrontierSat.") # noqa: T201
                 return None
 
             return tle_data
 
-        print(f"Failed to fetch data. HTTP Status Code: {response.status_code}")
-        return None
+        print(f"Failed to fetch data. HTTP Status Code: {response.status_code}") # noqa: T201
+        return None # noqa: TRY300
 
     except requests.exceptions.RequestException as e:
-        print(f"An error occurred while connecting to CelesTrak: {e}")
+        print(f"An error occurred while connecting to CelesTrak: {e}") # noqa: T201
         return None
 
 
@@ -78,8 +87,11 @@ def parse_tle(text: str) -> TLE:
 
     lines = text.strip().splitlines()
 
-    if len(lines) != 3:
-        raise ValueError("Expected a 3-line TLE")
+    expected_num_lines = 3
+
+    if len(lines) != expected_num_lines:
+        error_message = "Expected a 3-line TLE"
+        raise ValueError(error_message)
 
     return TLE(
         name=lines[0],
@@ -128,21 +140,19 @@ def format_telecommand(params: TelecommandParams) -> str:
     )
 
 
-def main():
+def main() -> None:
     tle_text = fetch_tle()
 
     if tle_text is None:
         return
 
-    print("\n--- TLE RETURNED FROM CELESTRAK ---")
-    print(tle_text)
+    print("\n--- TLE RETURNED FROM CELESTRAK ---") # noqa: T201
+    print(tle_text) # noqa: T201
 
     telecommand = convert_to_telecommand(tle_text)
 
-    print("\n--- FINAL FORMATTED TELECOMMAND ---")
-    print(telecommand)
-    print()
-
+    print("\n--- FINAL FORMATTED TELECOMMAND ---") # noqa: T201
+    print(f"{telecommand}\n") # noqa: T201
 
 if __name__ == "__main__":
     main()

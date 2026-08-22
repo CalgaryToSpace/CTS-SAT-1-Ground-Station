@@ -1,12 +1,12 @@
+from unittest.mock import Mock, patch
+
 import pytest
-from unittest.mock import patch, Mock
 from cts1_mo_tools.cts1_tle_formatter import (
+    TLE,
+    extract_orbit_parameters,
     fetch_tle,
     parse_tle,
-    extract_orbit_parameters,
-    TLE,
 )
-
 
 # ---------------------------------------------------------------------
 # fetch_tle() tests
@@ -15,7 +15,7 @@ from cts1_mo_tools.cts1_tle_formatter import (
 
 
 @patch("cts1_mo_tools.cts1_tle_formatter.requests.get")
-def test_fetch_tle_no_data(mock_get: Mock):
+def test_fetch_tle_no_data(mock_get: Mock) -> None:
     mock_response = Mock()
     mock_response.status_code = 200
     mock_response.text = "No GP data found"
@@ -29,7 +29,7 @@ def test_fetch_tle_no_data(mock_get: Mock):
 
 
 @patch("cts1_mo_tools.cts1_tle_formatter.requests.get")
-def test_fetch_tle_empty_response(mock_get: Mock):
+def test_fetch_tle_empty_response(mock_get: Mock) -> None:
     mock_response = Mock()
     mock_response.status_code = 200
     mock_response.text = ""
@@ -43,7 +43,7 @@ def test_fetch_tle_empty_response(mock_get: Mock):
 
 
 @patch("cts1_mo_tools.cts1_tle_formatter.requests.get")
-def test_fetch_tle_http_error(mock_get: Mock):
+def test_fetch_tle_http_error(mock_get: Mock) -> None:
     mock_response = Mock()
     mock_response.status_code = 404
 
@@ -87,7 +87,7 @@ def test_extract_orbit_parameters_converts_eccentricity() -> None:
 
 
 @pytest.mark.parametrize(
-    "drag_value, expected",
+    ("drag_value", "expected"),
     [
         ("36581-5", "0.0000036581"),
         ("36581-6", "3.6581E-7"),
