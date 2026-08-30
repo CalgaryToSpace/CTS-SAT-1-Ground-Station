@@ -28,6 +28,24 @@ CTS1+adcs_set_sgp4_orbit_params(97.3985,0.0007979,80.8620,5.6312,0.0004583,15.21
     assert convert_to_telecommand(input_tle) == expected_output
 
 
+def test_full_decode_and_convert_case_2() -> None:
+    """Full test from TLE to telecommand.
+
+    This is the main proof that this tool works.
+    """
+    input_tle = """
+FRONTIERSAT
+1 69015U 26100AM  26241.68356825  .00009154  00000-0  39482-3 0  9996
+2 69015  97.3894 138.3421 0009241 135.1447 225.0538 15.22729231 18004
+""".strip()
+
+    expected_output = """
+CTS1+adcs_set_sgp4_orbit_params(97.3894,0.0009241,138.3421,135.1447,0.00039482,15.22729231,225.0538,26241.68356825)!
+""".strip()
+
+    assert convert_to_telecommand(input_tle) == expected_output
+
+
 # ---------------------------------------------------------------------
 # fetch_tle() tests
 # ---------------------------------------------------------------------
