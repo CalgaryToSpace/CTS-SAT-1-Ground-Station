@@ -3,10 +3,30 @@ from unittest.mock import Mock, patch
 import pytest
 from cts1_mo_tools.cts1_tle_formatter import (
     TLE,
+    convert_to_telecommand,
     extract_orbit_parameters,
     fetch_tle,
     parse_tle,
 )
+
+
+def test_full_decode_and_convert_case_1() -> None:
+    """Full test from TLE to telecommand.
+
+    This is the main proof that this tool works.
+    """
+    input_tle = """
+FRONTIERSAT
+1 69015U 26100AM  26183.24927377  .00010390  00000+0  45830-3 0  9996
+2 69015  97.3985  80.8620 0007979   5.6312 354.5013 15.21937754  9113
+""".strip()
+
+    expected_output = """
+CTS1+adcs_set_sgp4_orbit_params(97.3985,0.0007979,80.8620,5.6312,0.0004583,15.21937754,354.5013,26183.24927377)!
+""".strip()
+
+    assert convert_to_telecommand(input_tle) == expected_output
+
 
 # ---------------------------------------------------------------------
 # fetch_tle() tests
