@@ -22,10 +22,8 @@ Requirements:
 # Open File
 def extract_data_from_file(input_file_path: Path) -> str:
     """ Reads data from binary file, and converts to hex string
-    then splits the string every 2 characters
 
     Args:
-        packet_type: The number of packets to extract <- I think that this is irrelevant????
         input_file_path: The Path to the input file
     Returns: 
         A list of bytes in hexadecimal separated in pairs
@@ -63,10 +61,14 @@ def extract_data_from_file(input_file_path: Path) -> str:
                 # packets_to_hex_string.join(hex_string)
                 
                 
-                # Append the converted hex string to a list of strings containing MPI data
+                # Append the converted hex string to a LIST of strings containing MPI data
                 packets_to_hex_string.append(hex_string)
 
             # Convert the "packets_to_hex_string" list to a single string 
+            # This step is done because we need the MPI data all together 
+            # to divide into its telemetry frames (see function: 'search_packet' for more details)
+            # Each telemetry frame starts with the code '0CFFFF0C'
+            # As far as solutions goes, this is the best that I can think of, maybe there will be something better later to devise :)
             single_string_of_packets = ''.join(packets_to_hex_string)
             
     # Return the single string hexadecimal data
@@ -80,6 +82,10 @@ def search_packet(packet:str) -> list[str]:
 
     If a data frame is found, the information is added to a data frame array for processing
 
+    OCFFFFOC indicates the start of an MPI data frame.
+    Please see Table 2 BYTE 0 - BYTE 3 in the MPI ICD for more information.
+
+
     Args: 
         packet: The string of the packet received from MPI data downlink
     Returns: 
@@ -92,13 +98,23 @@ def search_packet(packet:str) -> list[str]:
     # '0cffff0c' will be at the front of each split telemetry frame
     data_frame_search = re.split(r'(?=0cffff0c)', packet)
 
-    # 
+    # 'data_frame_search' is a list of strings
+    # If corerct, each index in 'data_frame_search' will start with '0cffff0c'
     return data_frame_search
 
 def hex_string_to_2n(data_n_frame: str) ->list[str]:
     """
     Takes a string and divides every two characters;
     Allows for indentifying 1 byte of data in the MPI data frame
+
+    Each hex pair read from the converted binary file of MPI data corresponds
+    to a byte of information.
+    
+    See Table 2 in the MPI ICD for reference
+    
+    Args:
+
+
 
     """
     data_2n_frame: list[str] = []
@@ -178,26 +194,26 @@ def mpi_response_code(response_code: str) ->None:
         
 def id_bytes_in_data_frame(data_frame: list[str]) ->list[dict]:
 
-    """ Add each data frame to a resulting DICTIONARY???
+    """
+    Step 1: Takes in a frame of MPI telemetry. 
+            The data will be in string format. 
+
+    Step 2: Takes the entire string of MPI telemtry data and divides the string into bytes.
+    This means there will be a pair of hexadecimal digits. The result will be saved in a list of strings.
+
+
+    Add each data frame to a resulting DICTIONARY???
     """
     #TODO: Test if data does calculations directly in hex or needs to be converted into decimal
     # Regex split data into 2s
     
-
-
-    mpi_data_frame: list[str] = []
-    index = 0 
-    for hex_val in data_frame:
-        mpi_data_frame.append(hex_val) 
        
-        
-    
+    # Create pairs of hexadecimal data to create a LIST OF BYTES ('mpi_data_frame')
     mpi_data_frame = hex_string_to_2n(data_frame)
-    # print(mpi_data_frame)
+    
     # Convert each string to hex prior to processing (make function)
     mpi_dict_list: list[dict] = []
     byte_arr: list[str]
-    pixel_array: list[int] # Size of the array will be determined by Byte 17 - Byte 16
 
     # print(f'length of MPI DATA FRAME {len(mpi_data_frame)}')
     # Create Dictionary 
@@ -210,116 +226,131 @@ def id_bytes_in_data_frame(data_frame: list[str]) ->list[dict]:
             'Integration Period'
             ]
     '''
-    
-
-    # Byte 0 - Sync Byte
-    mpi_dictionary.update({"Sync Byte 1": mpi_data_frame[0]})
-    # Byte 1 - Sync Byte
-    mpi_dictionary.update({"Sync Byte 2": mpi_data_frame[1]})
-    # Byte 2 - Sync Byte
-    mpi_dictionary.update({"Sync Byte 3": mpi_data_frame[2]})
-    # Byte 3 - Sync Byte
-    mpi_dictionary.update({"Sync Byte 4": mpi_data_frame[3]})
+    # Byte 0 & 1 & 2 & 3 - Sync Byte
+    byte_0 = mpi_data_frame[0]
+    byte_1 = mpi_data_frame[1]
+    byte_2 = mpi_data_frame[2]
+    byte_3 = mpi_data_frame[3]
 
     # Byte 4 & 5 - Frame Counter
     byte_4 = int(mpi_data_frame[4], 16) # Convert byte 4 hexadecimal string to decimal type 'int'
     byte_5 = int(mpi_data_frame[5], 16) # Convert byte 5 hexadecimal string to decimal type 'int'
     counter = (byte_4*256) + byte_5
-    print(byte_4)
-    print(byte_5)
-
-    # Update MPI Data Frame Dictionary with Frame Number Element
-    mpi_dictionary.update({"Frame Number": counter})
+   
 
     # Byte 6  & 7 - Board Temperature
     byte_6 = int(mpi_data_frame[6], 16)
     byte_7 = int(mpi_data_frame[7], 16)
-
     temperature = ((byte_6)*256 + byte_7) / 128.0
-
-    # Update MPI Data Frame Dictionary with Board Temperature Element
-    mpi_dictionary.update({"Board Temperature": temperature})
 
     # Byte 8 - Firmware version
     byte_8 = int(mpi_data_frame[8], 16)
-    mpi_dictionary.update({"Firmware Version": byte_8})
 
     # Byte 9 & 10 - Detector Status
     byte_9 = int(mpi_data_frame[9], 16)
     byte_10 = int(mpi_data_frame[10], 16)
-
     detector_status = byte_9*256 + byte_10
 
-    mpi_dictionary.update({"Detector Status": detector_status})
-    
-    
     # Byte 11 & 12 - Inner Dome Voltage Setting
     byte_11 = int(mpi_data_frame[11], 16)
     byte_12 = int(mpi_data_frame[12], 16)
-
-    # Set inner dome scan
-    inner_dome_v_setting = byte_11 * 256 + byte_12
-
-    mpi_dictionary.update({"Inner Dome Voltage Setting": inner_dome_v_setting})
-    
+    inner_dome_v_setting = byte_11 * 256 + byte_12 # Set inner dome scan
 
     # Byte 13 - Inner Dome Scan Index
     byte_13 = int(mpi_data_frame[13], 16)
-
     inner_dome_scan_index = byte_13
-    mpi_dictionary.update({"Inner Dome Scan Index": inner_dome_scan_index})
-
+   
     # Byte 14 & 15 - Inner Dome Voltage ADC Reading
     byte_14 = int(mpi_data_frame[14], 16)
     byte_15 = int(mpi_data_frame[15], 16)
-
-    
     eu = byte_14*256 + byte_15
     # v_id = (float)(eu & ('0x3ff'))*0.105361 - 101.808
 
-    # mpi_dictionary.update({"Inner Dome Voltage ADC Reading": v_id})
-
     # Byte 16 (Defines FIRST pixel index)
     byte_16 = int(mpi_data_frame[16], 16)
+
     # Byte 17 (Defines LAST pixel index)
     byte_17 = int(mpi_data_frame[17], 16)
     
-    mpi_dictionary.update({"First Pixel Index": byte_16})
-    mpi_dictionary.update({"Last Pixel Index": byte_17})
 
-    # Determine Length of Pixel Data
-    pixel_len = byte_17 - byte_16
+    
 
     # Byte 18 & 19 - Integration Period
-
     byte_18 = int(mpi_data_frame[18], 16)
     byte_19 = int(mpi_data_frame[19], 16)
 
     integration_period_set = byte_18*256 + byte_19
 
-    mpi_dictionary.update({"Integration Period": integration_period_set})
+    # Determine Length of Pixel Data
+    n = byte_17 - byte_16 + 1 # See 'Note' for 'Pixel Data' in Table 2  in MPI ICD
+    pixel_array: list[int] = [] # Size of the array will be determined by Byte 17 - Byte 16
 
+    f = 20 + 2*n + 2 # See Section 2.2.2 'Data Packet Definition' in MPI ICD
+    print(f'mpi data frame length {len(mpi_data_frame)}')
+    print(f'number of bytes in frame {f}')
+    print(f'number of pixels {n}')
+    for pixel in range(20, n, 2):
+        print(f'pixel length {pixel}')
+        if pixel >= n:
+            break
+        else:
+            pixel_data = int(mpi_data_frame[pixel], 16) + int(mpi_data_frame[pixel + 1], 16)
+            pixel_array.append(pixel_data)
+            pixel += 2
 
     # Byte 20 & 21 - First Pixel Index
-
     byte_20 = int(mpi_data_frame[20], 16)
     byte_21 = int(mpi_data_frame[21], 16)
 
     #TODO: Create a function that determines the value of the pixel
     # for loop
     # update pixel array with values
-   
-
     first_pixel = byte_20 + byte_21
-
-
     # Byte 22 & 23 - Second Pixel Index
     # ...
+    
+    # Determine the number of bytes in the frame
+    # f = 20 + 2*n + 2 # See Section 2.2.2 'Data Packet Definition' in MPI ICD
     # CRC Bytes
-    crc_byte_1 = 0 # mpi_data_frame[pixel_len - 2]
-    crc_byte_2 = 0 # mpi_data_frame[pixel_len - 1]
+    crc_byte_1 = int(mpi_data_frame[f-2], 16) # mpi_data_frame[pixel_len - 2]
+    crc_byte_2 = int(mpi_data_frame[f-1], 16) # mpi_data_frame[pixel_len - 1]
 
     crc_check = crc_byte_1 + crc_byte_2
+
+
+
+
+
+    # Byte 0 - Sync Byte
+    mpi_dictionary.update({"Sync Byte 0": byte_0})
+    # Byte 1 - Sync Byte
+    mpi_dictionary.update({"Sync Byte 1": byte_1})
+    # Byte 2 - Sync Byte
+    mpi_dictionary.update({"Sync Byte 2": byte_2})
+    # Byte 3 - Sync Byte
+    mpi_dictionary.update({"Sync Byte 3": byte_3})
+    # Byte 4 & 5 - Frame Counter
+    mpi_dictionary.update({"Frame Number": counter})
+    # Byte 6 & 7 - Board Temperature
+    mpi_dictionary.update({"Board Temperature": temperature})
+    # Byte 8 - Firmware Version
+    mpi_dictionary.update({"Firmware Version": byte_8})
+    # Byte 9 & 10 - Detector Status
+    mpi_dictionary.update({"Detector Status": detector_status})
+    # Byte 11 & 12 - Inner Voltage Status
+    mpi_dictionary.update({"Inner Dome Voltage Setting": inner_dome_v_setting})
+    # Byte 13 - Inner Dome Scan Index
+    mpi_dictionary.update({"Inner Dome Scan Index": inner_dome_scan_index})
+    # Byte 14 & 15 - Inner Dome Voltage ADC Reading
+    # mpi_dictionary.update({"Inner Dome Voltage ADC Reading": v_id})
+    # Byte 16 - First Pixel Index
+    mpi_dictionary.update({"First Pixel Index": byte_16})
+    # Byte 17 - Last Pixel Index
+    mpi_dictionary.update({"Last Pixel Index": byte_17})
+    # Byte 18 & 19 - Integration Period
+    mpi_dictionary.update({"Integration Period": integration_period_set})
+
+        
     
     mpi_dictionary.update({"CRC Check": crc_check})
 
@@ -384,6 +415,7 @@ def main() -> None:
     # END of DEBUGGING
 
     # Search each line of the packet for MPI Data Frames
+    # Each data frame will start with 0cffff0
     list_of_frames = search_packet(packets_in_hex_string)
 
     # FOR DEBUGGING: Print out the Data Frames
@@ -397,8 +429,8 @@ def main() -> None:
     # END of DEBUGGING
 
     # Parse through each index of LIST_OF_FRAMES and decode each byte to human readable format
-
     frames: list[dict] = []
+
     # Retrieve length of the entire LIST_OF_FRAMES
     length_of_frame_list = len(list_of_frames)
 
@@ -410,6 +442,7 @@ def main() -> None:
         if frame == 0:
             print(f'Data Length {len(list_of_frames[frame])}')
             print(list_of_frames[frame])
+
             # Identify the MPI response code
             mpi_response_code(list_of_frames[frame])
 
@@ -505,3 +538,10 @@ if __name__ == "__main__":
             
         # print(data_frames)
 ###
+
+
+
+# mpi_data_frame: list[str] = []
+# index = 0 
+# for data in data_frame:
+#     mpi_data_frame.append(data) 
