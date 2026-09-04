@@ -94,6 +94,25 @@ def parse_interval(text: str | None) -> timedelta | None:
     raise ValueError(msg)
 
 
+def parse_repeat_random(value: str | None) -> int:
+    msg = "Invalid repeat and/or random value"
+
+    if value is None or value.strip() == "":  # Checks blank or None values
+        raise ValueError(msg)
+
+    try:
+        number = float(value.strip())
+    except ValueError:
+        raise ValueError(msg)
+
+    if (
+        not number.is_integer() or number < 0
+    ):  # Checks if values are integers and non-negative
+        raise ValueError(msg)
+
+    return int(number)
+
+
 def to_int(value: str | None, default: int = 0) -> int:
     text = "" if value is None else str(value).strip()
 
@@ -375,8 +394,8 @@ def build_agenda(
         )
 
         if mode == "single":
-            repeat = to_int(row["Repeat"])
-            random_repeat = to_int(row["Random"])
+            repeat = parse_repeat_random(row["Repeat"])
+            random_repeat = parse_repeat_random(row["Random"])
             entries, random_entries = _build_single_entries(ctx, repeat, random_repeat)
             agenda.extend(entries)
             random_commands.extend(random_entries)
