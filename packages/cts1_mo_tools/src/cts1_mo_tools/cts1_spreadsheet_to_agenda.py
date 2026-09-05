@@ -101,8 +101,9 @@ def parse_interval(text: str | None) -> timedelta | None:
 def parse_repeat_random(value: str | None, cmd: str) -> int:
     # Empty value check
     if value is None or value.strip() == "":
-        logger.warning("Empty repeat or random value for command %s. Default: 0.",
-                       {cmd})
+        logger.warning(
+            "Empty repeat or random value for command %s. Default: 0.", {cmd}
+        )
 
     # Negative value check
     elif float(value.strip()) < 0:
@@ -113,8 +114,7 @@ def parse_repeat_random(value: str | None, cmd: str) -> int:
     # Non-integer value check
     elif not float(value.strip()).is_integer():
         logger.warning(
-            "Non-integer repeat or random value for command %s was truncated.",
-            {cmd}
+            "Non-integer repeat or random value for command %s was truncated.", {cmd}
         )
 
     return to_int(value)
@@ -411,8 +411,9 @@ def build_agenda(
             agenda.extend(_build_interval_entries(ctx))
             if (row["Repeat"].strip() != "") or (row["Random"].strip() != ""):
                 logger.warning(
-                "Repeat and random values are ignored for interval mode for command %s."
-                ,{cmd})
+                    "Repeat and random values are ignored for interval mode for command %s.",
+                    {cmd},
+                )
         else:
             msg = "Invalid Mode (Options: Single or Interval)"
             raise ValueError(msg)
