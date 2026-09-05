@@ -97,6 +97,7 @@ def parse_interval(text: str | None) -> timedelta | None:
     msg = f"Unknown interval format: {text}"
     raise ValueError(msg)
 
+
 def parse_repeat_random(value: str | None, cmd: str) -> int:
     # Empty value check
     if value is None or value.strip() == "":
@@ -104,13 +105,18 @@ def parse_repeat_random(value: str | None, cmd: str) -> int:
 
     # Negative value check
     elif float(value.strip()) < 0:
-        logger.warning(f"Negative repeat or random value for command {cmd}. Default: 0.")
+        logger.warning(
+            f"Negative repeat or random value for command {cmd}. Default: 0."
+        )
 
     # Non-integer value check
     elif not float(value.strip()).is_integer():
-        logger.warning(f"Non-integer repeat or random value for command {cmd} was truncated.")
+        logger.warning(
+            f"Non-integer repeat or random value for command {cmd} was truncated."
+        )
 
     return to_int(value)
+
 
 def to_int(value: str | None, default: int = 0) -> int:
     text = "" if value is None else str(value).strip()
