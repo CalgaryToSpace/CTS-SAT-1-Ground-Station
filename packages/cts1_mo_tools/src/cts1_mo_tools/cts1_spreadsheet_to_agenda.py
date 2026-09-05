@@ -1,5 +1,6 @@
 import contextlib
 import csv
+import logging
 import random
 import re
 from dataclasses import dataclass
@@ -10,8 +11,6 @@ from typing import Any
 import openpyxl
 import polars as pl
 import tyro
-
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -411,7 +410,8 @@ def build_agenda(
             agenda.extend(_build_interval_entries(ctx))
             if (row["Repeat"].strip() != "") or (row["Random"].strip() != ""):
                 logger.warning(
-                    "Repeat and random values are ignored for interval mode for command %s.",
+                    "Repeat and random values are ignored for interval mode for "
+                    "command %s.",
                     {cmd},
                 )
         else:
