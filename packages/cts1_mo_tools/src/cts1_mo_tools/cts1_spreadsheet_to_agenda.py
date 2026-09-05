@@ -1,5 +1,6 @@
 import contextlib
 import csv
+import logging
 import random
 import re
 from dataclasses import dataclass
@@ -10,6 +11,8 @@ from typing import Any
 import openpyxl
 import polars as pl
 import tyro
+
+logger = logging.getLogger(__name__)
 
 DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 
@@ -92,6 +95,28 @@ def parse_interval(text: str | None) -> timedelta | None:
 
     msg = f"Unknown interval format: {text}"
     raise ValueError(msg)
+
+
+def parse_repeat_random(value: str | None, cmd: str) -> int:
+    # Empty value check
+    if value is None or value.strip() == "":
+        logger.warning(
+            "Empty repeat or random value for command %s. Default: 0.", {cmd}
+        )
+
+    # Negative value check
+    elif float(value.strip()) < 0:
+        logger.warning(
+            "Negative repeat or random value for command %s. Default: 0.", {cmd}
+        )
+
+    # Non-integer value check
+    elif not float(value.strip()).is_integer():
+        logger.warning(
+            "Non-integer repeat or random value for command %s was truncated.", {cmd}
+        )
+
+    return to_int(value)
 
 
 def to_int(value: str | None, default: int = 0) -> int:
@@ -375,15 +400,20 @@ def build_agenda(
         )
 
         if mode == "single":
-            repeat = to_int(row["Repeat"])
-            random_repeat = to_int(row["Random"])
+            repeat = parse_repeat_random(row["Repeat"], cmd)
+            random_repeat = parse_repeat_random(row["Random"], cmd)
             entries, random_entries = _build_single_entries(ctx, repeat, random_repeat)
             agenda.extend(entries)
             random_commands.extend(random_entries)
 
         elif mode == "interval":
             agenda.extend(_build_interval_entries(ctx))
-
+            if (row["Repeat"].strip() != "") or (row["Random"].strip() != ""):
+                logger.warning(
+                    "Repeat and random values are ignored for interval mode for "
+                    "command %s.",
+                    {cmd},
+                )
         else:
             msg = "Invalid Mode (Options: Single or Interval)"
             raise ValueError(msg)
