@@ -5,9 +5,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import tyro
 from loguru import logger
-from scipy.optimize import least_squares
-from sgp4.api import WGS72, Satrec
-from sgp4.exporter import export_tle
+from scipy.optimize import least_squares  # type: ignore  # noqa: PGH003
+from sgp4.api import WGS72, Satrec  # type: ignore  # noqa: PGH003
+from sgp4.exporter import export_tle  # type: ignore  # noqa: PGH003
 
 MU = 398600.8  # Gravity constant
 EARTH_SPIN = 7.292115e-5
@@ -102,7 +102,7 @@ def rv2coe(
 
     mean_motion = np.sqrt(MU / sma**3) * 60
 
-    return incl, raan, ecc, argp, mean_anom, mean_motion
+    return incl, raan, ecc, argp, mean_anom, mean_motion  # type: ignore  # noqa: PGH003
 
 
 # TLE Fit
@@ -132,7 +132,7 @@ def fit_tle(
     def residuals(params: np.ndarray) -> list[float]:
         incl, raan, ecc, argp, mean_anom, mean_motion = params
         sat = Satrec()
-        sat.sgp4init(
+        sat.sgp4init(  # type: ignore  # noqa: PGH003
             WGS72,
             "i",
             sat_num,
@@ -150,15 +150,15 @@ def fit_tle(
         errors = []
         for j, p_true, v_true in zip(jds, r_teme, v_teme, strict=True):
             jd_int = np.floor(j)
-            _, p_pred, v_pred = sat.sgp4(jd_int, j - jd_int)
-            errors += list(np.array(p_pred) - p_true) + list(np.array(v_pred) - v_true)
-        return errors
+            _, p_pred, v_pred = sat.sgp4(jd_int, j - jd_int)  # type: ignore  # noqa: PGH003
+            errors += list(np.array(p_pred) - p_true) + list(np.array(v_pred) - v_true)  # type: ignore  # noqa: PGH003
+        return errors  # type: ignore  # noqa: PGH003
 
-    fitted = least_squares(residuals, guess, method="lm").x
+    fitted = least_squares(residuals, guess, method="lm").x  # type: ignore  # noqa: PGH003
 
-    incl, raan, ecc, argp, mean_anom, mean_motion = fitted
+    incl, raan, ecc, argp, mean_anom, mean_motion = fitted  # type: ignore  # noqa: PGH003
     sat = Satrec()
-    sat.sgp4init(
+    sat.sgp4init(  # type: ignore  # noqa: PGH003
         WGS72,
         "i",
         sat_num,
@@ -243,22 +243,22 @@ def convert_gnss_to_tle(gnss_file: Path, *, sat_num: int = 99999) -> None:
 
     # Plotting
     altitude = [np.linalg.norm(p) - 6378 for p in positions]  # above mean Earth radius
-    plt.plot(times, altitude)
-    plt.ylabel("altitude (km)")
-    plt.xticks(rotation=45)
-    plt.show()
+    plt.plot(times, altitude)  # type: ignore  # noqa: PGH003
+    plt.ylabel("altitude (km)")  # type: ignore  # noqa: PGH003
+    plt.xticks(rotation=45)  # type: ignore  # noqa: PGH003
+    plt.show()  # type: ignore  # noqa: PGH003
 
-    fig = plt.figure()
+    fig = plt.figure()  # type: ignore  # noqa: PGH003
     ax = fig.add_subplot(projection="3d")
-    ax.plot(
+    ax.plot(  # type: ignore  # noqa: PGH003
         [p[0] for p in positions], [p[1] for p in positions], [p[2] for p in positions]
     )  # 3D orbit shape
-    plt.show()
+    plt.show()  # type: ignore  # noqa: PGH003
 
     # Optional Mapping
-    import cartopy.crs as ccrs  # noqa: PLC0415
-    import cartopy.feature as cfeature  # noqa: PLC0415
-    from pyproj import Transformer  # noqa: PLC0415
+    import cartopy.crs as ccrs  # type: ignore # noqa: PGH003, PLC0415
+    import cartopy.feature as cfeature  # type: ignore # noqa: PGH003, PLC0415
+    from pyproj import Transformer  # type: ignore  # noqa: PGH003, PLC0415
 
     to_latlon = Transformer.from_crs("EPSG:4978", "EPSG:4979", always_xy=True)
     x = [p[0] * 1000 for p in positions]
@@ -278,15 +278,15 @@ def convert_gnss_to_tle(gnss_file: Path, *, sat_num: int = 99999) -> None:
     lon = np.insert(lon, break_points, np.nan)
     lat = np.insert(lat, break_points, np.nan)
 
-    plt.figure(figsize=(16, 8))
-    ax = plt.axes(projection=ccrs.PlateCarree())
-    ax.set_global()
-    ax.stock_img()
-    ax.coastlines(resolution="50m", linewidth=0.8)
-    ax.add_feature(cfeature.BORDERS, linewidth=0.3, linestyle=":")
-    ax.gridlines(draw_labels=True, linewidth=0.3, color="gray", alpha=0.5)
-    ax.plot(lon, lat, transform=ccrs.PlateCarree(), color="red", linewidth=2)
-    plt.show()
+    plt.figure(figsize=(16, 8))  # type: ignore  # noqa: PGH003
+    ax = plt.axes(projection=ccrs.PlateCarree())  # type: ignore  # noqa: PGH003
+    ax.set_global()  # type: ignore  # noqa: PGH003
+    ax.stock_img()  # type: ignore  # noqa: PGH003
+    ax.coastlines(resolution="50m", linewidth=0.8)  # type: ignore  # noqa: PGH003
+    ax.add_feature(cfeature.BORDERS, linewidth=0.3, linestyle=":")  # type: ignore  # noqa: PGH003
+    ax.gridlines(draw_labels=True, linewidth=0.3, color="gray", alpha=0.5)  # type: ignore  # noqa: PGH003
+    ax.plot(lon, lat, transform=ccrs.PlateCarree(), color="red", linewidth=2)  # type: ignore  # noqa: PGH003
+    plt.show()  # type: ignore  # noqa: PGH003
 
 
 def main() -> None:
