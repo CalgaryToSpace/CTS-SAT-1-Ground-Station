@@ -1,5 +1,6 @@
 import contextlib
 import csv
+import logging
 import random
 import re
 from dataclasses import dataclass
@@ -11,14 +12,11 @@ import openpyxl
 import polars as pl
 import tyro
 
-import logging
-
 logger = logging.getLogger(__name__)
 
 DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 
 _TIME_FORMATS = ("%H:%M:%S", "%H:%M")
-
 
 
 # ---------------------------------------------------------------------
@@ -325,14 +323,12 @@ def _build_single_entries(
     if tssent is None:
         msg = f"Missing tssent for {ctx.cmd}"
         raise ValueError(msg)
-
     tsexec = parse_time(
         ctx.mission_date, ctx.mission_start, ctx.row["tsexec Start (UTC)"]
     )
     if tsexec is None:
         msg = f"Missing tsexec for {ctx.cmd}"
         raise ValueError(msg)
-
 
     command = format_command(ctx.cmd, tssent, tsexec, ctx.resp)
 
