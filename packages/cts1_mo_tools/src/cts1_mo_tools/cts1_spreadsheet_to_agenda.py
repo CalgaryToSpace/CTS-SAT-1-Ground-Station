@@ -11,9 +11,14 @@ import openpyxl
 import polars as pl
 import tyro
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 
 _TIME_FORMATS = ("%H:%M:%S", "%H:%M")
+
 
 
 # ---------------------------------------------------------------------
@@ -178,7 +183,13 @@ def _parse_mission_start(mission_date: str, start_utc_value: str | None) -> date
             msg = f"Could not parse Start UTC value: {start_utc_value!r}"
             raise ValueError(msg) from exc
 
-        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+        if not parsed.tzinfo:
+            parsed = parsed.replace(tzinfo=UTC)
+
+        if parsed <= datetime.now(UTC):
+            logger.warning("Start UTC value is in the past: %s", parsed)
+
+        return parsed
 
     year, month, day = map(int, mission_date.split("-"))
     return datetime(year, month, day, tzinfo=UTC)
@@ -314,12 +325,14 @@ def _build_single_entries(
     if tssent is None:
         msg = f"Missing tssent for {ctx.cmd}"
         raise ValueError(msg)
+
     tsexec = parse_time(
         ctx.mission_date, ctx.mission_start, ctx.row["tsexec Start (UTC)"]
     )
     if tsexec is None:
         msg = f"Missing tsexec for {ctx.cmd}"
         raise ValueError(msg)
+
 
     command = format_command(ctx.cmd, tssent, tsexec, ctx.resp)
 
