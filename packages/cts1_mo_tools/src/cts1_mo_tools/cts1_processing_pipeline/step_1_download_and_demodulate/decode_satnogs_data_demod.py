@@ -67,9 +67,48 @@ def _download_one(url: str) -> bytes | None:
     return resp.content
 
 
+def _timestamped_urls(
+    demoddata: list[dict[str, Any]],
+    *,
+    observation_id: int,
+) -> dict[str, datetime]:
+    """The `payload_demod` URLs worth downloading, each with its packet time.
+
+    Two kinds of entry are dropped rather than downloaded:
+
+      - `.png` files, which are waterfall images SatNOGS has mislabelled as
+        demod data -- not packets at all, so silently skipped.
+      - anything whose filename has no parseable timestamp, which would leave
+        the packet with no `received_at` we could honestly report. Logged as a
+        warning, since it means either a new filename shape worth teaching
+        `parse_demod_filename_time` or a genuinely odd upload.
+    """
+    urls: dict[str, datetime] = {}
+    for entry in demoddata:
+        url = entry.get("payload_demod")
+        if not url:
+            continue
+        if url.lower().endswith(".png"):
+            logger.debug(
+                f"satnogs_data_demod: observation {observation_id}: skipping "
+                f"mislabelled waterfall image {url}"
+            )
+            continue
+        received_at = parse_demod_filename_time(url)
+        if received_at is None:
+            logger.warning(
+                f"satnogs_data_demod: observation {observation_id}: discarding "
+                f"packet with no parseable timestamp in its filename: {url}"
+            )
+            continue
+        urls[url] = received_at
+    return urls
+
+
 def run_satnogs_data_demod(
     demoddata: list[dict[str, Any]],
     *,
+    observation_id: int,
     max_workers: int = 50,
 ) -> list[dict[str, Any]]:
     """Download every `payload_demod` URL, one row per packet.
@@ -82,31 +121,38 @@ def run_satnogs_data_demod(
     Args:
         demoddata: The observation's `demoddata` list, as returned by the
             SatNOGS API (each entry has a `payload_demod` URL).
+        observation_id: The observation these entries belong to, for logging.
         max_workers: Size of the download pool spun up for this call.
 
     Returns:
-        One dict per successfully downloaded packet.
+        One dict per successfully downloaded packet whose filename carried a
+        parseable timestamp.
     """
-    urls = [entry["payload_demod"] for entry in demoddata if entry.get("payload_demod")]
+    timestamped_urls = _timestamped_urls(demoddata, observation_id=observation_id)
     rows: list[dict[str, Any]] = []
-    if not urls:
+    if not timestamped_urls:
         return rows
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(_download_one, url): url for url in urls}
+        futures = {
+            executor.submit(_download_one, url): (url, received_at)
+            for url, received_at in timestamped_urls.items()
+        }
         for future in concurrent.futures.as_completed(futures):
-            url = futures[future]
+            url, received_at = futures[future]
             data = future.result()
             if data is None:
                 continue
             rows.append(
                 {
-                    "received_at": parse_demod_filename_time(url),
+                    "received_at": received_at,
                     "data_hex": data.hex(),
                     "data_length_bytes": len(data),
                     "satnogs_demod_url": url,
                 }
             )
 
-    logger.debug(f"satnogs_data_demod: {len(rows)}/{len(urls)} packet(s) downloaded")
+    logger.debug(
+        f"satnogs_data_demod: {len(rows)}/{len(timestamped_urls)} packet(s) downloaded"
+    )
     return rows

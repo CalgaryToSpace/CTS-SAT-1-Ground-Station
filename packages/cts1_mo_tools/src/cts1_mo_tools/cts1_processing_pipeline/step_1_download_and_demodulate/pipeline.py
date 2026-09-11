@@ -298,7 +298,9 @@ def _process_demod(obs: dict[str, Any], tools: frozenset[str]) -> list[dict[str,
 
     try:
         demod_rows = run_satnogs_data_demod(
-            obs["demoddata"], max_workers=DEMOD_DOWNLOAD_WORKERS
+            obs["demoddata"],
+            observation_id=obs_id,
+            max_workers=DEMOD_DOWNLOAD_WORKERS,
         )
     except Exception:  # noqa: BLE001
         logger.exception(f"satnogs_data_demod failed for observation {obs_id}")
@@ -469,8 +471,12 @@ def run(  # noqa: C901, PLR0913, PLR0915
                 try:
                     rows, runtime_ms = future.result()
                 except Exception:  # noqa: BLE001
+                    # Every decoder already swallows its own failures, so this
+                    # is something unexpected: leave the observation unrecorded
+                    # (and not in `done`) so a later pass retries it, rather
+                    # than stamping a decoder_run with no runtime.
                     logger.exception(f"Failed processing observation {obs['id']}")
-                    rows, runtime_ms = [], None
+                    continue
                 if rows:
                     df = pl.DataFrame(rows, infer_schema_length=None)
                     df = df.with_columns(

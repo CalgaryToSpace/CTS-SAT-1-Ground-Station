@@ -1,3 +1,7 @@
+import pytest
+from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate import (
+    decode_satnogs_data_demod,
+)
 from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate.decode_askew_demod import (  # noqa: E501
     parse_askew_line,
 )
@@ -248,3 +252,32 @@ def test_parse_demod_filename_time_with_g_suffix() -> None:
 
 def test_parse_demod_filename_time_unrecognized_filename() -> None:
     assert parse_demod_filename_time("https://example.com/not-a-demod-file") is None
+
+
+def test_run_satnogs_data_demod_discards_pngs_and_untimestamped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mislabelled waterfall PNGs and unparseable filenames never get downloaded."""
+    requested: list[str] = []
+
+    def fake_download_one(url: str) -> bytes:
+        requested.append(url)
+        return b"\x01\x02"
+
+    monkeypatch.setattr(decode_satnogs_data_demod, "_download_one", fake_download_one)
+
+    rows = decode_satnogs_data_demod.run_satnogs_data_demod(
+        [
+            {"payload_demod": _DEMOD_URL_BASE},
+            {"payload_demod": _DEMOD_URL_BASE + ".png"},
+            {"payload_demod": "https://example.com/not-a-demod-file"},
+        ],
+        observation_id=14759295,
+        max_workers=2,
+    )
+
+    assert requested == [_DEMOD_URL_BASE]
+    assert len(rows) == 1
+    assert rows[0]["satnogs_demod_url"] == _DEMOD_URL_BASE
+    assert rows[0]["received_at"].isoformat() == "2026-08-12T19:36:50+00:00"
+    assert rows[0]["data_hex"] == "0102"
