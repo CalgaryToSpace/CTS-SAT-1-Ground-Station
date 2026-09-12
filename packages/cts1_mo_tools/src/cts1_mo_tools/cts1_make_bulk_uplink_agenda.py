@@ -184,6 +184,7 @@ def send_file_to_tcmd_file(  # noqa: C901, PLR0913, PLR0915
 
     if use_bulk_uplink:
         emit("CTS1+comms_bulk_uplink_close_file()")  # Safety measure.
+        emit("CTS1+comms_bulk_uplink_close_file()")  # Safety measure.
     emit("CTS1+config_set_int_var(TCMD_require_unique_tssent,1)", immediate=True)
     if use_bulk_uplink:
         emit(f"CTS1+comms_bulk_uplink_open_file({satellite_file},truncate)")
@@ -204,6 +205,11 @@ def send_file_to_tcmd_file(  # noqa: C901, PLR0913, PLR0915
         chunk_index += 1
 
     if use_bulk_uplink:
+        # Close the file.
+        emit("CTS1+comms_bulk_uplink_close_file()")
+        # Do it a few times as a low-cost safety measure in case of corrupted command.
+        emit("CTS1+comms_bulk_uplink_close_file()")
+        emit("CTS1+comms_bulk_uplink_close_file()")
         emit("CTS1+comms_bulk_uplink_close_file()")
 
     # Repeat this `hash_count` times for a better chance of data transfer.
