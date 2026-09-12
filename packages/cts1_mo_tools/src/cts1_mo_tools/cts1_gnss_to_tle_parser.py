@@ -268,7 +268,7 @@ def convert_gnss_to_tle(gnss_file: Path, *, sat_num: int = 99999) -> None:
     lon = np.array(lon)
     lat = np.array(lat)
 
-    # line breaks whenever it wraps around the map edge, or jumps a real gap in the data
+    # line breaks whenever it wraps around the map edge, or or detects a gap in the data
     lon_wraps = np.abs(np.diff(lon)) > ANTIMERIDIAN_DEG
     seconds_between_fixes = np.array(
         [(times[i + 1] - times[i]).total_seconds() for i in range(len(times) - 1)]
