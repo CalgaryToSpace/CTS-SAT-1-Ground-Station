@@ -213,7 +213,14 @@ def send_file_to_tcmd_file(  # noqa: C901, PLR0913, PLR0915
     hash_on_disk = hashlib.sha256(file_bytes).hexdigest()
 
     # Add a comment with the hash of the input file.
-    cli_command = " ".join(sys.argv)
+    cli_command = " ".join(
+        [
+            arg
+            if "cts1_make_bulk_uplink_agenda" not in str(arg)
+            else "cts1_make_bulk_uplink_agenda"
+            for arg in sys.argv
+        ]
+    )
     commands_count = len([line for line in lines if line.startswith("CTS1+")])
     footer_comments = [
         f"# SHA256 of input file: {hash_on_disk} ({total_size:,} bytes)",
