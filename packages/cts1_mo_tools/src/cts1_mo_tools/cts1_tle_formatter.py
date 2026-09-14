@@ -1,27 +1,17 @@
+"""
+Script to fetch FrontierSat TLE from CelesTrak, and format it into the
+CTS1+adcs_set_sgp4_orbit_params telecommand.
+"""
+
 from dataclasses import dataclass
 from decimal import Decimal
 
 import requests
-
-"""
-Script to fetch FrontierSat TLE from CelesTrak, and format it into the
-CTS1+adcs_set_sgp4_orbit_params telecommand.
-
-To run from this file:
-1) Click the play button on the top right to run the python file
-
-To run from CLI:
-1) In the terminal, navigate to the
-.../CTS-SAT-1-Ground-Station/packages/cts1_mo_tools/src/cts1_mo_tools folder
-2) Run 'python cts1_tle_formatter.py'
-
-Debugging:
-If unable to run script due to 'missing requests module', then run 'uv sync'
-"""
+from loguru import logger
 
 
 @dataclass
-class TLE:
+class Tle:
     name: str
     line1: str
     line2: str
@@ -37,6 +27,19 @@ class TelecommandParams:
     mean_motion: str
     mean_anomaly: str
     epoch: str
+
+    def to_args_list(self) -> list[str]:
+        """Return list of telecommand arguments in order of the telecommand."""
+        return [
+            self.inclination,
+            self.eccentricity,
+            self.right_ascension,
+            self.argument_of_perigee,
+            self.drag_term,
+            self.mean_motion,
+            self.mean_anomaly,
+            self.epoch,
+        ]
 
 
 def fetch_tle() -> str | None:
@@ -61,28 +64,28 @@ def fetch_tle() -> str | None:
             tle_data = response.text.strip()
 
             if "No GP data found" in tle_data or not tle_data:
-                print("Error: No orbital data found for FrontierSat.")  # noqa: T201
+                logger.error("Error: No orbital data found for FrontierSat.")
                 return None
 
             return tle_data
 
-        print(f"Failed to fetch data. HTTP Status Code: {response.status_code}")  # noqa: T201
+        logger.error(f"Failed to fetch data. HTTP Status Code: {response.status_code}")
         return None  # noqa: TRY300
 
     except requests.exceptions.RequestException as e:
-        print(f"An error occurred while connecting to CelesTrak: {e}")  # noqa: T201
+        logger.error(f"An error occurred while connecting to CelesTrak: {e}")
         return None
 
 
-def convert_to_telecommand(tle_text: str) -> str:
-    """Convert raw TLE text into the CTS telecommand."""
+def convert_3le_to_telecommand(tle_text: str) -> str:
+    """Convert raw 3-line TLE text into the CTS telecommand."""
 
     tle = parse_tle(tle_text)
     params = extract_orbit_parameters(tle)
     return format_telecommand(params)
 
 
-def parse_tle(text: str) -> TLE:
+def parse_tle(text: str) -> Tle:
     """Parse raw TLE text into a TLE object."""
 
     lines = text.strip().splitlines()
@@ -93,14 +96,14 @@ def parse_tle(text: str) -> TLE:
         error_message = "Expected a 3-line TLE"
         raise ValueError(error_message)
 
-    return TLE(
+    return Tle(
         name=lines[0],
         line1=lines[1],
         line2=lines[2],
     )
 
 
-def extract_orbit_parameters(tle: TLE) -> TelecommandParams:
+def extract_orbit_parameters(tle: Tle) -> TelecommandParams:
     """Extract the orbital parameters required by the CTS telecommand."""
 
     line1 = tle.line1.split()
@@ -125,19 +128,9 @@ def extract_orbit_parameters(tle: TLE) -> TelecommandParams:
 
 def format_telecommand(params: TelecommandParams) -> str:
     """Format the final CTS telecommand."""
+    args_str = ",".join(params.to_args_list())
 
-    return (
-        "CTS1+adcs_set_sgp4_orbit_params("
-        f"{params.inclination},"
-        f"{params.eccentricity},"
-        f"{params.right_ascension},"
-        f"{params.argument_of_perigee},"
-        f"{params.drag_term},"
-        f"{params.mean_motion},"
-        f"{params.mean_anomaly},"
-        f"{params.epoch}"
-        ")!"
-    )
+    return f"CTS1+adcs_set_sgp4_orbit_params({args_str})!"
 
 
 def main() -> None:
@@ -146,13 +139,10 @@ def main() -> None:
     if tle_text is None:
         return
 
-    print("\n--- TLE RETURNED FROM CELESTRAK ---")  # noqa: T201
-    print(tle_text)  # noqa: T201
+    logger.info(f"\n--- TLE RETURNED FROM CELESTRAK ---\n{tle_text}\n")
 
-    telecommand = convert_to_telecommand(tle_text)
-
-    print("\n--- FINAL FORMATTED TELECOMMAND ---")  # noqa: T201
-    print(f"{telecommand}\n")  # noqa: T201
+    telecommand = convert_3le_to_telecommand(tle_text)
+    logger.success(f"\n--- FINAL FORMATTED TELECOMMAND ---\n{telecommand}\n")
 
 
 if __name__ == "__main__":
