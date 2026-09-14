@@ -6,12 +6,18 @@ from typing import Any
 import polars as pl
 import pytest
 from cts1_mo_tools.cts1_processing_pipeline.web_ui.file_reassembly import (
+    BULK_DOWNLINK_MAX_DATA,
+    COVERAGE_OFFSET_LABEL_INTERVAL_ROWS,
     COVERAGE_ROW_WIDTH_BYTES,
     MAX_REASSEMBLY_SPAN_BYTES,
     ByteSegment,
     ByteStatus,
     ConflictPolicy,
     ReassemblyResult,
+    coverage_gutter_width_px,
+    coverage_label_interval_rows,
+    coverage_png_size,
+    coverage_ruler_height_px,
     find_header_candidates,
     reassemble_bulk_chunks,
     render_coverage_png,
@@ -530,9 +536,18 @@ def test_multiple_distinct_headers_are_all_returned() -> None:
 
 
 def _decode_indexed_png(png: bytes) -> tuple[int, int, list[bytes]]:
-    """(width, height, rows of raw palette-index bytes) for an indexed PNG."""
+    """(width, height, rows of raw palette-index bytes) of an indexed PNG's
+    *data area* -- the rulers `render_coverage_png` draws around it are
+    cropped off, so these assertions stay about the coverage bitmap itself
+    and don't shift every time the rulers' size changes.
+    """
     image = Image.open(io.BytesIO(png))
     assert image.mode == "P"
+    if image.size != (1, 1):  # the empty-result image has no rulers
+        # The gutter is sized to the labels it has to print, so it's read
+        # back off the image rather than assumed.
+        gutter = image.size[0] - COVERAGE_ROW_WIDTH_BYTES
+        image = image.crop((gutter, coverage_ruler_height_px(), *image.size))
     width, height = image.size
     pixels = image.tobytes()
     return (
@@ -543,7 +558,7 @@ def _decode_indexed_png(png: bytes) -> tuple[int, int, list[bytes]]:
 
 
 # Palette indices, per `file_reassembly._COVERAGE_STATUS_INDEX`.
-_MISSING_PX, _GOOD_PX, _CONFLICT_PX, _PAD_PX = 0, 1, 2, 3
+_MISSING_PX, _GOOD_PX, _CONFLICT_PX, _PAD_PX, _INK_PX = 0, 1, 2, 3, 4
 
 
 def test_coverage_png_empty_result_is_a_single_pixel() -> None:
@@ -554,18 +569,21 @@ def test_coverage_png_empty_result_is_a_single_pixel() -> None:
 
 
 def test_coverage_png_marks_gaps_and_good_bytes_correctly() -> None:
+    # Spans two rows whatever COVERAGE_ROW_WIDTH_BYTES is set to, so the
+    # wrap-onto-the-next-row arithmetic is exercised either way.
+    last_offset = COVERAGE_ROW_WIDTH_BYTES + 195
     df = _chunks_df(
         [
             _chunk(offset=0, data=b"A" * 195),
-            # bytes 195..390 missing
-            _chunk(offset=390, data=b"A" * 195),
+            # bytes 195..last_offset missing
+            _chunk(offset=last_offset, data=b"A" * 195),
         ]
     )
     result = reassemble_bulk_chunks(df)
     assert result.gaps  # sanity: there is a gap
     width, height, rows = _decode_indexed_png(render_coverage_png(result))
     assert width == COVERAGE_ROW_WIDTH_BYTES
-    assert height == 2  # 585 bytes / 390-wide rows, rounded up
+    assert height == 2
 
     # Recompute expected row/col for each gap byte and check it decoded red.
     for start, end in result.gaps:
@@ -573,7 +591,7 @@ def test_coverage_png_marks_gaps_and_good_bytes_correctly() -> None:
             row, col = divmod(byte_index, COVERAGE_ROW_WIDTH_BYTES)
             assert rows[row][col] == _MISSING_PX
     # And received bytes decode green.
-    for byte_index in (0, 194, 390, 584):
+    for byte_index in (0, 194, last_offset, last_offset + 194):
         row, col = divmod(byte_index, COVERAGE_ROW_WIDTH_BYTES)
         assert rows[row][col] == _GOOD_PX
 
@@ -636,6 +654,88 @@ def test_conflicting_segments_merge_across_adjacent_offsets() -> None:
         (8, 20, "Missing"),
         (20, 24, "Conflicting"),
     ]
+
+
+# ---------------------------------------------------------------------------
+# coverage map rulers
+# ---------------------------------------------------------------------------
+
+
+def _full_png_pixels(png: bytes) -> tuple[Image.Image, list[bytes]]:
+    """The whole image (rulers included) and its rows of palette indices."""
+    image = Image.open(io.BytesIO(png))
+    width, _height = image.size
+    pixels = image.tobytes()
+    return image, [pixels[y * width : (y + 1) * width] for y in range(image.size[1])]
+
+
+def test_coverage_png_size_matches_the_encoded_image() -> None:
+    result = reassemble_bulk_chunks(
+        _chunks_df([_chunk(offset=0, data=b"A" * COVERAGE_ROW_WIDTH_BYTES * 3)])
+    )
+    image = Image.open(io.BytesIO(render_coverage_png(result)))
+    assert image.size == coverage_png_size(result)
+    # Rulers plus three full rows of data.
+    assert image.size == (
+        coverage_gutter_width_px(3, COVERAGE_ROW_WIDTH_BYTES)
+        + COVERAGE_ROW_WIDTH_BYTES,
+        coverage_ruler_height_px() + 3,
+    )
+
+
+def test_top_ruler_ticks_every_packet_boundary() -> None:
+    """The tick column must land exactly on the first pixel of each packet,
+    which is the whole reason the rulers are drawn into the image instead of
+    being positioned over it in HTML.
+    """
+    result = reassemble_bulk_chunks(
+        _chunks_df([_chunk(offset=0, data=b"A" * COVERAGE_ROW_WIDTH_BYTES)])
+    )
+    image, rows = _full_png_pixels(render_coverage_png(result))
+    gutter = image.size[0] - COVERAGE_ROW_WIDTH_BYTES
+    # The row just above the data is where the ticks bottom out.
+    tick_row = rows[coverage_ruler_height_px() - 1]
+    # Only the columns above the data: the left gutter's row-0 label is
+    # centred on row 0, so its glyphs reach up into this row too.
+    inked = {x for x, index in enumerate(tick_row) if index == _INK_PX and x >= gutter}
+    assert inked == {
+        gutter + offset
+        for offset in range(0, COVERAGE_ROW_WIDTH_BYTES, BULK_DOWNLINK_MAX_DATA)
+    }
+
+
+def test_left_ruler_ticks_the_labelled_rows() -> None:
+    row_count = COVERAGE_OFFSET_LABEL_INTERVAL_ROWS + 1
+    result = reassemble_bulk_chunks(
+        _chunks_df([_chunk(offset=0, data=b"A" * COVERAGE_ROW_WIDTH_BYTES * row_count)])
+    )
+    image, rows = _full_png_pixels(render_coverage_png(result))
+    # The pixel column just left of the data is where the ticks end.
+    tick_column = image.size[0] - COVERAGE_ROW_WIDTH_BYTES - 1
+    ruler = coverage_ruler_height_px()
+    inked = {y for y in range(len(rows)) if rows[y][tick_column] == _INK_PX}
+    assert inked == {ruler, ruler + COVERAGE_OFFSET_LABEL_INTERVAL_ROWS}
+
+
+def test_offset_label_interval_widens_for_very_tall_maps() -> None:
+    assert coverage_label_interval_rows(1_000) == COVERAGE_OFFSET_LABEL_INTERVAL_ROWS
+    # Past the label cap the interval grows in multiples, keeping the count
+    # bounded rather than emitting thousands of labels.
+    tall = COVERAGE_OFFSET_LABEL_INTERVAL_ROWS * 500 + 1
+    interval = coverage_label_interval_rows(tall)
+    assert interval == COVERAGE_OFFSET_LABEL_INTERVAL_ROWS * 2
+    assert -(-tall // interval) <= 500
+
+
+def test_rulers_do_not_overwrite_the_data_area() -> None:
+    """Ink belongs in the margins only -- a tick bleeding into the bitmap
+    would read as a byte with a status it doesn't have.
+    """
+    result = reassemble_bulk_chunks(
+        _chunks_df([_chunk(offset=0, data=b"A" * COVERAGE_ROW_WIDTH_BYTES * 2)])
+    )
+    _width, _height, rows = _decode_indexed_png(render_coverage_png(result))
+    assert all(set(row) == {_GOOD_PX} for row in rows)
 
 
 def test_byte_segment_length() -> None:

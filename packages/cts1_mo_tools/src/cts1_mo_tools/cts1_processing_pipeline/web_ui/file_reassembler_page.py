@@ -24,6 +24,7 @@ from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
 
 from . import data as beacon_data
 from .file_reassembly import (
+    COVERAGE_PACKETS_PER_ROW,
     COVERAGE_ROW_WIDTH_BYTES,
     DEFAULT_CONFLICT_POLICY,
     SHA256_HEX_LEN,
@@ -32,6 +33,7 @@ from .file_reassembly import (
     ByteStatus,
     ConflictPolicy,
     ReassemblyResult,
+    coverage_png_size,
     detect_picam_image,
     find_header_candidates,
     reassemble_bulk_chunks,
@@ -357,36 +359,37 @@ def _build_segments_table(result: ReassemblyResult) -> Callable[[], None]:
     return segments_table
 
 
-COVERAGE_BLOCK_WIDTH_PX = 3  # on-screen width of one byte's block; may change later
-COVERAGE_BLOCK_HEIGHT_PX = 2  # shorter than wide -- rows are the scarce vertical space
-
-
+# One byte is one screen pixel: the map's whole point is fitting a
+# multi-MB download's shape on screen at once, which any zoom factor
+# immediately spends. `image-rendering: pixelated` stays on so a browser
+# zoom (or a HiDPI display's own scaling) shows hard block edges instead of
+# blurring bytes into each other.
 def _coverage_map(result: ReassemblyResult) -> None:
-    """A byte-coverage map: one block per byte, green if good, red if
+    """A byte-coverage map: one pixel per byte, green if good, red if
     missing, yellow if conflicting (received with multiple disagreeing
-    values), `COVERAGE_ROW_WIDTH_BYTES` blocks per row.
+    values), `COVERAGE_ROW_WIDTH_BYTES` bytes per row.
 
-    `render_coverage_png` encodes one *pixel* per byte -- small and cheap to
-    ship even for a 20+ MB file -- and the on-screen block size is applied
-    here purely with CSS (`image-rendering: pixelated` keeps the block
-    edges crisp instead of blurring the upscale). The block is shorter than
-    it is wide on purpose: width already reads fine at
-    `COVERAGE_BLOCK_WIDTH_PX`, and a file's row count (hence the image's
-    total height) grows with its size, so trimming just the height keeps
-    large files from needing as much scrolling without shrinking each row.
+    Both rulers -- packet boundaries across the top, byte offsets down the
+    left -- are drawn into the PNG by `render_coverage_png` rather than
+    overlaid as HTML here, so there's no way for a tick to end up a pixel
+    off from the byte it points at. That leaves this with nothing to lay out
+    but the image itself, at exactly the size it was encoded at.
     """
     if result.span_bytes == 0:
         return
     data_uri = "data:image/png;base64," + base64.b64encode(
         render_coverage_png(result)
     ).decode("ascii")
-    width_px = COVERAGE_ROW_WIDTH_BYTES * COVERAGE_BLOCK_WIDTH_PX
-    row_count = -(-result.span_bytes // COVERAGE_ROW_WIDTH_BYTES)
-    height_px = row_count * COVERAGE_BLOCK_HEIGHT_PX
+    width_px, height_px = coverage_png_size(result)
     with ui.row().classes("w-full overflow-x-auto"):
         ui.image(data_uri).style(
             f"width: {width_px}px; height: {height_px}px; image-rendering: pixelated;"
         )
+    ui.label(
+        f"One pixel per byte, {COVERAGE_ROW_WIDTH_BYTES:,} bytes "
+        f"({COVERAGE_PACKETS_PER_ROW} packets) per row. Top ruler: byte offset "
+        "within a row, ticked once per packet. Left: byte offset of the row."
+    ).classes("text-caption text-grey")
     with ui.row().classes("items-center gap-4"):
         for status, label in (
             (ByteStatus.GOOD, "good"),

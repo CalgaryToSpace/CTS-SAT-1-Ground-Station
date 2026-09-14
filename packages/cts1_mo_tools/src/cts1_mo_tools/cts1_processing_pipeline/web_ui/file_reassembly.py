@@ -54,10 +54,9 @@ this module does is:
     ground truth.
 
   - `render_coverage_png()`: a byte-per-pixel bitmap of which bytes are
-    good vs. missing vs. conflicting, one pixel per byte -- the web UI
-    scales it up 3x with CSS (`image-rendering: pixelated`) rather than
-    this baking the zoom into the image data, so a 20+ MB file's map still
-    only encodes one pixel per byte, and PNG's DEFLATE compression makes
+    good vs. missing vs. conflicting, one pixel per byte and displayed 1:1
+    (so one byte is one screen pixel), which is what lets a whole multi-MB
+    download's shape fit on screen at once. PNG's DEFLATE compression makes
     the (typically long) runs of one status cheap to ship over the
     websocket.
 """
@@ -65,7 +64,9 @@ this module does is:
 from __future__ import annotations
 
 __all__ = [
+    "COVERAGE_PACKETS_PER_ROW",
     "COVERAGE_ROW_WIDTH_BYTES",
+    "COVERAGE_RULER_FONT_SIZE_PX",
     "MAX_REASSEMBLY_SPAN_BYTES",
     "BulkHeaderCandidate",
     "ByteSegment",
@@ -73,6 +74,10 @@ __all__ = [
     "ConflictPolicy",
     "OffsetSummary",
     "ReassemblyResult",
+    "coverage_gutter_width_px",
+    "coverage_label_interval_rows",
+    "coverage_png_size",
+    "coverage_ruler_height_px",
     "detect_picam_image",
     "find_header_candidates",
     "reassemble_bulk_chunks",
@@ -86,12 +91,15 @@ import re
 from collections import defaultdict
 from dataclasses import dataclass
 from enum import StrEnum
+from functools import cache
 from itertools import pairwise
+from math import ceil
 from typing import TYPE_CHECKING, Any
 
 import polars as pl
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
+from cts1_mo_tools.cts1_decode_satnogs_packets import BULK_DOWNLINK_MAX_DATA
 from cts1_mo_tools.cts1_picam_to_jpg import parse_picam_ascii_to_jpg_bytes
 
 if TYPE_CHECKING:
@@ -555,12 +563,78 @@ def reassemble_bulk_chunks(
 
 # -- Coverage map --------------------------------------------------------------
 
-COVERAGE_ROW_WIDTH_BYTES = 195 * 2  # 195 == BULK_DOWNLINK_MAX_DATA, one row = 2 packets
+# One row is a whole number of full packets, so packet-aligned damage (a
+# whole chunk lost) reads as a clean block rather than a diagonal smear
+# across rows -- and the map's top ruler can tick once per packet boundary.
+COVERAGE_PACKETS_PER_ROW = 4
+COVERAGE_ROW_WIDTH_BYTES = BULK_DOWNLINK_MAX_DATA * COVERAGE_PACKETS_PER_ROW
+
+# The map's two rulers, drawn into the image itself (see
+# `render_coverage_png`): a top strip ticked once per packet, and a left
+# margin ticked every `COVERAGE_OFFSET_LABEL_INTERVAL_ROWS` rows with that
+# row's byte offset. Both are part of the PNG rather than HTML overlaid on
+# it, so a tick can't drift from the pixel it labels -- at one byte per
+# pixel there's no rounding to hide a half-pixel error behind.
+COVERAGE_OFFSET_LABEL_INTERVAL_ROWS = 200
+COVERAGE_MAX_OFFSET_LABELS = 500
+
+# Twice Pillow's own default size: the map is drawn at one byte per pixel,
+# so its labels are the one part with no reason to be that small -- but they
+# still have to sit inside a margin that's pure overhead next to the data.
+COVERAGE_RULER_FONT_SIZE_PX = 22
+
+_COVERAGE_TICK_LEN_PX = 8
+_COVERAGE_TICK_GAP_PX = 5  # between a tick and its label
+
+
+@cache
+def _ruler_font() -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    """The rulers' font, cached -- every label in a map is drawn with it, and
+    loading it per call would be the most expensive part of rendering one.
+
+    Pillow's own default face at `COVERAGE_RULER_FONT_SIZE_PX`, so there's no
+    font file to ship; it falls back to a bitmap font on a Pillow built
+    without FreeType, which is why the return type admits either.
+    """
+    return ImageFont.load_default(size=COVERAGE_RULER_FONT_SIZE_PX)
+
+
+def _label_size(label: str) -> tuple[int, int]:
+    """`(width, height)` in pixels of `label` drawn in the rulers' font, as
+    measured from the origin the `draw.text()` calls below use.
+    """
+    _left, _top, right, bottom = _ruler_font().getbbox(label)
+    return (ceil(right), ceil(bottom))
+
+
+def coverage_ruler_height_px() -> int:
+    """Height of the map's top ruler: one label, the gap below it, and the
+    tick that touches the data area.
+    """
+    _width, height = _label_size("0,")
+    return height + _COVERAGE_TICK_GAP_PX + _COVERAGE_TICK_LEN_PX
+
+
+def coverage_gutter_width_px(row_count: int, row_width_bytes: int) -> int:
+    """Width of the map's left gutter, sized to the widest offset it will
+    have to print for a map this tall.
+
+    Measured rather than fixed: the labels run from "0" for a one-row file
+    to eight digits and three separators for one near
+    `MAX_REASSEMBLY_SPAN_BYTES`, and a constant wide enough for the latter
+    would waste most of its width on every real file.
+    """
+    widest = f"{max(row_count - 1, 0) * row_width_bytes:,}"
+    width, _height = _label_size(widest)
+    return width + _COVERAGE_TICK_GAP_PX + _COVERAGE_TICK_LEN_PX
+
 
 # Palette indices/colors for the coverage bitmap -- index 3 ("no data yet",
-# past the end of the file but needed to fill out the last row's width) is
-# marked fully transparent so it doesn't paint a visible block.
+# past the end of the file but needed to fill out the last row's width, plus
+# the rulers' background) is marked fully transparent so it doesn't paint a
+# visible block and the page's own background shows through.
 _COVERAGE_PAD_INDEX = 3
+_COVERAGE_INK_INDEX = 4
 _COVERAGE_STATUS_INDEX = {
     ByteStatus.MISSING: 0,
     ByteStatus.GOOD: 1,
@@ -571,21 +645,112 @@ _COVERAGE_PALETTE = (
     (0x21, 0xBA, 0x45),  # good: Quasar "positive" green
     (0xF2, 0xC0, 0x37),  # conflicting: Quasar "warning" yellow
     (0x00, 0x00, 0x00),  # padding: color irrelevant, made transparent below
+    # Ruler ink: a dark grey, reading as labelling rather than data against
+    # the page's own background, which shows through the transparent margins.
+    (0x61, 0x61, 0x61),
 )
 
 
-def _encode_coverage_png(width: int, height: int, pixel_indices: bytes) -> bytes:
-    """PNG-encode a `width` x `height` bitmap of `_COVERAGE_PALETTE` indices.
+def coverage_label_interval_rows(row_count: int) -> int:
+    """How many rows apart the offset labels in the map's left gutter go.
+
+    `COVERAGE_OFFSET_LABEL_INTERVAL_ROWS` normally, widened in multiples of
+    it once a file is tall enough that a label every 200 rows would mean
+    thousands of them -- past `COVERAGE_MAX_OFFSET_LABELS` they stop being a
+    scale and start being a wall of text for no added precision.
+    """
+    max_rows = COVERAGE_OFFSET_LABEL_INTERVAL_ROWS * COVERAGE_MAX_OFFSET_LABELS
+    if row_count <= max_rows:
+        return COVERAGE_OFFSET_LABEL_INTERVAL_ROWS
+    return COVERAGE_OFFSET_LABEL_INTERVAL_ROWS * -(-row_count // max_rows)
+
+
+def coverage_png_size(
+    result: ReassemblyResult, *, row_width_bytes: int = COVERAGE_ROW_WIDTH_BYTES
+) -> tuple[int, int]:
+    """The `(width, height)` in pixels `render_coverage_png` will produce --
+    the rulers included -- so the caller can size the element that displays
+    it without decoding the PNG or duplicating the arithmetic.
+    """
+    if result.span_bytes == 0:
+        return (1, 1)
+    row_count = -(-result.span_bytes // row_width_bytes)
+    return (
+        coverage_gutter_width_px(row_count, row_width_bytes) + row_width_bytes,
+        coverage_ruler_height_px() + row_count,
+    )
+
+
+def _encode_coverage_png(image: Image.Image) -> bytes:
+    """PNG-encode a palette image of `_COVERAGE_PALETTE` indices.
 
     Palette ("P") mode rather than RGB keeps it at one byte per byte-of-file
     before DEFLATE even runs, and `_COVERAGE_PAD_INDEX` is declared
-    transparent so the last row's padding doesn't paint a visible block.
+    transparent so neither the last row's padding nor the rulers' background
+    paints over the page.
     """
-    image = Image.frombytes("P", (width, height), pixel_indices)
     image.putpalette(b"".join(bytes(color) for color in _COVERAGE_PALETTE))
     buffer = io.BytesIO()
     image.save(buffer, format="PNG", optimize=True, transparency=_COVERAGE_PAD_INDEX)
     return buffer.getvalue()
+
+
+def _draw_coverage_rulers(
+    image: Image.Image, row_count: int, row_width_bytes: int
+) -> None:
+    """Draw the top (per-packet) and left (per-row byte offset) rulers into
+    `image`, whose data area starts at
+    `(coverage_gutter_width_px(...), coverage_ruler_height_px())`.
+
+    Top ticks land on each packet boundary within a row and are labelled
+    with the byte offset *within* the row; left ticks land on a row and are
+    labelled with that row's absolute byte offset. Read together, a block's
+    absolute offset is its row's label plus its column's.
+    """
+    draw = ImageDraw.Draw(image)
+    font = _ruler_font()
+    data_left = coverage_gutter_width_px(row_count, row_width_bytes)
+    data_top = coverage_ruler_height_px()
+
+    for offset in range(0, row_width_bytes, BULK_DOWNLINK_MAX_DATA):
+        x = data_left + offset
+        draw.line(
+            [(x, data_top - _COVERAGE_TICK_LEN_PX), (x, data_top - 1)],
+            fill=_COVERAGE_INK_INDEX,
+        )
+        label = f"{offset:,}"
+        _width, height = _label_size(label)
+        draw.text(
+            (
+                x + _COVERAGE_TICK_GAP_PX,
+                data_top - _COVERAGE_TICK_LEN_PX - _COVERAGE_TICK_GAP_PX - height,
+            ),
+            label,
+            fill=_COVERAGE_INK_INDEX,
+            font=font,
+        )
+
+    for row in range(0, row_count, coverage_label_interval_rows(row_count)):
+        y = data_top + row
+        draw.line(
+            [(data_left - _COVERAGE_TICK_LEN_PX, y), (data_left - 1, y)],
+            fill=_COVERAGE_INK_INDEX,
+        )
+        label = f"{row * row_width_bytes:,}"
+        width, height = _label_size(label)
+        # Right-aligned against the tick, and centred on the row it marks,
+        # except near the edges where it's nudged back inside the image --
+        # the tick is the precise mark, so a label by the last row reads
+        # fine slightly above it and would otherwise be cut in half.
+        draw.text(
+            (
+                data_left - _COVERAGE_TICK_LEN_PX - _COVERAGE_TICK_GAP_PX - width,
+                min(max(y - height // 2, 0), image.height - height),
+            ),
+            label,
+            fill=_COVERAGE_INK_INDEX,
+            font=font,
+        )
 
 
 def render_coverage_png(
@@ -593,11 +758,10 @@ def render_coverage_png(
 ) -> bytes:
     """A one-pixel-per-byte PNG of `result`'s per-byte assessment: green
     where the byte is good, red where it's missing, yellow where it arrived
-    with multiple disagreeing values, `row_width_bytes` pixels per row. The
-    caller (the web UI) is expected to scale this up with CSS
-    (`image-rendering: pixelated`) rather than baking the zoom into the
-    image -- keeps the actual PNG small regardless of the on-screen block
-    size.
+    with multiple disagreeing values, `row_width_bytes` pixels per row,
+    inset by the two rulers `_draw_coverage_rulers` draws around it. The
+    caller (the web UI) displays it at its natural size, one byte per screen
+    pixel, so the image's own dimensions are the on-screen ones.
 
     Returns a 1x1 (single good-color pixel) PNG if `result` is empty, rather
     than a 0-byte image some browsers may refuse to render.
@@ -605,7 +769,7 @@ def render_coverage_png(
     span = result.span_bytes
     if span == 0:
         return _encode_coverage_png(
-            1, 1, bytes([_COVERAGE_STATUS_INDEX[ByteStatus.GOOD]])
+            Image.new("P", (1, 1), _COVERAGE_STATUS_INDEX[ByteStatus.GOOD])
         )
 
     pixels = bytearray(span)
@@ -616,9 +780,22 @@ def render_coverage_png(
     remainder = span % row_width_bytes
     if remainder:
         pixels += bytes([_COVERAGE_PAD_INDEX]) * (row_width_bytes - remainder)
-    height = len(pixels) // row_width_bytes
+    row_count = len(pixels) // row_width_bytes
 
-    return _encode_coverage_png(row_width_bytes, height, bytes(pixels))
+    width, height = coverage_png_size(result, row_width_bytes=row_width_bytes)
+    image = Image.new("P", (width, height), _COVERAGE_PAD_INDEX)
+    # Same mode both sides, so this copies palette indices straight across
+    # rather than converting anything.
+    image.paste(
+        Image.frombytes("P", (row_width_bytes, row_count), bytes(pixels)),
+        (
+            coverage_gutter_width_px(row_count, row_width_bytes),
+            coverage_ruler_height_px(),
+        ),
+    )
+    _draw_coverage_rulers(image, row_count, row_width_bytes)
+
+    return _encode_coverage_png(image)
 
 
 # -- Header candidates --------------------------------------------------------
