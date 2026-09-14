@@ -1,17 +1,36 @@
-import struct
-import zlib
+import hashlib
+import io
 from datetime import UTC, datetime
 from typing import Any
 
 import polars as pl
 import pytest
 from cts1_mo_tools.cts1_processing_pipeline.web_ui.file_reassembly import (
+    BULK_DOWNLINK_MAX_DATA,
+    CONFLICT_ISLAND_MAX_BYTES,
+    COVERAGE_OFFSET_LABEL_INTERVAL_ROWS,
     COVERAGE_ROW_WIDTH_BYTES,
     MAX_REASSEMBLY_SPAN_BYTES,
+    ByteSegment,
+    ByteStatus,
+    ConflictPolicy,
+    ReassemblyResult,
+    coverage_gutter_width_px,
+    coverage_label_interval_rows,
+    coverage_png_size,
+    coverage_ruler_height_px,
     find_header_candidates,
     reassemble_bulk_chunks,
     render_coverage_png,
 )
+from PIL import Image
+
+
+def _segments(result: ReassemblyResult) -> list[tuple[int, int, str]]:
+    """`(start, end, status)` triples -- the shape the assertions below read
+    most clearly, and the shape the UI's segment table renders.
+    """
+    return [(s.start, s.end, str(s.status)) for s in result.segments]
 
 
 def _dt(s: str) -> datetime:
@@ -43,9 +62,20 @@ def test_empty_input() -> None:
     assert result.total_chunks == 0
     assert result.unique_offsets == 0
     assert result.data == b""
+    assert result.segments == ()
     assert not result.duplicates
     assert not result.has_conflicts
     assert result.is_gapless
+    # An empty selection has nothing wrong with it, but it isn't a file
+    # either -- `is_complete` gating the export's "_partial" suffix must not
+    # call it one.
+    assert not result.is_complete
+
+
+def test_missing_required_column_raises() -> None:
+    df = pl.DataFrame({"bulk_file_offset": [0], "bulk_data_hex": ["00"]})
+    with pytest.raises(ValueError, match="missing required column"):
+        reassemble_bulk_chunks(df)
 
 
 def test_clean_contiguous_chunks_reassemble_exactly() -> None:
@@ -63,21 +93,22 @@ def test_clean_contiguous_chunks_reassemble_exactly() -> None:
     assert not result.duplicates
     assert not result.has_conflicts
     assert result.is_gapless
+    assert result.is_complete
     assert result.span_bytes == 10
     assert result.covered_bytes == 10
-    assert result.sha256 == __import__("hashlib").sha256(b"AAAABBBBCC").hexdigest()
-    # Every distinct offset is summarized in `.offsets`, not just duplicates
-    # -- so a clean, gapless download still has something to show in the
-    # UI's chunks table.
+    assert result.sha256 == hashlib.sha256(b"AAAABBBBCC").hexdigest()
+    # Three packets, but one run of good bytes -- the assessment is per byte,
+    # and consecutive bytes of the same verdict collapse into one segment.
+    assert _segments(result) == [(0, 10, "Good")]
+    # Per-offset packet bookkeeping is still summarized alongside it.
     assert [o.offset for o in result.offsets] == [0, 4, 8]
     assert all(o.count == 1 for o in result.offsets)
-    assert all(o.consistent for o in result.offsets)
 
 
 def test_offsets_are_summarized_even_with_gaps_and_no_duplicates() -> None:
     """A partial/sparse download (missing chunks, but no offset repeated)
-    should still populate `.offsets` -- this is the case the web UI's
-    chunks table needs to keep rendering rather than going blank.
+    should still populate `.offsets` -- the per-offset packet bookkeeping the
+    UI shows alongside the per-byte verdict.
     """
     df = _chunks_df(
         [
@@ -103,6 +134,7 @@ def test_out_of_order_chunks_still_reassemble_correctly() -> None:
     )
     result = reassemble_bulk_chunks(df)
     assert result.data == b"AAAABBBBCC"
+    assert _segments(result) == [(0, 10, "Good")]
 
 
 def test_gap_in_the_middle_is_reported_and_zero_filled() -> None:
@@ -115,17 +147,48 @@ def test_gap_in_the_middle_is_reported_and_zero_filled() -> None:
     )
     result = reassemble_bulk_chunks(df)
     assert not result.is_gapless
+    assert not result.is_complete
     assert result.gaps == ((4, 8),)
     assert result.data == b"AAAA\x00\x00\x00\x00CCCC"
     assert result.covered_bytes == 8
+    assert result.missing_bytes == 4
     assert result.span_bytes == 12
+    assert _segments(result) == [(0, 4, "Good"), (4, 8, "Missing"), (8, 12, "Good")]
 
 
-def test_gap_at_the_start_is_reported() -> None:
+def test_assessment_starts_at_byte_zero_when_the_first_chunk_is_missing() -> None:
+    """The whole point of assessing from byte 0: a download whose opening
+    chunk never arrived must *say* its first bytes are missing, not quietly
+    start the report at the first byte that did arrive.
+    """
     df = _chunks_df([_chunk(offset=4, data=b"BBBB")])
     result = reassemble_bulk_chunks(df)
+    assert result.segments[0].start == 0
+    assert result.segments[0].status is ByteStatus.MISSING
     assert result.gaps == ((0, 4),)
     assert result.data == b"\x00\x00\x00\x00BBBB"
+    assert _segments(result) == [(0, 4, "Missing"), (4, 8, "Good")]
+
+
+def test_segments_tile_the_whole_span_with_no_holes_or_repeats() -> None:
+    df = _chunks_df(
+        [
+            _chunk(offset=10, data=b"AAAA"),
+            _chunk(offset=10, data=b"ZZZZ"),
+            _chunk(offset=20, data=b"BBBB"),
+        ]
+    )
+    result = reassemble_bulk_chunks(df)
+    assert result.segments[0].start == 0
+    assert result.segments[-1].end == result.span_bytes
+    for previous, segment in zip(result.segments, result.segments[1:], strict=False):
+        assert previous.end == segment.start
+        # Maximal runs: two neighbours never share a status.
+        assert previous.status is not segment.status
+    assert (
+        result.good_bytes + result.missing_bytes + result.conflict_bytes
+        == result.span_bytes
+    )
 
 
 def test_duplicate_offset_with_agreeing_bytes_is_not_a_conflict() -> None:
@@ -138,7 +201,7 @@ def test_duplicate_offset_with_agreeing_bytes_is_not_a_conflict() -> None:
     )
     result = reassemble_bulk_chunks(df)
     # Duplicated (e.g. retransmitted) offsets are routine and listed, but
-    # since the copies agree, this isn't a conflict.
+    # since the copies agree, every byte is good.
     assert len(result.duplicates) == 1
     dup = result.duplicates[0]
     assert dup.offset == 0
@@ -147,11 +210,46 @@ def test_duplicate_offset_with_agreeing_bytes_is_not_a_conflict() -> None:
     assert dup.lengths == (4,)
     assert dup.consistent
     assert not result.has_conflicts
-    assert result.conflicts == ()
+    assert result.is_complete
+    assert _segments(result) == [(0, 8, "Good")]
     assert result.data == b"AAAABBBB"
 
 
-def test_duplicate_offset_with_conflicting_bytes_is_a_conflict() -> None:
+def test_only_the_disagreeing_bytes_are_flagged_conflicting() -> None:
+    """The per-byte assessment's reason for existing: two copies of an offset
+    that differ in one byte make *that byte* conflicting, not the whole
+    packet's worth of bytes around it.
+    """
+    df = _chunks_df(
+        [
+            _chunk(offset=0, data=b"AAAA"),
+            _chunk(offset=0, data=b"AAZA"),
+        ]
+    )
+    result = reassemble_bulk_chunks(df)
+    assert result.conflict_bytes == 1
+    assert result.good_bytes == 3
+    assert result.conflict_ranges == ((2, 3),)
+    assert _segments(result) == [(0, 2, "Good"), (2, 3, "Conflicting"), (3, 4, "Good")]
+
+
+def test_unaligned_overlap_between_different_offsets_is_assessed() -> None:
+    """Two chunks at *different* offsets can overlap and disagree -- invisible
+    to a per-offset check (neither offset repeats), caught per byte.
+    """
+    df = _chunks_df(
+        [
+            _chunk(offset=0, data=b"AAAAAA"),
+            _chunk(offset=4, data=b"AZZZ"),  # overlaps bytes 4..6, differs at 5
+        ]
+    )
+    result = reassemble_bulk_chunks(df)
+    assert not result.duplicates  # no offset repeats
+    assert result.conflict_ranges == ((5, 6),)
+    assert _segments(result) == [(0, 5, "Good"), (5, 6, "Conflicting"), (6, 8, "Good")]
+
+
+def test_conflicting_bytes_keep_the_file_from_being_complete() -> None:
     df = _chunks_df(
         [
             _chunk(offset=0, data=b"AAAA"),
@@ -160,13 +258,9 @@ def test_duplicate_offset_with_conflicting_bytes_is_a_conflict() -> None:
     )
     result = reassemble_bulk_chunks(df)
     assert result.has_conflicts
-    assert len(result.conflicts) == 1
-    dup = result.duplicates[0]
-    assert dup.count == 2
-    assert dup.distinct_contents_count == 2
-    assert not dup.consistent
-    # Last row in the given DataFrame order wins.
-    assert result.data == b"ZZZZ"
+    assert result.is_gapless  # every byte arrived...
+    assert not result.is_complete  # ...but not trustworthily
+    assert _segments(result) == [(0, 4, "Conflicting")]
 
 
 def test_duplicate_offset_with_differing_lengths_reports_both() -> None:
@@ -179,12 +273,192 @@ def test_duplicate_offset_with_differing_lengths_reports_both() -> None:
     result = reassemble_bulk_chunks(df)
     dup = result.duplicates[0]
     assert dup.lengths == (4, 6)
+    # The shorter copy simply has nothing to say about bytes 4..6, so those
+    # aren't a conflict -- only what both copies cover can disagree.
+    assert not result.has_conflicts
+    assert result.data == b"AAAAAA"
 
 
 def test_span_over_safety_cap_raises() -> None:
     df = _chunks_df([_chunk(offset=MAX_REASSEMBLY_SPAN_BYTES + 1, data=b"A")])
     with pytest.raises(ValueError, match="safety cap"):
         reassemble_bulk_chunks(df)
+
+
+# ---------------------------------------------------------------------------
+# conflict islands
+# ---------------------------------------------------------------------------
+
+
+def test_coincidentally_agreeing_bytes_are_absorbed_into_the_conflict() -> None:
+    """Two transmissions of different data will share the odd byte by
+    chance; those must not speckle the conflicted region with one-byte
+    "good" runs, which is neither readable nor true corroboration.
+    """
+    df = _chunks_df(
+        [
+            _chunk(offset=0, data=b"AAAAAAAAAA"),
+            #                       ^    ^  -- agree at bytes 2 and 7 only
+            _chunk(offset=0, data=b"ZZAZZZZAZZ"),
+        ]
+    )
+    result = reassemble_bulk_chunks(df)
+    assert _segments(result) == [(0, 10, "Conflicting")]
+    assert result.conflict_bytes == 10
+    assert result.good_bytes == 0
+
+
+def test_a_long_agreeing_run_between_conflicts_is_kept() -> None:
+    """The flip side: a stretch two transmissions really do share is worth
+    seeing as its own run, so only runs up to
+    `CONFLICT_ISLAND_MAX_BYTES` get absorbed.
+    """
+    agreed = b"S" * (CONFLICT_ISLAND_MAX_BYTES + 1)
+    df = _chunks_df(
+        [
+            _chunk(offset=0, data=b"AA" + agreed + b"AA"),
+            _chunk(offset=0, data=b"ZZ" + agreed + b"ZZ"),
+        ]
+    )
+    result = reassemble_bulk_chunks(df)
+    assert _segments(result) == [
+        (0, 2, "Conflicting"),
+        (2, 2 + len(agreed), "Good"),
+        (2 + len(agreed), 4 + len(agreed), "Conflicting"),
+    ]
+
+
+def test_absorption_needs_conflict_on_both_sides() -> None:
+    """A short good run at the edge of a contested region -- bordering
+    missing bytes or the end of the file -- is a boundary, not an island,
+    so it keeps its own verdict.
+    """
+    df = _chunks_df(
+        [
+            _chunk(offset=0, data=b"AAAA"),
+            _chunk(offset=0, data=b"ZZZA"),  # byte 3 agrees, at the edge
+            # bytes 4..8 never arrive, so the good byte borders a gap
+            _chunk(offset=8, data=b"BBBB"),
+        ]
+    )
+    result = reassemble_bulk_chunks(df)
+    assert _segments(result) == [
+        (0, 3, "Conflicting"),
+        (3, 4, "Good"),
+        (4, 8, "Missing"),
+        (8, 12, "Good"),
+    ]
+
+
+def test_absorbed_island_keeps_the_agreed_byte_value() -> None:
+    """Re-labelling is a display decision, not a data one: an absorbed
+    byte's copies agreed, so it already holds the value any policy would
+    pick, whichever policy is in force.
+    """
+    df = _chunks_df(
+        [
+            _chunk(offset=0, data=b"AAA", received_at="2026-01-01T00:00:00"),
+            _chunk(offset=0, data=b"ZAZ", received_at="2026-01-01T00:00:01"),
+        ]
+    )
+    for policy in ConflictPolicy:
+        result = reassemble_bulk_chunks(df, policy=policy)
+        assert _segments(result) == [(0, 3, "Conflicting")]
+        assert result.data[1:2] == b"A"
+
+
+# ---------------------------------------------------------------------------
+# ConflictPolicy
+# ---------------------------------------------------------------------------
+
+
+def _conflicted_df() -> pl.DataFrame:
+    """One byte, four disagreeing copies: "B" twice (the most common value,
+    first and last to arrive), "A" once (earliest overall), "C" once.
+    """
+    return _chunks_df(
+        [
+            _chunk(offset=0, data=b"A", received_at="2026-01-01T00:00:00"),
+            _chunk(offset=0, data=b"B", received_at="2026-01-01T00:00:01"),
+            _chunk(offset=0, data=b"C", received_at="2026-01-01T00:00:02"),
+            _chunk(offset=0, data=b"B", received_at="2026-01-01T00:00:03"),
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    ("policy", "expected"),
+    [
+        (ConflictPolicy.EARLIEST, b"A"),
+        (ConflictPolicy.LATEST, b"B"),
+        # "B" wins the tally either way; the tie-break only decides between
+        # equally common values, of which there are none here.
+        (ConflictPolicy.MOST_COMMON_THEN_EARLIEST, b"B"),
+        (ConflictPolicy.MOST_COMMON_THEN_LATEST, b"B"),
+    ],
+)
+def test_conflict_policy_picks_the_expected_copy(
+    policy: ConflictPolicy, expected: bytes
+) -> None:
+    result = reassemble_bulk_chunks(_conflicted_df(), policy=policy)
+    assert result.data == expected
+    assert result.policy is policy
+    # Resolving a conflict never hides it.
+    assert result.has_conflicts
+    assert result.conflict_ranges == ((0, 1),)
+
+
+@pytest.mark.parametrize(
+    ("policy", "expected"),
+    [
+        (ConflictPolicy.MOST_COMMON_THEN_EARLIEST, b"A"),
+        (ConflictPolicy.MOST_COMMON_THEN_LATEST, b"B"),
+    ],
+)
+def test_most_common_tie_is_broken_by_recency(
+    policy: ConflictPolicy, expected: bytes
+) -> None:
+    # "A" and "B" both arrive twice; only the tie-break separates them.
+    df = _chunks_df(
+        [
+            _chunk(offset=0, data=b"A", received_at="2026-01-01T00:00:00"),
+            _chunk(offset=0, data=b"B", received_at="2026-01-01T00:00:01"),
+            _chunk(offset=0, data=b"A", received_at="2026-01-01T00:00:02"),
+            _chunk(offset=0, data=b"B", received_at="2026-01-01T00:00:03"),
+        ]
+    )
+    assert reassemble_bulk_chunks(df, policy=policy).data == expected
+
+
+def test_policy_resolves_each_byte_independently() -> None:
+    """A policy picks a winner per *byte*, not per packet: the later packet
+    can be right about one byte and the earlier one right about another.
+    """
+    df = _chunks_df(
+        [
+            _chunk(offset=0, data=b"AX", received_at="2026-01-01T00:00:00"),
+            _chunk(offset=0, data=b"AY", received_at="2026-01-01T00:00:01"),
+            _chunk(offset=1, data=b"Y", received_at="2026-01-01T00:00:02"),
+        ]
+    )
+    result = reassemble_bulk_chunks(df, policy=ConflictPolicy.MOST_COMMON_THEN_EARLIEST)
+    # Byte 0: unanimous "A". Byte 1: "Y" twice beats "X" once.
+    assert result.data == b"AY"
+    assert _segments(result) == [(0, 1, "Good"), (1, 2, "Conflicting")]
+
+
+def test_row_order_does_not_change_the_result() -> None:
+    rows = [
+        _chunk(offset=0, data=b"A", received_at="2026-01-01T00:00:00"),
+        _chunk(offset=0, data=b"B", received_at="2026-01-01T00:00:01"),
+        _chunk(offset=1, data=b"CC", received_at="2026-01-01T00:00:02"),
+    ]
+    forward = reassemble_bulk_chunks(_chunks_df(rows), policy=ConflictPolicy.EARLIEST)
+    reversed_ = reassemble_bulk_chunks(
+        _chunks_df(list(reversed(rows))), policy=ConflictPolicy.EARLIEST
+    )
+    assert forward.data == reversed_.data == b"ACC"
+    assert forward.segments == reversed_.segments
 
 
 # ---------------------------------------------------------------------------
@@ -345,74 +619,85 @@ def test_multiple_distinct_headers_are_all_returned() -> None:
 
 
 def _decode_indexed_png(png: bytes) -> tuple[int, int, list[bytes]]:
-    """Minimal indexed-PNG decoder for test assertions: (width, height, rows
-    of raw palette-index bytes, one row per scanline).
+    """(width, height, rows of raw palette-index bytes) of an indexed PNG's
+    *data area* -- the rulers `render_coverage_png` draws around it are
+    cropped off, so these assertions stay about the coverage bitmap itself
+    and don't shift every time the rulers' size changes.
     """
-    assert png[:8] == b"\x89PNG\r\n\x1a\n"
-    pos = 8
-    idat = b""
-    width = height = 0
-    while pos < len(png):
-        length = struct.unpack(">I", png[pos : pos + 4])[0]
-        chunk_type = png[pos + 4 : pos + 8]
-        data = png[pos + 8 : pos + 8 + length]
-        if chunk_type == b"IHDR":
-            width, height = struct.unpack(">II", data[:8])
-        elif chunk_type == b"IDAT":
-            idat += data
-        pos += 8 + length + 4
-
-    raw = zlib.decompress(idat)
-    stride = width + 1
+    image = Image.open(io.BytesIO(png))
+    assert image.mode == "P"
+    if image.size != (1, 1):  # the empty-result image has no rulers
+        # The gutter is sized to the labels it has to print, so it's read
+        # back off the image rather than assumed.
+        gutter = image.size[0] - COVERAGE_ROW_WIDTH_BYTES
+        image = image.crop((gutter, coverage_ruler_height_px(), *image.size))
+    width, height = image.size
+    pixels = image.tobytes()
     return (
         width,
         height,
-        [raw[i * stride + 1 : (i + 1) * stride] for i in range(height)],
+        [pixels[y * width : (y + 1) * width] for y in range(height)],
     )
+
+
+# Palette indices, per `file_reassembly._COVERAGE_STATUS_INDEX`.
+_MISSING_PX, _GOOD_PX, _CONFLICT_PX, _PAD_PX, _INK_PX = 0, 1, 2, 3, 4
 
 
 def test_coverage_png_empty_result_is_a_single_pixel() -> None:
     result = reassemble_bulk_chunks(_chunks_df([]))
     width, height, rows = _decode_indexed_png(render_coverage_png(result))
     assert (width, height) == (1, 1)
-    assert rows[0] == bytes([1])  # covered-color index
+    assert rows[0] == bytes([_GOOD_PX])
 
 
-def test_coverage_png_marks_gaps_and_covered_bytes_correctly() -> None:
+def test_coverage_png_marks_gaps_and_good_bytes_correctly() -> None:
+    # Spans two rows whatever COVERAGE_ROW_WIDTH_BYTES is set to, so the
+    # wrap-onto-the-next-row arithmetic is exercised either way.
+    last_offset = COVERAGE_ROW_WIDTH_BYTES + 195
     df = _chunks_df(
         [
             _chunk(offset=0, data=b"A" * 195),
-            # bytes 195..390 missing
-            _chunk(offset=390, data=b"A" * 195),
+            # bytes 195..last_offset missing
+            _chunk(offset=last_offset, data=b"A" * 195),
         ]
     )
     result = reassemble_bulk_chunks(df)
     assert result.gaps  # sanity: there is a gap
     width, height, rows = _decode_indexed_png(render_coverage_png(result))
     assert width == COVERAGE_ROW_WIDTH_BYTES
-    assert height == 2  # 585 bytes / 390-wide rows, rounded up
+    assert height == 2
 
-    # Recompute expected row/col for each gap byte and check it decoded red (0).
+    # Recompute expected row/col for each gap byte and check it decoded red.
     for start, end in result.gaps:
         for byte_index in range(start, end):
             row, col = divmod(byte_index, COVERAGE_ROW_WIDTH_BYTES)
-            assert rows[row][col] == 0
-    # And covered bytes decode green (1).
-    for byte_index in (0, 194, 390, 584):
+            assert rows[row][col] == _MISSING_PX
+    # And received bytes decode green.
+    for byte_index in (0, 194, last_offset, last_offset + 194):
         row, col = divmod(byte_index, COVERAGE_ROW_WIDTH_BYTES)
-        assert rows[row][col] == 1
+        assert rows[row][col] == _GOOD_PX
 
 
-def test_coverage_png_pads_last_row_without_marking_it_covered_or_gap() -> None:
+def test_coverage_png_pads_last_row_without_marking_it_good_or_missing() -> None:
     # A span that doesn't divide evenly into COVERAGE_ROW_WIDTH_BYTES --
-    # the padding pixels (index 3) must be distinguishable from the other
-    # (covered/gap/conflict) states so they don't get misread as one of them.
+    # the padding pixels must be distinguishable from the other
+    # (good/missing/conflicting) states so they don't get misread as one.
     df = _chunks_df([_chunk(offset=0, data=b"A" * 10)])
     result = reassemble_bulk_chunks(df)
     _width, height, rows = _decode_indexed_png(render_coverage_png(result))
     assert height == 1
-    assert rows[0][:10] == bytes([1]) * 10
-    assert set(rows[0][10:]) == {3}
+    assert rows[0][:10] == bytes([_GOOD_PX]) * 10
+    assert set(rows[0][10:]) == {_PAD_PX}
+
+
+def test_coverage_png_pad_index_is_transparent() -> None:
+    """The padding block must not paint: it's past the end of the file, and a
+    visible block there would read as real (missing or good) data.
+    """
+    result = reassemble_bulk_chunks(_chunks_df([_chunk(offset=0, data=b"A" * 10)]))
+    image = Image.open(io.BytesIO(render_coverage_png(result)))
+    assert image.info["transparency"] == _PAD_PX
 
 
 def test_coverage_png_marks_conflicting_range_yellow() -> None:
@@ -427,13 +712,13 @@ def test_coverage_png_marks_conflicting_range_yellow() -> None:
     assert result.conflict_ranges == ((0, 4),)
 
     _width, _height, rows = _decode_indexed_png(render_coverage_png(result))
-    assert list(rows[0][0:4]) == [2, 2, 2, 2]  # conflict index
-    assert list(rows[0][4:8]) == [1, 1, 1, 1]  # covered (clean) index
+    assert list(rows[0][0:4]) == [_CONFLICT_PX] * 4
+    assert list(rows[0][4:8]) == [_GOOD_PX] * 4
 
 
-def test_conflict_ranges_merges_contiguous_conflicting_offsets() -> None:
-    # Two back-to-back conflicting offsets (0..4 and 4..8) should merge into
-    # a single reported range, not two adjacent ones.
+def test_conflicting_segments_merge_across_adjacent_offsets() -> None:
+    # Two back-to-back conflicting offsets (0..4 and 4..8) are one run of
+    # conflicting bytes, not two adjacent ones.
     df = _chunks_df(
         [
             _chunk(offset=0, data=b"AAAA"),
@@ -446,5 +731,158 @@ def test_conflict_ranges_merges_contiguous_conflicting_offsets() -> None:
         ]
     )
     result = reassemble_bulk_chunks(df)
-    assert len(result.conflicts) == 3
     assert result.conflict_ranges == ((0, 8), (20, 24))
+    assert _segments(result) == [
+        (0, 8, "Conflicting"),
+        (8, 20, "Missing"),
+        (20, 24, "Conflicting"),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# coverage map rulers
+# ---------------------------------------------------------------------------
+
+
+def _full_png_pixels(png: bytes) -> tuple[Image.Image, list[bytes]]:
+    """The whole image (rulers included) and its rows of palette indices."""
+    image = Image.open(io.BytesIO(png))
+    width, _height = image.size
+    pixels = image.tobytes()
+    return image, [pixels[y * width : (y + 1) * width] for y in range(image.size[1])]
+
+
+def test_coverage_png_size_matches_the_encoded_image() -> None:
+    result = reassemble_bulk_chunks(
+        _chunks_df([_chunk(offset=0, data=b"A" * COVERAGE_ROW_WIDTH_BYTES * 3)])
+    )
+    image = Image.open(io.BytesIO(render_coverage_png(result)))
+    assert image.size == coverage_png_size(result)
+    # Rulers plus three full rows of data.
+    assert image.size == (
+        coverage_gutter_width_px(3, COVERAGE_ROW_WIDTH_BYTES)
+        + COVERAGE_ROW_WIDTH_BYTES,
+        coverage_ruler_height_px() + 3,
+    )
+
+
+def test_top_ruler_ticks_every_packet_boundary() -> None:
+    """The tick column must land exactly on the first pixel of each packet,
+    which is the whole reason the rulers are drawn into the image instead of
+    being positioned over it in HTML.
+    """
+    result = reassemble_bulk_chunks(
+        _chunks_df([_chunk(offset=0, data=b"A" * COVERAGE_ROW_WIDTH_BYTES)])
+    )
+    image, rows = _full_png_pixels(render_coverage_png(result))
+    gutter = image.size[0] - COVERAGE_ROW_WIDTH_BYTES
+    # The row just above the data is where the ticks bottom out.
+    tick_row = rows[coverage_ruler_height_px() - 1]
+    # Only the columns above the data: the left gutter's row-0 label is
+    # centred on row 0, so its glyphs reach up into this row too.
+    inked = {x for x, index in enumerate(tick_row) if index == _INK_PX and x >= gutter}
+    assert inked == {
+        gutter + offset
+        for offset in range(0, COVERAGE_ROW_WIDTH_BYTES, BULK_DOWNLINK_MAX_DATA)
+    }
+
+
+def test_left_ruler_ticks_the_labelled_rows() -> None:
+    row_count = COVERAGE_OFFSET_LABEL_INTERVAL_ROWS + 1
+    result = reassemble_bulk_chunks(
+        _chunks_df([_chunk(offset=0, data=b"A" * COVERAGE_ROW_WIDTH_BYTES * row_count)])
+    )
+    image, rows = _full_png_pixels(render_coverage_png(result))
+    # The pixel column just left of the data is where the ticks end.
+    tick_column = image.size[0] - COVERAGE_ROW_WIDTH_BYTES - 1
+    ruler = coverage_ruler_height_px()
+    inked = {y for y in range(len(rows)) if rows[y][tick_column] == _INK_PX}
+    assert inked == {ruler, ruler + COVERAGE_OFFSET_LABEL_INTERVAL_ROWS}
+
+
+def test_offset_label_interval_widens_for_very_tall_maps() -> None:
+    assert coverage_label_interval_rows(1_000) == COVERAGE_OFFSET_LABEL_INTERVAL_ROWS
+    # Past the label cap the interval grows in multiples, keeping the count
+    # bounded rather than emitting thousands of labels.
+    tall = COVERAGE_OFFSET_LABEL_INTERVAL_ROWS * 500 + 1
+    interval = coverage_label_interval_rows(tall)
+    assert interval == COVERAGE_OFFSET_LABEL_INTERVAL_ROWS * 2
+    assert -(-tall // interval) <= 500
+
+
+def test_rulers_do_not_overwrite_the_data_area() -> None:
+    """Ink belongs in the margins only -- a tick bleeding into the bitmap
+    would read as a byte with a status it doesn't have.
+    """
+    result = reassemble_bulk_chunks(
+        _chunks_df([_chunk(offset=0, data=b"A" * COVERAGE_ROW_WIDTH_BYTES * 2)])
+    )
+    _width, _height, rows = _decode_indexed_png(render_coverage_png(result))
+    assert all(set(row) == {_GOOD_PX} for row in rows)
+
+
+def test_byte_segment_length() -> None:
+    assert ByteSegment(4, 10, ByteStatus.GOOD).length == 6
+
+
+# ---------------------------------------------------------------------------
+# per-segment copy counts
+# ---------------------------------------------------------------------------
+
+
+def _copies(result: ReassemblyResult) -> list[tuple[int, int]]:
+    return [(s.min_copies, s.max_copies) for s in result.segments]
+
+
+def test_copies_counted_per_segment() -> None:
+    df = _chunks_df(
+        [
+            _chunk(offset=0, data=b"AAAA"),
+            _chunk(offset=0, data=b"AAAA"),  # bytes 0..4 arrived twice
+            _chunk(offset=4, data=b"BBBB"),  # bytes 4..8 arrived once
+        ]
+    )
+    result = reassemble_bulk_chunks(df)
+    # One `Good` run either way -- the copy count varies *within* it, which
+    # is exactly what the min/max spread is for.
+    assert _segments(result) == [(0, 8, "Good")]
+    assert _copies(result) == [(1, 2)]
+
+
+def test_missing_segment_has_zero_copies() -> None:
+    df = _chunks_df(
+        [
+            _chunk(offset=0, data=b"AAAA"),
+            _chunk(offset=8, data=b"CCCC"),
+        ]
+    )
+    result = reassemble_bulk_chunks(df)
+    assert _segments(result) == [(0, 4, "Good"), (4, 8, "Missing"), (8, 12, "Good")]
+    assert _copies(result) == [(1, 1), (0, 0), (1, 1)]
+
+
+def test_conflicting_segment_counts_the_disagreeing_copies() -> None:
+    df = _chunks_df(
+        [
+            _chunk(offset=0, data=b"A", received_at="2026-01-01T00:00:00"),
+            _chunk(offset=0, data=b"B", received_at="2026-01-01T00:00:01"),
+            _chunk(offset=0, data=b"C", received_at="2026-01-01T00:00:02"),
+        ]
+    )
+    result = reassemble_bulk_chunks(df)
+    assert _segments(result) == [(0, 1, "Conflicting")]
+    assert _copies(result) == [(3, 3)]
+
+
+def test_copies_span_partially_overlapping_chunks() -> None:
+    # Bytes 0..4 from one packet, 4..6 from two (an overlap that agrees),
+    # 6..8 from one -- all one good run, copies 1-2 across it.
+    df = _chunks_df(
+        [
+            _chunk(offset=0, data=b"AAAAAA"),
+            _chunk(offset=4, data=b"AAAA"),
+        ]
+    )
+    result = reassemble_bulk_chunks(df)
+    assert _segments(result) == [(0, 8, "Good")]
+    assert _copies(result) == [(1, 2)]
