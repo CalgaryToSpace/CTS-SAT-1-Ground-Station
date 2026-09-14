@@ -661,7 +661,21 @@ def _header_candidates_table(candidates: list[BulkHeaderCandidate]) -> None:
     groups = _group_consecutive_candidates(candidates_by_time)
 
     columns = [
-        {"name": "received_at", "label": "Received", "field": "received_at"},
+        {
+            "name": "received_count",
+            "label": "Times Received",
+            "field": "received_count",
+        },
+        {
+            "name": "first_received_at",
+            "label": "First Received (UTC)",
+            "field": "first_received_at",
+        },
+        {
+            "name": "last_received_at",
+            "label": "Last Received (UTC)",
+            "field": "last_received_at",
+        },
         {"name": "action", "label": "Action", "field": "action"},
         {"name": "file", "label": "File", "field": "file"},
         {"name": "file_size", "label": "Size (bytes)", "field": "file_size"},
@@ -676,13 +690,12 @@ def _header_candidates_table(candidates: list[BulkHeaderCandidate]) -> None:
     rows = [
         {
             "id": i,
-            "received_at": (
-                f"{group.members[0].received_at:%Y-%m-%d %H:%M:%S}"
-                if len(group.members) == 1
-                else f"{len(group.members)}x, "
-                f"{group.members[0].received_at:%Y-%m-%d %H:%M:%S} - "
-                f"{group.members[-1].received_at:%Y-%m-%d %H:%M:%S}"
-            ),
+            # `members` is in `received_at` order (see
+            # `_group_consecutive_candidates`), so first/last are its ends --
+            # equal for a group that was only received once.
+            "received_count": len(group.members),
+            "first_received_at": (f"{group.members[0].received_at:%Y-%m-%d %H:%M:%S}"),
+            "last_received_at": f"{group.members[-1].received_at:%Y-%m-%d %H:%M:%S}",
             "action": group.action or "",
             "file": group.file or "",
             "file_size": f"{group.file_size:,}" if group.file_size is not None else "",
