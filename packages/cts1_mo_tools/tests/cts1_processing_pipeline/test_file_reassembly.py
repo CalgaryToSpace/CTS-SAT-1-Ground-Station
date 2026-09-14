@@ -7,6 +7,7 @@ import polars as pl
 import pytest
 from cts1_mo_tools.cts1_processing_pipeline.web_ui.file_reassembly import (
     BULK_DOWNLINK_MAX_DATA,
+    CONFLICT_ISLAND_MAX_BYTES,
     COVERAGE_OFFSET_LABEL_INTERVAL_ROWS,
     COVERAGE_ROW_WIDTH_BYTES,
     MAX_REASSEMBLY_SPAN_BYTES,
@@ -282,6 +283,88 @@ def test_span_over_safety_cap_raises() -> None:
     df = _chunks_df([_chunk(offset=MAX_REASSEMBLY_SPAN_BYTES + 1, data=b"A")])
     with pytest.raises(ValueError, match="safety cap"):
         reassemble_bulk_chunks(df)
+
+
+# ---------------------------------------------------------------------------
+# conflict islands
+# ---------------------------------------------------------------------------
+
+
+def test_coincidentally_agreeing_bytes_are_absorbed_into_the_conflict() -> None:
+    """Two transmissions of different data will share the odd byte by
+    chance; those must not speckle the conflicted region with one-byte
+    "good" runs, which is neither readable nor true corroboration.
+    """
+    df = _chunks_df(
+        [
+            _chunk(offset=0, data=b"AAAAAAAAAA"),
+            #                       ^    ^  -- agree at bytes 2 and 7 only
+            _chunk(offset=0, data=b"ZZAZZZZAZZ"),
+        ]
+    )
+    result = reassemble_bulk_chunks(df)
+    assert _segments(result) == [(0, 10, "Conflicting")]
+    assert result.conflict_bytes == 10
+    assert result.good_bytes == 0
+
+
+def test_a_long_agreeing_run_between_conflicts_is_kept() -> None:
+    """The flip side: a stretch two transmissions really do share is worth
+    seeing as its own run, so only runs up to
+    `CONFLICT_ISLAND_MAX_BYTES` get absorbed.
+    """
+    agreed = b"S" * (CONFLICT_ISLAND_MAX_BYTES + 1)
+    df = _chunks_df(
+        [
+            _chunk(offset=0, data=b"AA" + agreed + b"AA"),
+            _chunk(offset=0, data=b"ZZ" + agreed + b"ZZ"),
+        ]
+    )
+    result = reassemble_bulk_chunks(df)
+    assert _segments(result) == [
+        (0, 2, "Conflicting"),
+        (2, 2 + len(agreed), "Good"),
+        (2 + len(agreed), 4 + len(agreed), "Conflicting"),
+    ]
+
+
+def test_absorption_needs_conflict_on_both_sides() -> None:
+    """A short good run at the edge of a contested region -- bordering
+    missing bytes or the end of the file -- is a boundary, not an island,
+    so it keeps its own verdict.
+    """
+    df = _chunks_df(
+        [
+            _chunk(offset=0, data=b"AAAA"),
+            _chunk(offset=0, data=b"ZZZA"),  # byte 3 agrees, at the edge
+            # bytes 4..8 never arrive, so the good byte borders a gap
+            _chunk(offset=8, data=b"BBBB"),
+        ]
+    )
+    result = reassemble_bulk_chunks(df)
+    assert _segments(result) == [
+        (0, 3, "Conflicting"),
+        (3, 4, "Good"),
+        (4, 8, "Missing"),
+        (8, 12, "Good"),
+    ]
+
+
+def test_absorbed_island_keeps_the_agreed_byte_value() -> None:
+    """Re-labelling is a display decision, not a data one: an absorbed
+    byte's copies agreed, so it already holds the value any policy would
+    pick, whichever policy is in force.
+    """
+    df = _chunks_df(
+        [
+            _chunk(offset=0, data=b"AAA", received_at="2026-01-01T00:00:00"),
+            _chunk(offset=0, data=b"ZAZ", received_at="2026-01-01T00:00:01"),
+        ]
+    )
+    for policy in ConflictPolicy:
+        result = reassemble_bulk_chunks(df, policy=policy)
+        assert _segments(result) == [(0, 3, "Conflicting")]
+        assert result.data[1:2] == b"A"
 
 
 # ---------------------------------------------------------------------------

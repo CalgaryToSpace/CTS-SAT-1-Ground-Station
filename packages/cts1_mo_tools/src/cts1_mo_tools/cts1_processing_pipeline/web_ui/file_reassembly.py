@@ -64,6 +64,7 @@ this module does is:
 from __future__ import annotations
 
 __all__ = [
+    "CONFLICT_ISLAND_MAX_BYTES",
     "COVERAGE_PACKETS_PER_ROW",
     "COVERAGE_ROW_WIDTH_BYTES",
     "COVERAGE_RULER_FONT_SIZE_PX",
@@ -89,7 +90,7 @@ import heapq
 import io
 import re
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from functools import cache
 from itertools import pairwise
@@ -112,6 +113,13 @@ if TYPE_CHECKING:
 MAX_REASSEMBLY_SPAN_BYTES = 256 * 1024 * 1024
 
 SHA256_HEX_LEN = 64
+
+# The longest `GOOD` run that `_absorb_conflict_islands` will re-label when
+# it's stranded between two `CONFLICTING` runs. Sized to be well past what
+# two different transmissions match on by coincidence (a shared zero byte, a
+# repeated field value) but well short of a stretch two transmissions
+# genuinely share.
+CONFLICT_ISLAND_MAX_BYTES = 16
 
 
 class ByteStatus(StrEnum):
@@ -350,16 +358,9 @@ def _resolve_conflicting_byte(
     return max(keys_by_value.items(), key=lambda item: (len(item[1]), max(item[1])))[0]
 
 
-def _append_segment(
-    segments: list[ByteSegment],
-    start: int,
-    end: int,
-    status: ByteStatus,
-    copies: int,
-) -> None:
-    """Append `[start, end)` -- every byte of it carried by `copies` packets
-    -- to `segments`, extending the previous run instead if it has the same
-    status and ends where this one starts.
+def _merge_segment(segments: list[ByteSegment], segment: ByteSegment) -> None:
+    """Append `segment` to `segments`, extending the previous run instead if
+    it has the same status and ends where this one starts.
 
     That merge is what keeps `.segments` a list of *maximal* runs however
     finely the assessment happened to decide them (a conflicting overlap is
@@ -368,19 +369,75 @@ def _append_segment(
     rather than overwriting them, so a run that spans a retransmission
     boundary reports the spread across it.
     """
-    if end <= start:
+    if segment.length <= 0:
         return
     previous = segments[-1] if segments else None
-    if previous is not None and previous.status is status and previous.end == start:
+    if (
+        previous is not None
+        and previous.status is segment.status
+        and previous.end == segment.start
+    ):
         segments[-1] = ByteSegment(
             previous.start,
-            end,
-            status,
-            min(previous.min_copies, copies),
-            max(previous.max_copies, copies),
+            segment.end,
+            segment.status,
+            min(previous.min_copies, segment.min_copies),
+            max(previous.max_copies, segment.max_copies),
         )
     else:
-        segments.append(ByteSegment(start, end, status, copies, copies))
+        segments.append(segment)
+
+
+def _append_segment(
+    segments: list[ByteSegment],
+    start: int,
+    end: int,
+    status: ByteStatus,
+    copies: int,
+) -> None:
+    """`_merge_segment` for a run whose bytes were each carried by exactly
+    `copies` packets.
+    """
+    _merge_segment(segments, ByteSegment(start, end, status, copies, copies))
+
+
+def _absorb_conflict_islands(
+    segments: list[ByteSegment],
+) -> tuple[ByteSegment, ...]:
+    """Re-label short `GOOD` runs stranded between two `CONFLICTING` runs as
+    conflicting, and re-merge what that joins up.
+
+    Where two transmissions of different data overlap, a few bytes will
+    match by coincidence -- a shared 0x00, a run of spaces, the same field
+    value -- and strictly per-byte labelling turns a solidly conflicted
+    region into a stripe of one-byte "good" islands. Those islands aren't
+    information: the bytes agree by chance, not because anything
+    corroborates them, and the region as a whole still needs either a
+    narrower time range or a conflict policy applied to it. Anything longer
+    than `CONFLICT_ISLAND_MAX_BYTES` is left alone, since a genuinely
+    agreeing stretch that long (e.g. the part of an overlap both
+    transmissions really do share) is worth seeing as its own run.
+
+    Only runs with conflict on *both* sides are absorbed -- a good run
+    bordering missing bytes or the file's edge is at the boundary of the
+    contested region, not stranded inside it. The bytes themselves are
+    untouched: an absorbed run's copies agreed, so it already holds the
+    value any `ConflictPolicy` would have picked.
+    """
+    absorbed: list[ByteSegment] = []
+    for index, segment in enumerate(segments):
+        is_island = (
+            segment.status is ByteStatus.GOOD
+            and segment.length <= CONFLICT_ISLAND_MAX_BYTES
+            and 0 < index < len(segments) - 1
+            and segments[index - 1].status is ByteStatus.CONFLICTING
+            and segments[index + 1].status is ByteStatus.CONFLICTING
+        )
+        _merge_segment(
+            absorbed,
+            replace(segment, status=ByteStatus.CONFLICTING) if is_island else segment,
+        )
+    return tuple(absorbed)
 
 
 def _assess_bytes(
@@ -449,7 +506,7 @@ def _assess_bytes(
                 status = ByteStatus.CONFLICTING
             _append_segment(segments, pos, pos + 1, status, copies)
 
-    return bytes(buf), tuple(segments)
+    return bytes(buf), _absorb_conflict_islands(segments)
 
 
 def _decode_chunks(df: pl.DataFrame) -> list[_Chunk]:
