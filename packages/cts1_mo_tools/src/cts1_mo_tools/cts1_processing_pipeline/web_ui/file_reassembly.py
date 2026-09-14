@@ -10,14 +10,29 @@ one or more `received_at` time ranges that isolate a single download. What
 this module does is:
 
   - `reassemble_bulk_chunks()`: given whatever chunks the caller selected,
-    assemble them into one byte string ordered by offset (missing byte
-    ranges are left as `\\x00` and reported separately as `.gaps`), and
-    summarize every distinct offset seen (`.offsets`) -- `.duplicates` is
-    the subset that showed up more than once. A duplicated offset alone
-    isn't a problem (e.g. a harmless retransmission); only `.conflicts`
-    (repeats that disagree on the bytes) means the caller's time-range
-    filter needs narrowing, since that's the sign two different files'
-    chunks got mixed into the same selection.
+    assemble them into one byte string ordered by offset. The assessment of
+    what came out is done **per byte**, not per packet: every byte in the
+    file is `MISSING` (no packet ever carried it), `GOOD` (every packet
+    that carried it agrees on its value), or `CONFLICTING` (two or more
+    packets carried it with *different* values). Packets that overlap at
+    unaligned offsets are therefore judged on the bytes they actually
+    disagree about, rather than a whole repeated offset being written off
+    as suspect. Those per-byte verdicts are then run-length encoded into
+    `.segments` -- maximal consecutive runs of one status, always starting
+    at byte 0 (a file whose first chunk never arrived opens with a
+    `MISSING` segment rather than silently starting at the first byte that
+    did) -- which is both what the UI renders and where `.gaps` /
+    `.conflict_ranges` come from.
+
+    A `CONFLICTING` byte still has to be *given* a value in the output, and
+    which copy wins is the caller's call via `ConflictPolicy` (earliest /
+    latest / most-common-then-earliest / most-common-then-latest): a
+    conflict usually means two different transmissions' chunks were
+    selected together, and which of those to trust is a judgement the
+    operator makes from the download's history, not something this module
+    can infer. Resolution never hides the conflict -- a resolved byte stays
+    `CONFLICTING` in `.segments`, so `.is_complete` stays False and the
+    export is still marked partial.
 
   - `find_header_candidates()`: a bulk downlink is nominally preceded by a
     `TCMD_RESPONSE` whose text is a JSON file descriptor (name, size,
@@ -39,18 +54,23 @@ this module does is:
     ground truth.
 
   - `render_coverage_png()`: a byte-per-pixel bitmap of which bytes are
-    covered vs. missing, one pixel per byte -- the web UI scales it up 3x
-    with CSS (`image-rendering: pixelated`) rather than this baking the
-    zoom into the image data, so a 20+ MB file's map still only encodes one
-    pixel per byte, and PNG's DEFLATE compression makes the (typically
-    long) covered/missing runs cheap to ship over the websocket.
+    good vs. missing vs. conflicting, one pixel per byte -- the web UI
+    scales it up 3x with CSS (`image-rendering: pixelated`) rather than
+    this baking the zoom into the image data, so a 20+ MB file's map still
+    only encodes one pixel per byte, and PNG's DEFLATE compression makes
+    the (typically long) runs of one status cheap to ship over the
+    websocket.
 """
 
 from __future__ import annotations
 
 __all__ = [
     "COVERAGE_ROW_WIDTH_BYTES",
+    "MAX_REASSEMBLY_SPAN_BYTES",
     "BulkHeaderCandidate",
+    "ByteSegment",
+    "ByteStatus",
+    "ConflictPolicy",
     "OffsetSummary",
     "ReassemblyResult",
     "detect_picam_image",
@@ -60,30 +80,22 @@ __all__ = [
 ]
 
 import hashlib
+import heapq
+import io
 import re
-import struct
-import zlib
+from collections import defaultdict
 from dataclasses import dataclass
+from enum import StrEnum
+from itertools import pairwise
 from typing import TYPE_CHECKING, Any
 
 import polars as pl
+from PIL import Image
 
 from cts1_mo_tools.cts1_picam_to_jpg import parse_picam_ascii_to_jpg_bytes
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
     from datetime import datetime
-
-
-def _merge_ranges(ranges: Iterable[tuple[int, int]]) -> tuple[tuple[int, int], ...]:
-    """Sort `ranges` and merge any that touch or overlap into one."""
-    merged: list[list[int]] = []
-    for start, end in sorted(ranges):
-        if merged and start <= merged[-1][1]:
-            merged[-1][1] = max(merged[-1][1], end)
-        else:
-            merged.append([start, end])
-    return tuple((start, end) for start, end in merged)
 
 
 # A corrupted/garbage `bulk_file_offset` (a raw uint32 straight off the
@@ -91,11 +103,77 @@ def _merge_ranges(ranges: Iterable[tuple[int, int]]) -> tuple[tuple[int, int], .
 # near that instead of hanging or exhausting memory on bad input.
 MAX_REASSEMBLY_SPAN_BYTES = 256 * 1024 * 1024
 
+SHA256_HEX_LEN = 64
+
+
+class ByteStatus(StrEnum):
+    """The verdict on one byte (or, in a `ByteSegment`, one run of bytes)."""
+
+    MISSING = "Missing"
+    GOOD = "Good"
+    CONFLICTING = "Conflicting"
+
+
+class ConflictPolicy(StrEnum):
+    """How to pick the winning value for a byte that arrived with two or
+    more disagreeing values.
+
+    Every policy is a total order over the copies of *one byte*, so a run
+    of conflicting bytes is resolved byte by byte rather than by picking a
+    single "winning packet" -- two packets can each be right about part of
+    an overlap.
+
+    `received_at` ties (two copies of the same byte received in the same
+    timestamp tick) are broken by the chunk's position in the caller's
+    DataFrame, so a given selection always resolves the same way.
+    """
+
+    EARLIEST = "earliest"
+    LATEST = "latest"
+    MOST_COMMON_THEN_EARLIEST = "most_common_then_earliest"
+    MOST_COMMON_THEN_LATEST = "most_common_then_latest"
+
+    @property
+    def label(self) -> str:
+        """A human-readable name for the UI's policy selector."""
+        return _CONFLICT_POLICY_LABELS[self]
+
+
+_CONFLICT_POLICY_LABELS = {
+    ConflictPolicy.EARLIEST: "Earliest packet wins",
+    ConflictPolicy.LATEST: "Latest packet wins",
+    ConflictPolicy.MOST_COMMON_THEN_EARLIEST: ("Most common value wins, then earliest"),
+    ConflictPolicy.MOST_COMMON_THEN_LATEST: "Most common value wins, then latest",
+}
+
+DEFAULT_CONFLICT_POLICY = ConflictPolicy.MOST_COMMON_THEN_LATEST
+
+
+@dataclass(slots=True, frozen=True)
+class ByteSegment:
+    """One maximal run of consecutive bytes sharing a `ByteStatus`.
+
+    `start` is inclusive, `end` exclusive. Segments tile `[0, span_bytes)`
+    with no holes and no two neighbours sharing a status.
+    """
+
+    start: int
+    end: int
+    status: ByteStatus
+
+    @property
+    def length(self) -> int:
+        return self.end - self.start
+
 
 @dataclass(slots=True, frozen=True)
 class OffsetSummary:
     """A summary of every copy seen at one `bulk_file_offset` in the
     selection -- `count` is 1 for an offset that showed up exactly once.
+
+    This is packet bookkeeping (how often each offset was retransmitted),
+    deliberately *not* the correctness verdict: whether the file is right
+    is decided per byte, in `ReassemblyResult.segments`.
     """
 
     offset: int
@@ -114,28 +192,66 @@ class ReassemblyResult:
     """The result of assembling a set of `BULK_FILE_DOWNLINK` chunks.
 
     `data` always has length `span_bytes` (the highest `offset + length`
-    seen across the selection) -- any never-covered byte in it is `\\x00`,
-    and its exact position is also listed in `.gaps`, so a fully accurate
-    file requires both `is_gapless` and no `.conflicts`.
+    seen across the selection); a `MISSING` byte in it is `\\x00`, and a
+    `CONFLICTING` one holds whichever copy `policy` picked.
+
+    `.segments` is the per-byte assessment, run-length encoded and covering
+    `[0, span_bytes)` end to end -- so `.gaps` (the `MISSING` runs) and
+    `.conflict_ranges` (the `CONFLICTING` ones) are just views onto it, and
+    both are already merged/sorted by construction.
 
     `.offsets` summarizes every distinct offset seen -- present even when
     there's nothing wrong to report, so the caller always has something to
-    show (e.g. while there are still gaps to fill in). Seeing the *same*
-    offset more than once is routine (e.g. a retransmission, or two ground
-    stations catching the same overpass) and isn't itself a problem --
-    `.duplicates` is the subset of `.offsets` with `count > 1`, but only
-    `.conflicts` (the further subset where the repeats *disagree* on the
-    bytes) means two different transmissions' chunks likely got selected
-    together and the caller's time-range filter needs narrowing.
+    show. Seeing the *same* offset more than once is routine (e.g. a
+    retransmission, or two ground stations catching the same overpass) and
+    isn't itself a problem; `.duplicates` is that subset. Only
+    `.has_conflicts` -- bytes that were received with disagreeing values --
+    means two different transmissions' chunks likely got selected together,
+    and the caller should either narrow the time-range filter or accept a
+    `ConflictPolicy`'s answer knowingly.
     """
 
     total_chunks: int
     unique_offsets: int
     offsets: tuple[OffsetSummary, ...]
-    gaps: tuple[tuple[int, int], ...]
+    segments: tuple[ByteSegment, ...]
     data: bytes
-    covered_bytes: int
     span_bytes: int
+    policy: ConflictPolicy
+
+    def _bytes_with_status(self, status: ByteStatus) -> int:
+        return sum(s.length for s in self.segments if s.status is status)
+
+    def ranges_with_status(self, status: ByteStatus) -> tuple[tuple[int, int], ...]:
+        """The `(start, end)` byte ranges of every segment with `status`."""
+        return tuple((s.start, s.end) for s in self.segments if s.status is status)
+
+    @property
+    def gaps(self) -> tuple[tuple[int, int], ...]:
+        """Byte ranges never received at all."""
+        return self.ranges_with_status(ByteStatus.MISSING)
+
+    @property
+    def conflict_ranges(self) -> tuple[tuple[int, int], ...]:
+        """Byte ranges received with two or more disagreeing values."""
+        return self.ranges_with_status(ByteStatus.CONFLICTING)
+
+    @property
+    def missing_bytes(self) -> int:
+        return self._bytes_with_status(ByteStatus.MISSING)
+
+    @property
+    def good_bytes(self) -> int:
+        return self._bytes_with_status(ByteStatus.GOOD)
+
+    @property
+    def conflict_bytes(self) -> int:
+        return self._bytes_with_status(ByteStatus.CONFLICTING)
+
+    @property
+    def covered_bytes(self) -> int:
+        """Bytes that arrived at all -- good or conflicting."""
+        return self.good_bytes + self.conflict_bytes
 
     @property
     def duplicates(self) -> tuple[OffsetSummary, ...]:
@@ -143,78 +259,209 @@ class ReassemblyResult:
         return tuple(o for o in self.offsets if o.count > 1)
 
     @property
-    def conflicts(self) -> tuple[OffsetSummary, ...]:
-        """Duplicated offsets whose repeated copies don't agree -- the only
-        kind of duplicate that actually threatens correctness.
-        """
-        return tuple(o for o in self.offsets if o.count > 1 and not o.consistent)
-
-    @property
     def has_conflicts(self) -> bool:
-        return bool(self.conflicts)
-
-    @property
-    def conflict_ranges(self) -> tuple[tuple[int, int], ...]:
-        """Byte ranges covered by `.conflicts`, sorted and merged -- each
-        conflicting offset's own range runs to the *longest* of its
-        disagreeing copies' lengths (so the whole range any of them could
-        have written to is flagged, not just the shortest one's), and
-        touching/overlapping offsets' ranges are merged into one, the same
-        way `.gaps` already are.
-        """
-        return _merge_ranges(
-            (o.offset, o.offset + max(o.lengths)) for o in self.conflicts
-        )
+        return bool(self.conflict_bytes)
 
     @property
     def is_gapless(self) -> bool:
-        return not self.gaps
+        return not self.missing_bytes
+
+    @property
+    def is_complete(self) -> bool:
+        """Whether every byte in `[0, span_bytes)` arrived and agreed.
+
+        Note this can only speak for the span the *packets* implied: a
+        download cut off before its last chunk looks complete here, which
+        is why the UI also cross-checks `span_bytes` against the header's
+        `file_size`.
+        """
+        return self.span_bytes > 0 and self.is_gapless and not self.has_conflicts
 
     @property
     def sha256(self) -> str:
         """SHA-256 of `data` as assembled -- only meaningful to compare
-        against a known-good hash once `is_gapless` (a gap zero-fills its
-        bytes, which changes the hash) and there are no `.conflicts`
-        (a conflicting duplicate means the "wrong" copy may have won).
+        against a known-good hash once `is_complete` (a gap zero-fills its
+        bytes, and a conflict may have resolved to the "wrong" copy, either
+        of which changes the hash).
         """
         return hashlib.sha256(self.data).hexdigest()
 
 
-def reassemble_bulk_chunks(df: pl.DataFrame) -> ReassemblyResult:
-    """Assemble whatever `BULK_FILE_DOWNLINK` chunks are in `df` into one
-    byte string, ordered by `bulk_file_offset`.
+@dataclass(slots=True, frozen=True)
+class _Chunk:
+    """One decoded `BULK_FILE_DOWNLINK` packet's payload, ready to assess."""
 
-    `df` must have `bulk_file_offset`, `bulk_data_len`, and `bulk_data_hex`
-    columns -- already filtered by the caller (e.g. to one or more
-    `received_at` time ranges isolating a single download) to whatever rows
-    should be treated as chunks of the same file. This never raises on messy
-    input: duplicate offsets and gaps are reported on the result rather than
-    resolved here (a duplicated offset's *last* row in `df` wins in `data`),
-    so the caller's filter is what makes the result trustworthy, not this
-    function.
+    offset: int
+    data: bytes
+    received_at: datetime
+    order: int  # position in the caller's DataFrame; the final tie-break
 
-    Raises:
-        ValueError: if the implied file is larger than
-            `MAX_REASSEMBLY_SPAN_BYTES` -- almost certainly a corrupt
-            `bulk_file_offset` rather than a real file this large.
+    @property
+    def end(self) -> int:
+        return self.offset + len(self.data)
+
+
+# Sorted by "which copy of a byte wins", so `min` is the earliest copy and
+# `max` the latest, with the DataFrame position breaking `received_at` ties.
+def _recency_key(chunk: _Chunk) -> tuple[datetime, int]:
+    return (chunk.received_at, chunk.order)
+
+
+def _resolve_conflicting_byte(
+    candidates: list[tuple[int, _Chunk]], policy: ConflictPolicy
+) -> int:
+    """Pick the winning value for one byte, from `(value, chunk)` pairs that
+    don't all agree, per `policy`.
     """
-    if df.is_empty():
-        return ReassemblyResult(0, 0, (), (), b"", 0, 0)
+    if policy is ConflictPolicy.EARLIEST:
+        return min(candidates, key=lambda pair: _recency_key(pair[1]))[0]
+    if policy is ConflictPolicy.LATEST:
+        return max(candidates, key=lambda pair: _recency_key(pair[1]))[0]
 
-    offsets = df["bulk_file_offset"].to_list()
-    lengths = df["bulk_data_len"].to_list()
-    hexes = df["bulk_data_hex"].to_list()
+    # "Most common": tally the copies of each distinct value, then break a
+    # tied tally by the same earliest/latest rule -- comparing each value's
+    # own earliest (resp. latest) copy, not the packets as a whole.
+    keys_by_value: dict[int, list[tuple[datetime, int]]] = defaultdict(list)
+    for value, chunk in candidates:
+        keys_by_value[value].append(_recency_key(chunk))
 
-    # (length, hex) per copy, keyed by offset -- `length` is the decoder's
-    # own `bulk_data_len`, trusted as-is rather than re-derived from the hex
-    # string (which would silently mask a corrupt odd-length hex value).
-    by_offset: dict[int, tuple[int, str]] = {}
-    copies_by_offset: dict[int, list[tuple[int, str]]] = {}
-    for offset, length, hex_str in zip(offsets, lengths, hexes, strict=True):
-        by_offset[offset] = (length, hex_str)  # last one (in `df`'s order) wins
-        copies_by_offset.setdefault(offset, []).append((length, hex_str))
+    if policy is ConflictPolicy.MOST_COMMON_THEN_EARLIEST:
+        return min(
+            keys_by_value.items(), key=lambda item: (-len(item[1]), min(item[1]))
+        )[0]
+    return max(keys_by_value.items(), key=lambda item: (len(item[1]), max(item[1])))[0]
 
-    offset_summaries = tuple(
+
+def _append_segment(
+    segments: list[ByteSegment], start: int, end: int, status: ByteStatus
+) -> None:
+    """Append `[start, end)` to `segments`, extending the previous run
+    instead if it has the same status and ends where this one starts -- what
+    keeps `.segments` a list of *maximal* runs however finely the assessment
+    happened to decide them (a conflicting overlap is settled one byte at a
+    time, and would otherwise arrive as hundreds of one-byte segments).
+    """
+    if end <= start:
+        return
+    if segments and segments[-1].status is status and segments[-1].end == start:
+        segments[-1] = ByteSegment(segments[-1].start, end, status)
+    else:
+        segments.append(ByteSegment(start, end, status))
+
+
+def _assess_bytes(
+    chunks: list[_Chunk], span: int, policy: ConflictPolicy
+) -> tuple[bytes, tuple[ByteSegment, ...]]:
+    """Assemble `chunks` into `span` bytes and assess every one of them.
+
+    Walks the chunks' start/end boundaries (plus 0 and `span`, so the
+    result always tiles the file from byte 0 even when nothing covers the
+    start or the middle), which gives sub-ranges over which the set of
+    covering chunks is constant. A sub-range covered by nothing is a
+    `MISSING` run and one covered by a single chunk is a `GOOD` run, both
+    settled in one step; only where chunks actually overlap does this drop
+    to comparing individual bytes -- and even then, only after a whole-slice
+    equality check has ruled out the common case of a plain retransmission
+    that agrees.
+    """
+    if span == 0:
+        return b"", ()
+
+    buf = bytearray(span)
+    segments: list[ByteSegment] = []
+
+    by_start = sorted(chunks, key=lambda c: c.offset)
+    boundaries = sorted(
+        {0, span, *(c.offset for c in chunks), *(c.end for c in chunks)}
+    )
+
+    next_chunk = 0
+    # Active chunks as a min-heap on `end`, so expiring them is O(log n)
+    # rather than rescanning the active set at every boundary.
+    active: list[tuple[int, int, _Chunk]] = []
+    for start, end in pairwise(boundaries):
+        while next_chunk < len(by_start) and by_start[next_chunk].offset <= start:
+            chunk = by_start[next_chunk]
+            heapq.heappush(active, (chunk.end, next_chunk, chunk))
+            next_chunk += 1
+        while active and active[0][0] <= start:
+            heapq.heappop(active)
+
+        covering = [chunk for _end, _i, chunk in active]
+        if not covering:
+            _append_segment(segments, start, end, ByteStatus.MISSING)
+            continue
+
+        slices = [c.data[start - c.offset : end - c.offset] for c in covering]
+        if all(s == slices[0] for s in slices[1:]):
+            # Nothing disagrees here (the overwhelmingly common case,
+            # including a clean retransmission) -- write it in one go.
+            buf[start:end] = slices[0]
+            _append_segment(segments, start, end, ByteStatus.GOOD)
+            continue
+
+        for pos in range(start, end):
+            candidates = [(c.data[pos - c.offset], c) for c in covering]
+            values = {value for value, _chunk in candidates}
+            if len(values) == 1:
+                buf[pos] = values.pop()
+                status = ByteStatus.GOOD
+            else:
+                buf[pos] = _resolve_conflicting_byte(candidates, policy)
+                status = ByteStatus.CONFLICTING
+            _append_segment(segments, pos, pos + 1, status)
+
+    return bytes(buf), tuple(segments)
+
+
+def _decode_chunks(df: pl.DataFrame) -> list[_Chunk]:
+    """Decode `df`'s hex payloads into `_Chunk`s, in DataFrame order.
+
+    The decoded bytes -- not the packet's own `bulk_data_len` -- are what
+    coverage is judged on: a payload whose hex came up short can only
+    account for the bytes it actually carries. `bulk_data_len` is still
+    reported as-is in `OffsetSummary.lengths`, where a disagreement between
+    the two is exactly the kind of thing an operator wants to see rather
+    than have silently reconciled.
+    """
+    required = {"bulk_file_offset", "bulk_data_len", "bulk_data_hex", "received_at"}
+    missing = required - set(df.columns)
+    if missing:
+        msg = f"Chunk DataFrame is missing required column(s): {sorted(missing)}"
+        raise ValueError(msg)
+
+    return [
+        _Chunk(
+            offset=offset,
+            data=bytes.fromhex(hex_str),
+            received_at=received_at,
+            order=order,
+        )
+        for order, (offset, hex_str, received_at) in enumerate(
+            zip(
+                df["bulk_file_offset"].to_list(),
+                df["bulk_data_hex"].to_list(),
+                df["received_at"].to_list(),
+                strict=True,
+            )
+        )
+    ]
+
+
+def _summarize_offsets(df: pl.DataFrame) -> tuple[OffsetSummary, ...]:
+    """Per-offset packet bookkeeping: how many copies of each offset arrived,
+    how many distinct payloads they carried, and what lengths they claimed.
+    """
+    copies_by_offset: dict[int, list[tuple[int, str]]] = defaultdict(list)
+    for offset, length, hex_str in zip(
+        df["bulk_file_offset"].to_list(),
+        df["bulk_data_len"].to_list(),
+        df["bulk_data_hex"].to_list(),
+        strict=True,
+    ):
+        copies_by_offset[offset].append((length, hex_str))
+
+    return tuple(
         OffsetSummary(
             offset,
             count=len(copies),
@@ -224,9 +471,37 @@ def reassemble_bulk_chunks(df: pl.DataFrame) -> ReassemblyResult:
         for offset, copies in sorted(copies_by_offset.items())
     )
 
-    span = max(
-        (offset + length for offset, (length, _hex) in by_offset.items()), default=0
-    )
+
+def reassemble_bulk_chunks(
+    df: pl.DataFrame, *, policy: ConflictPolicy = DEFAULT_CONFLICT_POLICY
+) -> ReassemblyResult:
+    """Assemble whatever `BULK_FILE_DOWNLINK` chunks are in `df` into one
+    byte string, ordered by `bulk_file_offset`, and assess every byte of it.
+
+    `df` must have `bulk_file_offset`, `bulk_data_len`, `bulk_data_hex`, and
+    `received_at` columns -- already filtered by the caller (e.g. to one or
+    more `received_at` time ranges isolating a single download) to whatever
+    rows should be treated as chunks of the same file. This never raises on
+    messy input beyond the size cap below: gaps and disagreements are
+    reported on the result (see `ReassemblyResult.segments`) rather than
+    treated as errors, so the caller's filter is what makes the result
+    trustworthy, not this function.
+
+    The result doesn't depend on `df`'s row order: which copy of a
+    disagreed-upon byte wins is decided by `policy` from the chunks'
+    `received_at`, with row order used only to break exact timestamp ties.
+
+    Raises:
+        ValueError: if `df` is missing a required column, or if the implied
+            file is larger than `MAX_REASSEMBLY_SPAN_BYTES` -- almost
+            certainly a corrupt `bulk_file_offset` rather than a real file
+            this large.
+    """
+    if df.is_empty():
+        return ReassemblyResult(0, 0, (), (), b"", 0, policy)
+
+    chunks = _decode_chunks(df)
+    span = max((c.end for c in chunks), default=0)
     if span > MAX_REASSEMBLY_SPAN_BYTES:
         msg = (
             f"Implied file size {span:,} bytes exceeds the "
@@ -235,36 +510,16 @@ def reassemble_bulk_chunks(df: pl.DataFrame) -> ReassemblyResult:
         )
         raise ValueError(msg)
 
-    # Interval-merge for coverage/gaps (cheap: one interval per chunk, not
-    # per byte) -- the byte buffer itself still needs an O(bytes) slice
-    # assignment per chunk, which is unavoidable since it *is* the output.
-    merged = _merge_ranges(
-        (offset, offset + length) for offset, (length, _hex) in by_offset.items()
-    )
-
-    buf = bytearray(span)
-    for offset, (_length, hex_str) in by_offset.items():
-        chunk = bytes.fromhex(hex_str)
-        buf[offset : offset + len(chunk)] = chunk
-
-    covered_bytes = sum(end - start for start, end in merged)
-    gaps: list[tuple[int, int]] = []
-    prev_end = 0
-    for start, end in merged:
-        if start > prev_end:
-            gaps.append((prev_end, start))
-        prev_end = max(prev_end, end)
-    if prev_end < span:
-        gaps.append((prev_end, span))
+    data, segments = _assess_bytes(chunks, span, policy)
 
     return ReassemblyResult(
-        total_chunks=len(offsets),
-        unique_offsets=len(by_offset),
-        offsets=offset_summaries,
-        gaps=tuple(gaps),
-        data=bytes(buf),
-        covered_bytes=covered_bytes,
+        total_chunks=len(chunks),
+        unique_offsets=len({c.offset for c in chunks}),
+        offsets=_summarize_offsets(df),
+        segments=segments,
+        data=data,
         span_bytes=span,
+        policy=policy,
     )
 
 
@@ -274,106 +529,66 @@ COVERAGE_ROW_WIDTH_BYTES = 195 * 2  # 195 == BULK_DOWNLINK_MAX_DATA, one row = 2
 
 # Palette indices/colors for the coverage bitmap -- index 3 ("no data yet",
 # past the end of the file but needed to fill out the last row's width) is
-# marked fully transparent via tRNS so it doesn't paint a visible block.
-_COVERAGE_GAP_INDEX = 0
-_COVERAGE_COVERED_INDEX = 1
-_COVERAGE_CONFLICT_INDEX = 2
+# marked fully transparent so it doesn't paint a visible block.
 _COVERAGE_PAD_INDEX = 3
+_COVERAGE_STATUS_INDEX = {
+    ByteStatus.MISSING: 0,
+    ByteStatus.GOOD: 1,
+    ByteStatus.CONFLICTING: 2,
+}
 _COVERAGE_PALETTE = (
-    (0xC1, 0x00, 0x15),  # gap: Quasar "negative" red
-    (0x21, 0xBA, 0x45),  # covered: Quasar "positive" green
-    (0xF2, 0xC0, 0x37),  # conflict: Quasar "warning" yellow
-    (0x00, 0x00, 0x00),  # padding: color irrelevant, alpha 0 makes it invisible
+    (0xC1, 0x00, 0x15),  # missing: Quasar "negative" red
+    (0x21, 0xBA, 0x45),  # good: Quasar "positive" green
+    (0xF2, 0xC0, 0x37),  # conflicting: Quasar "warning" yellow
+    (0x00, 0x00, 0x00),  # padding: color irrelevant, made transparent below
 )
-_COVERAGE_ALPHA = (255, 255, 255, 0)
 
 
-def _png_chunk(chunk_type: bytes, data: bytes) -> bytes:
-    return (
-        struct.pack(">I", len(data))
-        + chunk_type
-        + data
-        + struct.pack(">I", zlib.crc32(chunk_type + data) & 0xFFFFFFFF)
-    )
+def _encode_coverage_png(width: int, height: int, pixel_indices: bytes) -> bytes:
+    """PNG-encode a `width` x `height` bitmap of `_COVERAGE_PALETTE` indices.
 
-
-def _encode_indexed_png(
-    width: int,
-    height: int,
-    pixel_indices: bytes,
-    palette: tuple[tuple[int, int, int], ...],
-    alpha: tuple[int, ...],
-) -> bytes:
-    """A minimal indexed-color (palette) PNG encoder -- no imaging library
-    dependency needed for what's just a 1-byte-per-pixel bitmap with a
-    handful of colors.
+    Palette ("P") mode rather than RGB keeps it at one byte per byte-of-file
+    before DEFLATE even runs, and `_COVERAGE_PAD_INDEX` is declared
+    transparent so the last row's padding doesn't paint a visible block.
     """
-    ihdr = struct.pack(">IIBBBBB", width, height, 8, 3, 0, 0, 0)
-    plte = b"".join(bytes(c) for c in palette)
-    trns = bytes(alpha)
-
-    # PNG scanlines are each prefixed with a filter-type byte; "0" (None) is
-    # the simplest choice and compresses just as well here since the actual
-    # runs (long stretches of the same covered/gap color) are horizontal,
-    # not something a byte-to-byte predictor filter would help with.
-    raw = bytearray()
-    for y in range(height):
-        raw.append(0)
-        start = y * width
-        raw += pixel_indices[start : start + width]
-    idat = zlib.compress(bytes(raw), level=6)
-
-    return (
-        b"\x89PNG\r\n\x1a\n"
-        + _png_chunk(b"IHDR", ihdr)
-        + _png_chunk(b"PLTE", plte)
-        + _png_chunk(b"tRNS", trns)
-        + _png_chunk(b"IDAT", idat)
-        + _png_chunk(b"IEND", b"")
-    )
+    image = Image.frombytes("P", (width, height), pixel_indices)
+    image.putpalette(b"".join(bytes(color) for color in _COVERAGE_PALETTE))
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG", optimize=True, transparency=_COVERAGE_PAD_INDEX)
+    return buffer.getvalue()
 
 
 def render_coverage_png(
     result: ReassemblyResult, *, row_width_bytes: int = COVERAGE_ROW_WIDTH_BYTES
 ) -> bytes:
-    """A one-pixel-per-byte PNG of `result`'s coverage: green where a byte
-    was received, red where it's still a gap, yellow where it was received
-    but with multiple disagreeing values (see `.conflict_ranges`),
-    `row_width_bytes` pixels per row. The caller (the web UI) is expected
-    to scale this up with CSS (`image-rendering: pixelated`) rather than
-    baking the zoom into the image -- keeps the actual PNG small regardless
-    of the on-screen block size.
+    """A one-pixel-per-byte PNG of `result`'s per-byte assessment: green
+    where the byte is good, red where it's missing, yellow where it arrived
+    with multiple disagreeing values, `row_width_bytes` pixels per row. The
+    caller (the web UI) is expected to scale this up with CSS
+    (`image-rendering: pixelated`) rather than baking the zoom into the
+    image -- keeps the actual PNG small regardless of the on-screen block
+    size.
 
-    Returns a 1x1 (single covered-color pixel) PNG if `result` is empty,
-    rather than a 0-byte image some browsers may refuse to render.
+    Returns a 1x1 (single good-color pixel) PNG if `result` is empty, rather
+    than a 0-byte image some browsers may refuse to render.
     """
     span = result.span_bytes
     if span == 0:
-        return _encode_indexed_png(
-            1, 1, bytes([_COVERAGE_COVERED_INDEX]), _COVERAGE_PALETTE, _COVERAGE_ALPHA
+        return _encode_coverage_png(
+            1, 1, bytes([_COVERAGE_STATUS_INDEX[ByteStatus.GOOD]])
         )
 
-    pixels = bytearray([_COVERAGE_COVERED_INDEX]) * span
-    for start, end in result.gaps:
-        pixels[start:end] = bytes([_COVERAGE_GAP_INDEX]) * (end - start)
-    # Painted after gaps: a conflicting offset has *some* data (just
-    # disagreeing data), so it should never actually overlap a real gap,
-    # but painting it last keeps that true even if it somehow did.
-    for start, end in result.conflict_ranges:
-        # A corrupt/oversized length shouldn't overrun the buffer.
-        clamped_end = min(end, span)
-        pixels[start:clamped_end] = bytes([_COVERAGE_CONFLICT_INDEX]) * (
-            clamped_end - start
-        )
+    pixels = bytearray(span)
+    for segment in result.segments:
+        index = _COVERAGE_STATUS_INDEX[segment.status]
+        pixels[segment.start : segment.end] = bytes([index]) * segment.length
 
     remainder = span % row_width_bytes
     if remainder:
         pixels += bytes([_COVERAGE_PAD_INDEX]) * (row_width_bytes - remainder)
     height = len(pixels) // row_width_bytes
 
-    return _encode_indexed_png(
-        row_width_bytes, height, bytes(pixels), _COVERAGE_PALETTE, _COVERAGE_ALPHA
-    )
+    return _encode_coverage_png(row_width_bytes, height, bytes(pixels))
 
 
 # -- Header candidates --------------------------------------------------------
