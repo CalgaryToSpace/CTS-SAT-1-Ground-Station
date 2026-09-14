@@ -11,6 +11,7 @@ from cts1_mo_tools.cts1_processing_pipeline.web_ui.file_reassembly import (
     ByteSegment,
     ByteStatus,
     ConflictPolicy,
+    ReassemblyResult,
     find_header_candidates,
     reassemble_bulk_chunks,
     render_coverage_png,
@@ -18,7 +19,7 @@ from cts1_mo_tools.cts1_processing_pipeline.web_ui.file_reassembly import (
 from PIL import Image
 
 
-def _segments(result: object) -> list[tuple[int, int, str]]:
+def _segments(result: ReassemblyResult) -> list[tuple[int, int, str]]:
     """`(start, end, status)` triples -- the shape the assertions below read
     most clearly, and the shape the UI's segment table renders.
     """
@@ -646,7 +647,7 @@ def test_byte_segment_length() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _copies(result: object) -> list[tuple[int, int]]:
+def _copies(result: ReassemblyResult) -> list[tuple[int, int]]:
     return [(s.min_copies, s.max_copies) for s in result.segments]
 
 
