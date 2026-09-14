@@ -43,6 +43,9 @@ ignore = [
     "ISC001", # Recommended disable by ruff formatter.
     # "PD901", # Allow "df" variable name.
     "ANN401", # Allow typing.Any
+
+    "TD", # TODO
+    "FIX", # FIXME
 ]
 
 [tool.ruff.lint.per-file-ignores]
