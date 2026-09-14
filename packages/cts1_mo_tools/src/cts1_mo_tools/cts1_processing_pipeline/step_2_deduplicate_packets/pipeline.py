@@ -67,8 +67,6 @@ from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate impor
     pipeline as step_1_pipeline,
 )
 
-from .crc32c_vectorized import crc32c_hex_series
-
 DEFAULT_DATA_DIR = step_1_pipeline.DEFAULT_DATA_DIR
 OUTPUT_FILENAME = "distinct_packets_over_time.parquet"
 
@@ -120,19 +118,37 @@ def _complete_missing_crc(packets: pl.DataFrame) -> pl.DataFrame:
     independently confirmed by the satellite -- just internally consistent
     by construction).
     """
-    needs_crc = (pl.col("decoder") == DEMOD_DECODER) & ~pl.col(
+    needs_crc = (pl.col("decoder") == pl.lit(DEMOD_DECODER)) & pl.col(
         "csp_crc_valid"
-    ).fill_null(value=False)
+    ).fill_null(value=False).not_()
 
-    incomplete = packets.filter(needs_crc)
-    incomplete = incomplete.with_columns(
-        data_hex=pl.col("data_hex") + crc32c_hex_series(incomplete, "data_hex"),
-        data_length_bytes=pl.col("data_length_bytes") + CSP_CRC32C_SIZE,
-        csp_crc_valid=pl.lit(value=True),  # true by construction
-        csp_crc_source=pl.lit("computed"),
+    incomplete = (
+        packets.lazy()
+        .filter(needs_crc)
+        .with_columns(
+            temp_data_binary=pl.col("data_hex").str.decode("hex"),
+        )
+        .with_columns(
+            data_hex=(
+                pl.col("data_hex")
+                # Add on the computed CRC32.
+                + polars_hash.col("temp_data_binary")
+                .nchash.crc32c(return_binary=True, byte_order="big")
+                .bin.encode("hex")
+            ),
+            data_length_bytes=pl.col("data_length_bytes") + CSP_CRC32C_SIZE,
+            csp_crc_valid=(
+                # True by construction.
+                pl.lit(value=True, dtype=pl.Boolean)
+            ),
+            csp_crc_source=pl.lit("computed"),
+        )
+        .drop("temp_data_binary")
     )
-    complete = packets.filter(~needs_crc).with_columns(csp_crc_source=pl.lit("decoded"))
-    return pl.concat([complete, incomplete], how="vertical_relaxed")
+    complete = (
+        packets.lazy().filter(~needs_crc).with_columns(csp_crc_source=pl.lit("decoded"))
+    )
+    return pl.concat([complete, incomplete], how="vertical_relaxed").collect()
 
 
 def _with_source_struct(packets: pl.DataFrame) -> pl.DataFrame:
