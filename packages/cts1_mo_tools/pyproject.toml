@@ -14,7 +14,7 @@ dependencies = [
     "requests",
     "python-dotenv",
     "polars-reverse-geocode>=0.8.1",
-    "polars-hash>=0.9.1",
+    "polars-hash>=0.9.2",
     "pycountry>=26.2.16",
     "nicegui>=3.14.0",
     "tzdata",
