@@ -513,13 +513,16 @@ def _best_named_candidate(
     return max(named, key=_score)
 
 
-def _is_truncated(candidate: BulkHeaderCandidate) -> bool:
-    """Whether this candidate's SHA-256 looks cut off -- the only field
-    truncation is currently detectable in (see the module docstring: a
-    long file path pushes TCMD_RESPONSE's 186-byte cap into the sha256
-    value before it's fully written).
+def _is_header_truncated(candidate: BulkHeaderCandidate) -> bool:
+    """Whether this candidate's *header* was cut off -- nothing to do with
+    whether the file itself came down whole (that's `_partial_reason`).
+
+    Detected via the SHA-256, the only field truncation is currently
+    visible in (see the module docstring: a long file path pushes
+    TCMD_RESPONSE's 186-byte cap into the sha256 value before it's fully
+    written).
     """
-    return candidate.sha256 is not None and len(candidate.sha256) < 64  # noqa: PLR2004
+    return candidate.sha256 is not None and len(candidate.sha256) < SHA256_HEX_LEN
 
 
 @dataclass(frozen=True, slots=True)
@@ -535,7 +538,7 @@ class _HeaderGroup:
     file_size: int | None
     crc16: str | None
     sha256: str | None
-    truncated: bool
+    is_header_truncated: bool
     members: tuple[BulkHeaderCandidate, ...]
 
 
@@ -566,7 +569,7 @@ def _group_consecutive_candidates(
                     file_size=c.file_size,
                     crc16=c.crc16,
                     sha256=c.sha256,
-                    truncated=_is_truncated(c),
+                    is_header_truncated=_is_header_truncated(c),
                     members=(c,),
                 )
             )
@@ -638,7 +641,11 @@ def _header_candidates_table(candidates: list[BulkHeaderCandidate]) -> None:
         {"name": "file_size", "label": "Size (bytes)", "field": "file_size"},
         {"name": "crc16", "label": "CRC-16", "field": "crc16"},
         {"name": "sha256", "label": "SHA-256", "field": "sha256"},
-        {"name": "truncated", "label": "Truncated?", "field": "truncated"},
+        {
+            "name": "is_header_truncated",
+            "label": "Header Truncated?",
+            "field": "is_header_truncated",
+        },
     ]
     rows = [
         {
@@ -655,7 +662,7 @@ def _header_candidates_table(candidates: list[BulkHeaderCandidate]) -> None:
             "file_size": f"{group.file_size:,}" if group.file_size is not None else "",
             "crc16": group.crc16 or "",
             "sha256": group.sha256 or "",
-            "truncated": "yes" if group.truncated else "",
+            "is_header_truncated": "yes" if group.is_header_truncated else "",
             "member_count": len(group.members),
             "member_timestamps": [
                 f"{c.received_at:%Y-%m-%d %H:%M:%S}" for c in group.members
