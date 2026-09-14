@@ -24,7 +24,6 @@ from cts1_mo_tools.cts1_decode_satnogs_packets import (
     decode_adcs_current_state_1,
     decode_beacon_basic_packet,
     decode_beacon_extended_packet,
-    decode_beacon_peripheral_packet,
     decode_bulk_file_downlink_packet,
     decode_log_message_packet,
     decode_packet_safe,
@@ -392,31 +391,6 @@ class TestDecodeBeaconBasic:
 
 
 # ---------------------------------------------------------------------------
-# Tests for decode_beacon_peripheral_packet
-# ---------------------------------------------------------------------------
-
-
-class TestDecodeBeaconPeripheral:
-    def test_returns_peripheral_type(self) -> None:
-        result = decode_beacon_peripheral_packet(b"\x02\xab\xcd\xef")
-        assert result["packet_type"] == "BEACON_PERIPHERAL"
-
-    def test_raw_hex_preserved(self) -> None:
-        payload = b"\x02\x01\x02\x03"
-        result = decode_beacon_peripheral_packet(payload)
-        assert result["raw_payload_hex"] == payload.hex()
-
-    def test_note_present(self) -> None:
-        result = decode_beacon_peripheral_packet(b"\x02")
-        assert "_note" in result
-
-    def test_empty_payload(self) -> None:
-        result = decode_beacon_peripheral_packet(b"")
-        assert result["packet_type"] == "BEACON_PERIPHERAL"
-        assert result["raw_payload_hex"] == ""
-
-
-# ---------------------------------------------------------------------------
 # Tests for decode_adcs_current_state_1
 # ---------------------------------------------------------------------------
 
@@ -656,12 +630,12 @@ class TestDecodeBeaconExtended:
     def test_too_short_raises(self) -> None:
         short = b"\x20" * (BEACON_EXTENDED_TOTAL_STRUCT_SIZE - 1)
         with pytest.raises(ValueError, match="Too short"):
-            decode_beacon_extended_packet(short)
+            decode_beacon_extended_packet(short, short)
 
     def test_wrong_packet_type_raises(self) -> None:
         payload = _make_extended_payload(packet_type=0x01)
         with pytest.raises(ValueError, match="Unexpected packet_type"):
-            decode_beacon_extended_packet(payload)
+            decode_beacon_extended_packet(payload, payload)
 
     def test_total_struct_size_constant(self) -> None:
         assert len(_make_extended_payload()) == BEACON_EXTENDED_TOTAL_STRUCT_SIZE
@@ -672,7 +646,7 @@ class TestDecodeBeaconExtended:
 
     def test_extra_bytes_ignored(self) -> None:
         payload = _make_extended_payload() + b"\xff" * 10
-        result = decode_beacon_extended_packet(payload)
+        result = decode_beacon_extended_packet(payload, payload)
         assert result["packet_type"] == "BEACON_EXTENDED"
 
     def test_dispatch_via_decode_packet_safe(self) -> None:
@@ -788,7 +762,7 @@ class TestDecodeTcmdResponse:
 class TestDecodeBulkFileDownlink:
     def test_basic_fields(self) -> None:
         payload = _make_bulk_payload(file_offset=256, data=b"\x01\x02\x03\x04")
-        result = decode_bulk_file_downlink_packet(payload)
+        result = decode_bulk_file_downlink_packet(payload, payload)
         assert result["packet_type"] == "BULK_FILE_DOWNLINK"
         assert result["bulk_file_offset"] == 256
         assert result["bulk_data_len"] == 4
@@ -796,28 +770,28 @@ class TestDecodeBulkFileDownlink:
 
     def test_zero_offset(self) -> None:
         payload = _make_bulk_payload(file_offset=0)
-        result = decode_bulk_file_downlink_packet(payload)
+        result = decode_bulk_file_downlink_packet(payload, payload)
         assert result["bulk_file_offset"] == 0
 
     def test_large_offset(self) -> None:
         payload = _make_bulk_payload(file_offset=0xFFFFFFFF)
-        result = decode_bulk_file_downlink_packet(payload)
+        result = decode_bulk_file_downlink_packet(payload, payload)
         assert result["bulk_file_offset"] == 0xFFFFFFFF
 
     def test_empty_data(self) -> None:
         payload = _make_bulk_payload(data=b"")
-        result = decode_bulk_file_downlink_packet(payload)
+        result = decode_bulk_file_downlink_packet(payload, payload)
         assert result["bulk_data_len"] == 0
         assert result["bulk_data_hex"] == ""
 
     def test_too_short_raises(self) -> None:
         with pytest.raises(ValueError, match="Too short"):
-            decode_bulk_file_downlink_packet(b"\x10")
+            decode_bulk_file_downlink_packet(b"\x10", b"\x10")
 
     def test_wrong_packet_type_raises(self) -> None:
         payload = _make_bulk_payload(packet_type=0x01)
         with pytest.raises(ValueError, match="Unexpected packet_type"):
-            decode_bulk_file_downlink_packet(payload)
+            decode_bulk_file_downlink_packet(payload, payload)
 
 
 # ---------------------------------------------------------------------------
