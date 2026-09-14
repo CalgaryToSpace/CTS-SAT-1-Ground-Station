@@ -576,7 +576,7 @@ def test_demod_only_packet_gets_a_completed_self_consistent_crc() -> None:
     is_valid, _computed, _received = verify_csp_packet_crc32c(
         bytes.fromhex(row["data_hex"])
     )
-    assert is_valid
+    assert is_valid is True
     assert row["data_length_bytes"] == len(payload) + 4
 
 
