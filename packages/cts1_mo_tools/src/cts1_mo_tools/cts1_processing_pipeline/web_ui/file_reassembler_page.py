@@ -28,6 +28,7 @@ from .file_reassembly import (
     DEFAULT_CONFLICT_POLICY,
     SHA256_HEX_LEN,
     BulkHeaderCandidate,
+    ByteSegment,
     ByteStatus,
     ConflictPolicy,
     ReassemblyResult,
@@ -218,6 +219,22 @@ def _duplicates_note(result: ReassemblyResult) -> None:
     ui.label(note).classes("text-caption text-grey")
 
 
+def _copies_label(segment: ByteSegment) -> str:
+    """How many packets carried each byte of `segment`: one number when
+    every byte in the run arrived the same number of times, otherwise the
+    range across it ("1-3").
+
+    Worth showing next to the status because the two answer different
+    questions: a `Good` run received once is right but has no corroboration,
+    while one received three times is three packets that agree -- and a
+    `Conflicting` run's count is how many disagreeing copies the resolution
+    policy had to choose between.
+    """
+    if segment.min_copies == segment.max_copies:
+        return f"{segment.min_copies:,}"
+    return f"{segment.min_copies:,}-{segment.max_copies:,}"
+
+
 SEGMENTS_TABLE_PAGE_SIZE = 100
 _SEGMENT_FILTER_ALL = "All"
 
@@ -292,6 +309,11 @@ def _build_segments_table(result: ReassemblyResult) -> Callable[[], None]:
             {"name": "end", "label": "Last Byte", "field": "end"},
             {"name": "length", "label": "Length (bytes)", "field": "length"},
             {"name": "status", "label": "Status", "field": "status"},
+            {
+                "name": "copies",
+                "label": "Copies Received",
+                "field": "copies",
+            },
         ]
         rows = [
             {
@@ -304,6 +326,7 @@ def _build_segments_table(result: ReassemblyResult) -> Callable[[], None]:
                 "length": f"{segment.length:,}",
                 "status": f"{segment.status}",
                 "status_class": _STATUS_TEXT_CLASS[segment.status],
+                "copies": _copies_label(segment),
             }
             for segment in page
         ]

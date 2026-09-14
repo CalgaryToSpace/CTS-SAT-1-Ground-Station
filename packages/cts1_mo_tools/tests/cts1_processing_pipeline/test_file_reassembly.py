@@ -639,3 +639,66 @@ def test_conflicting_segments_merge_across_adjacent_offsets() -> None:
 
 def test_byte_segment_length() -> None:
     assert ByteSegment(4, 10, ByteStatus.GOOD).length == 6
+
+
+# ---------------------------------------------------------------------------
+# per-segment copy counts
+# ---------------------------------------------------------------------------
+
+
+def _copies(result: object) -> list[tuple[int, int]]:
+    return [(s.min_copies, s.max_copies) for s in result.segments]
+
+
+def test_copies_counted_per_segment() -> None:
+    df = _chunks_df(
+        [
+            _chunk(offset=0, data=b"AAAA"),
+            _chunk(offset=0, data=b"AAAA"),  # bytes 0..4 arrived twice
+            _chunk(offset=4, data=b"BBBB"),  # bytes 4..8 arrived once
+        ]
+    )
+    result = reassemble_bulk_chunks(df)
+    # One `Good` run either way -- the copy count varies *within* it, which
+    # is exactly what the min/max spread is for.
+    assert _segments(result) == [(0, 8, "Good")]
+    assert _copies(result) == [(1, 2)]
+
+
+def test_missing_segment_has_zero_copies() -> None:
+    df = _chunks_df(
+        [
+            _chunk(offset=0, data=b"AAAA"),
+            _chunk(offset=8, data=b"CCCC"),
+        ]
+    )
+    result = reassemble_bulk_chunks(df)
+    assert _segments(result) == [(0, 4, "Good"), (4, 8, "Missing"), (8, 12, "Good")]
+    assert _copies(result) == [(1, 1), (0, 0), (1, 1)]
+
+
+def test_conflicting_segment_counts_the_disagreeing_copies() -> None:
+    df = _chunks_df(
+        [
+            _chunk(offset=0, data=b"A", received_at="2026-01-01T00:00:00"),
+            _chunk(offset=0, data=b"B", received_at="2026-01-01T00:00:01"),
+            _chunk(offset=0, data=b"C", received_at="2026-01-01T00:00:02"),
+        ]
+    )
+    result = reassemble_bulk_chunks(df)
+    assert _segments(result) == [(0, 1, "Conflicting")]
+    assert _copies(result) == [(3, 3)]
+
+
+def test_copies_span_partially_overlapping_chunks() -> None:
+    # Bytes 0..4 from one packet, 4..6 from two (an overlap that agrees),
+    # 6..8 from one -- all one good run, copies 1-2 across it.
+    df = _chunks_df(
+        [
+            _chunk(offset=0, data=b"AAAAAA"),
+            _chunk(offset=4, data=b"AAAA"),
+        ]
+    )
+    result = reassemble_bulk_chunks(df)
+    assert _segments(result) == [(0, 8, "Good")]
+    assert _copies(result) == [(1, 2)]

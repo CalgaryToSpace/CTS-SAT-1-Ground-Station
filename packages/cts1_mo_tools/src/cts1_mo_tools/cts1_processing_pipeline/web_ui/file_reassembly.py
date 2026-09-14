@@ -155,11 +155,21 @@ class ByteSegment:
 
     `start` is inclusive, `end` exclusive. Segments tile `[0, span_bytes)`
     with no holes and no two neighbours sharing a status.
+
+    `min_copies`/`max_copies` bound how many packets carried each byte in
+    the run: `(1, 1)` for a byte that came down exactly once, `(0, 0)` for a
+    `MISSING` run, and a wider range wherever the run spans bytes that were
+    retransmitted different numbers of times. Since a run is merged on
+    status alone, that spread is the honest summary -- "these bytes each
+    arrived 1 to 3 times" -- rather than a single count that would be wrong
+    for part of the range.
     """
 
     start: int
     end: int
     status: ByteStatus
+    min_copies: int = 0
+    max_copies: int = 0
 
     @property
     def length(self) -> int:
@@ -333,20 +343,36 @@ def _resolve_conflicting_byte(
 
 
 def _append_segment(
-    segments: list[ByteSegment], start: int, end: int, status: ByteStatus
+    segments: list[ByteSegment],
+    start: int,
+    end: int,
+    status: ByteStatus,
+    copies: int,
 ) -> None:
-    """Append `[start, end)` to `segments`, extending the previous run
-    instead if it has the same status and ends where this one starts -- what
-    keeps `.segments` a list of *maximal* runs however finely the assessment
-    happened to decide them (a conflicting overlap is settled one byte at a
-    time, and would otherwise arrive as hundreds of one-byte segments).
+    """Append `[start, end)` -- every byte of it carried by `copies` packets
+    -- to `segments`, extending the previous run instead if it has the same
+    status and ends where this one starts.
+
+    That merge is what keeps `.segments` a list of *maximal* runs however
+    finely the assessment happened to decide them (a conflicting overlap is
+    settled one byte at a time, and would otherwise arrive as hundreds of
+    one-byte segments). Merging widens the run's `min_copies`/`max_copies`
+    rather than overwriting them, so a run that spans a retransmission
+    boundary reports the spread across it.
     """
     if end <= start:
         return
-    if segments and segments[-1].status is status and segments[-1].end == start:
-        segments[-1] = ByteSegment(segments[-1].start, end, status)
+    previous = segments[-1] if segments else None
+    if previous is not None and previous.status is status and previous.end == start:
+        segments[-1] = ByteSegment(
+            previous.start,
+            end,
+            status,
+            min(previous.min_copies, copies),
+            max(previous.max_copies, copies),
+        )
     else:
-        segments.append(ByteSegment(start, end, status))
+        segments.append(ByteSegment(start, end, status, copies, copies))
 
 
 def _assess_bytes(
@@ -389,15 +415,19 @@ def _assess_bytes(
 
         covering = [chunk for _end, _i, chunk in active]
         if not covering:
-            _append_segment(segments, start, end, ByteStatus.MISSING)
+            _append_segment(segments, start, end, ByteStatus.MISSING, 0)
             continue
+
+        # Constant across the whole sub-range: every chunk in `covering`
+        # spans it end to end, by construction of the boundary walk.
+        copies = len(covering)
 
         slices = [c.data[start - c.offset : end - c.offset] for c in covering]
         if all(s == slices[0] for s in slices[1:]):
             # Nothing disagrees here (the overwhelmingly common case,
             # including a clean retransmission) -- write it in one go.
             buf[start:end] = slices[0]
-            _append_segment(segments, start, end, ByteStatus.GOOD)
+            _append_segment(segments, start, end, ByteStatus.GOOD, copies)
             continue
 
         for pos in range(start, end):
@@ -409,7 +439,7 @@ def _assess_bytes(
             else:
                 buf[pos] = _resolve_conflicting_byte(candidates, policy)
                 status = ByteStatus.CONFLICTING
-            _append_segment(segments, pos, pos + 1, status)
+            _append_segment(segments, pos, pos + 1, status, copies)
 
     return bytes(buf), tuple(segments)
 
