@@ -128,6 +128,10 @@ def _latest_extended_beacon_card(path: Path) -> None:
         stats = [
             ("ADC Battery Voltage", f"{row.get('obc_adc_battery_voltage_V', '?')} V"),
             (
+                "ADC Battery Percent",
+                f"{row.get('obc_adc_battery_percent', '?')}%",
+            ),
+            (
                 "MEMS Angular Rate Norm",
                 f"{row.get('adcs_angular_rate_norm_deg_per_sec', '?')} deg/s",
             ),
@@ -173,6 +177,11 @@ def _recent_beacons_table(path: Path) -> None:
                 "field": "eps_battery_percent",
             },
             {
+                "name": "obc_adc_battery_percent",
+                "label": "OBC ADC Battery %",
+                "field": "obc_adc_battery_percent",
+            },
+            {
                 "name": "obc_temperature_C",
                 "label": "OBC Temp (°C)",
                 "field": "obc_temperature_C",
@@ -185,6 +194,7 @@ def _recent_beacons_table(path: Path) -> None:
                 "packet_type": r["packet_type"],
                 "uptime_sec": _format_uptime(r.get("uptime_sec")),
                 "eps_battery_percent": r.get("eps_battery_percent"),
+                "obc_adc_battery_percent": r.get("obc_adc_battery_percent"),
                 "obc_temperature_C": r.get("obc_temperature_C"),
                 "rssi_db": r.get("rssi_db"),
             }
