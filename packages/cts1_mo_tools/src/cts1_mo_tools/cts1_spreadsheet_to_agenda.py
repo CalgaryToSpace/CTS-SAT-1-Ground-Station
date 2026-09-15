@@ -95,6 +95,26 @@ def parse_interval(text: str | None) -> timedelta | None:
     raise ValueError(msg)
 
 
+def parse_repeat_random(value: str | None, cmd: str) -> int:
+    # Empty value check
+    if value is None or value.strip() == "":
+        logger.warning(f"Empty repeat or random value for command {cmd}. Default: 0.")
+
+    # Negative value check
+    elif float(value.strip()) < 0:
+        logger.warning(
+            f"Negative repeat or random value for command {cmd}. Default: 0."
+        )
+
+    # Non-integer value check
+    elif not float(value.strip()).is_integer():
+        logger.warning(
+            f"Non-integer repeat or random value for command {cmd} was truncated."
+        )
+
+    return to_int(value)
+
+
 def to_int(value: str | None, default: int = 0) -> int:
     text = "" if value is None else str(value).strip()
 
@@ -382,15 +402,19 @@ def build_agenda(
         )
 
         if mode == "single":
-            repeat = to_int(row["Repeat"])
-            random_repeat = to_int(row["Random"])
+            repeat = parse_repeat_random(row["Repeat"], cmd)
+            random_repeat = parse_repeat_random(row["Random"], cmd)
             entries, random_entries = _build_single_entries(ctx, repeat, random_repeat)
             agenda.extend(entries)
             random_commands.extend(random_entries)
 
         elif mode == "interval":
             agenda.extend(_build_interval_entries(ctx))
-
+            if (row["Repeat"].strip() != "") or (row["Random"].strip() != ""):
+                logger.warning(
+                    f"Repeat and random values are ignored for interval mode for"
+                    f" command {cmd}."
+                )
         else:
             msg = "Invalid Mode (Options: Single or Interval)"
             raise ValueError(msg)
