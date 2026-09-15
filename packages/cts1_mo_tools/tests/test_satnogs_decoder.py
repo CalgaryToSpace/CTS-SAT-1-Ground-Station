@@ -21,6 +21,7 @@ from cts1_mo_tools.cts1_decode_satnogs_packets import (
     PACKET_TYPE_MAP_INV,
     TCMD_RESPONSE_HEADER_FMT,
     TCMD_RESPONSE_HEADER_SIZE,
+    convert_obc_adc_battery_voltage_to_percent,
     decode_adcs_current_state_1,
     decode_beacon_basic_packet,
     decode_beacon_extended_packet,
@@ -552,6 +553,16 @@ class TestDecodeBeaconExtended:
         assert result["obc_active_oscillator_MHz"] == 16
         assert result["obc_adc_battery_voltage_V"] == 7.5
 
+    def test_obc_adc_battery_percent(self) -> None:
+        # 15.0V OBC reading calibrates to 0.988 * 15.0 + 0.372 = 15.192V, which
+        # is (15.192 - 12.4) / (16.0 - 12.4) = 77.56% of the way up the range.
+        result = self._valid(obc_adc_battery_voltage_mV=15_000)
+        assert result["obc_adc_battery_percent"] == 77.56
+
+    def test_obc_adc_battery_percent_is_none_when_unread(self) -> None:
+        result = self._valid(obc_adc_battery_voltage_mV=0)
+        assert result["obc_adc_battery_percent"] is None
+
     def test_mpi_last_temperature_inactive_passthrough(self) -> None:
         result = self._valid(mpi_last_temperature_C=-99)
         assert result["mpi_last_temperature_C"] == -99
@@ -917,3 +928,37 @@ class TestSizeConstants:
 
     def test_csp_header_size(self) -> None:
         assert CSP_HEADER_SIZE == 4
+
+
+# ---------------------------------------------------------------------------
+# Tests for convert_obc_adc_battery_voltage_to_percent
+# ---------------------------------------------------------------------------
+
+
+class TestConvertObcAdcBatteryVoltageToPercent:
+    def test_min_voltage_is_zero_percent(self) -> None:
+        # The OBC reading which calibrates exactly onto the 12.4V minimum.
+        obc_volts = (12.4 - 0.372) / 0.988
+        assert convert_obc_adc_battery_voltage_to_percent(obc_volts) == 0.0
+
+    def test_max_voltage_is_one_hundred_percent(self) -> None:
+        obc_volts = (16.0 - 0.372) / 0.988
+        assert convert_obc_adc_battery_voltage_to_percent(obc_volts) == 100.0
+
+    def test_midpoint(self) -> None:
+        obc_volts = (14.2 - 0.372) / 0.988
+        assert convert_obc_adc_battery_voltage_to_percent(obc_volts) == 50.0
+
+    def test_above_max_exceeds_one_hundred_percent(self) -> None:
+        percent = convert_obc_adc_battery_voltage_to_percent(17.0)
+        assert percent is not None
+        assert percent > 100.0
+
+    def test_below_min_is_negative(self) -> None:
+        percent = convert_obc_adc_battery_voltage_to_percent(11.0)
+        assert percent is not None
+        assert percent < 0.0
+
+    @pytest.mark.parametrize("voltage_volts", [0.0, -1.5])
+    def test_non_positive_reading_is_none(self, voltage_volts: float) -> None:
+        assert convert_obc_adc_battery_voltage_to_percent(voltage_volts) is None
