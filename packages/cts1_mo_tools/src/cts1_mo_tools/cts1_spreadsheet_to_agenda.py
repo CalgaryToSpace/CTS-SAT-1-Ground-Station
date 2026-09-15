@@ -406,9 +406,8 @@ def build_agenda(
             agenda.extend(_build_interval_entries(ctx))
             if (row["Repeat"].strip() != "") or (row["Random"].strip() != ""):
                 logger.warning(
-                    "Repeat and random values are ignored for interval mode for "
-                    "command %s.",
-                    {cmd},
+                    f"Repeat and random values are ignored for interval mode for"
+                    f" command {cmd}."
                 )
         else:
             msg = "Invalid Mode (Options: Single or Interval)"
