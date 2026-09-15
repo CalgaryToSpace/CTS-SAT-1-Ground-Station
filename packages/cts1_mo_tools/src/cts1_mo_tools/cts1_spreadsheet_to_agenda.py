@@ -98,20 +98,18 @@ def parse_interval(text: str | None) -> timedelta | None:
 def parse_repeat_random(value: str | None, cmd: str) -> int:
     # Empty value check
     if value is None or value.strip() == "":
-        logger.warning(
-            "Empty repeat or random value for command %s. Default: 0.", {cmd}
-        )
+        logger.warning(f"Empty repeat or random value for command {cmd}. Default: 0.")
 
     # Negative value check
     elif float(value.strip()) < 0:
         logger.warning(
-            "Negative repeat or random value for command %s. Default: 0.", {cmd}
+            f"Negative repeat or random value for command {cmd}. Default: 0."
         )
 
     # Non-integer value check
     elif not float(value.strip()).is_integer():
         logger.warning(
-            "Non-integer repeat or random value for command %s was truncated.", {cmd}
+            f"Non-integer repeat or random value for command {cmd} was truncated."
         )
 
     return to_int(value)
