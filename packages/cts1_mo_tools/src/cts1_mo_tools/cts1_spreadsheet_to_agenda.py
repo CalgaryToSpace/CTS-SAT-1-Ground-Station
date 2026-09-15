@@ -1,6 +1,5 @@
 import contextlib
 import csv
-import logging
 import random
 import re
 from dataclasses import dataclass
@@ -11,8 +10,7 @@ from typing import Any
 import openpyxl
 import polars as pl
 import tyro
-
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 
@@ -185,7 +183,7 @@ def _parse_mission_start(mission_date: str, start_utc_value: str | None) -> date
             parsed = parsed.replace(tzinfo=UTC)
 
         if parsed <= datetime.now(UTC):
-            logger.warning("Start UTC value is in the past: %s", parsed)
+            logger.warning(f"Start UTC value is in the past: {parsed}")
 
         return parsed
 
