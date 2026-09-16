@@ -32,13 +32,14 @@ if TYPE_CHECKING:
 
 REFRESH_INTERVAL_SEC = 30.0
 
-# label -> hours; "All time" (None) skips the `received_at` filter entirely.
-WINDOW_CHOICES: dict[str, float | None] = {
+# label -> hours
+WINDOW_CHOICES: dict[str, float] = {
     "Last 1h": 1.0,
     "Last 6h": 6.0,
     "Last 24h": 24.0,
+    "Last 2d": 24.0 * 2,
+    "Last 3d": 24.0 * 3,
     "Last 7d": 24.0 * 7,
-    "All time": None,
 }
 
 
@@ -252,7 +253,7 @@ def _chart_groups(path: Path, *, since: datetime | None) -> None:
         _render_chart_group(title, specs, all_packets)
 
 
-def _window_label_for_hours(hours: float | None) -> str:
+def _window_label_for_hours(hours: float) -> str:
     for label, value in WINDOW_CHOICES.items():
         if value == hours:
             return label
@@ -261,7 +262,7 @@ def _window_label_for_hours(hours: float | None) -> str:
 
 def build_beacon_stats_page(data_dir: Path, hours: float) -> None:
     parquet_path = data_dir / step_3_pipeline.OUTPUT_FILENAME
-    state: dict[str, float | None] = {"hours": hours}
+    state: dict[str, float] = {"hours": hours}
 
     # Split in two so the 30s auto-refresh only ever touches the cheap,
     # DOM-only status widgets -- the chart section (the expensive part,
@@ -284,11 +285,7 @@ def build_beacon_stats_page(data_dir: Path, hours: float) -> None:
 
     @ui.refreshable
     def chart_section() -> None:
-        since = (
-            datetime.now(UTC) - timedelta(hours=state["hours"])
-            if state["hours"] is not None
-            else None
-        )
+        since = datetime.now(UTC) - timedelta(hours=state["hours"])
         _chart_groups(parquet_path, since=since)
 
     def _on_window_change(label: str) -> None:

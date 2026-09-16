@@ -117,9 +117,9 @@ class Args:
 def _build_pages(args: Args) -> None:
     def _nav() -> None:
         # Remembered per-browser (see STORAGE_SECRET) so a toggle sticks
-        # across page navigations and later visits; defaults to dark for a
+        # across page navigations and later visits; defaults to light for a
         # browser that's never set a preference.
-        dark = ui.dark_mode(app.storage.user.get("dark_mode", True))
+        dark = ui.dark_mode(app.storage.user.get("dark_mode", False))
 
         def _toggle_dark() -> None:
             dark.toggle()
