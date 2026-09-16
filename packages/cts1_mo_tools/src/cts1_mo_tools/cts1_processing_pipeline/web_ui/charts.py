@@ -93,6 +93,11 @@ BEACON_CHART_GROUPS: list[tuple[str, list[ChartSpec]]] = [
             ),
             ChartSpec("Battery Percent", ["eps_battery_percent"], unit="%"),
             ChartSpec(
+                "OBC ADC Battery Percent (extended)",
+                ["obc_adc_battery_percent"],
+                unit="%",
+            ),
+            ChartSpec(
                 "Battery Temperatures",
                 ["eps_battery_temperature_0_C", "eps_battery_temperature_1_C"],
                 unit="°C",

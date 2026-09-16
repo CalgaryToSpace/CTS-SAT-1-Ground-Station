@@ -375,6 +375,56 @@ ADCS_FLAG_BITS: list[tuple[int, str]] = [
 ]
 
 
+# -- OBC ADC battery percentage -----------------------------------------------
+
+# The OBC's own ADC reads the battery voltage slightly differently than the EPS
+# does, so the OBC reading is calibrated onto the EPS scale before it's turned
+# into a percentage. Regression of the EPS battery ADC (y) on the OBC ADC (x),
+# over the 7,358 beacons where both readings were non-zero:
+#     y = 0.988x + 0.372   (R^2 = 0.9855)
+# Source: https://github.com/CalgaryToSpace/CTS-SAT-1-Ground-Station/issues/48
+OBC_ADC_BATTERY_CALIBRATION_SLOPE = 0.988
+OBC_ADC_BATTERY_CALIBRATION_INTERCEPT_V = 0.372
+
+# Battery voltage endpoints, matching `EPS_convert_battery_voltage_to_percent()`
+# in the flight software:
+#   Source (low side) - 12.4V: SAFETY_VOLT_LOTHR on Page 93 of the EPS Software ICD.
+#   EMLOPO_VOLT_HITHR on Page 99 of the EPS Software ICD.
+BATTERY_MIN_TOTAL_VOLTAGE_V = 12.4
+BATTERY_MAX_TOTAL_VOLTAGE_V = 16.0
+
+
+def convert_obc_adc_battery_voltage_to_percent(
+    obc_adc_battery_voltage_volts: float,
+) -> float | None:
+    """Convert an OBC ADC battery voltage reading to a battery percentage.
+
+    The reading is first calibrated onto the EPS battery ADC's scale, then
+    converted using the same linear percentage logic as the flight software.
+
+    Args:
+        obc_adc_battery_voltage_volts: OBC ADC battery voltage, in volts.
+
+    Returns:
+        Battery percentage. Nominally between 0 and 100, but can exceed 100% if
+        the battery voltage is above the maximum voltage, and can be less than
+        0% if it's below the minimum voltage. `None` if the OBC ADC reading is
+        non-positive, which means the OBC has no valid reading.
+    """
+    if obc_adc_battery_voltage_volts <= 0:
+        return None
+
+    calibrated_voltage_volts = (
+        OBC_ADC_BATTERY_CALIBRATION_SLOPE * obc_adc_battery_voltage_volts
+        + OBC_ADC_BATTERY_CALIBRATION_INTERCEPT_V
+    )
+
+    calc = (calibrated_voltage_volts - BATTERY_MIN_TOTAL_VOLTAGE_V) / (
+        BATTERY_MAX_TOTAL_VOLTAGE_V - BATTERY_MIN_TOTAL_VOLTAGE_V
+    )
+    return round(calc * 100.0, 2)
+
+
 def e(mapping: dict[int, str], value: int) -> str:
     return mapping.get(value, f"UNKNOWN({value})")
 
@@ -644,6 +694,9 @@ def decode_beacon_extended_packet(
         "obc_active_oscillator_MHz": ef["obc_active_oscillator_MHz"],
         "obc_adc_battery_voltage_V": round(
             ef["obc_adc_battery_voltage_mV"] / 1000.0, 3
+        ),
+        "obc_adc_battery_percent": convert_obc_adc_battery_voltage_to_percent(
+            ef["obc_adc_battery_voltage_mV"] / 1000.0
         ),
         # EPS
         "eps_mode": e(EPS_MODE_MAP, rf["eps_mode_enum"]),
