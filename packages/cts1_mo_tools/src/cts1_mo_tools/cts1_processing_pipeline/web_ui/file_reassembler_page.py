@@ -14,7 +14,7 @@ import base64
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from nicegui import ui
 
@@ -24,9 +24,16 @@ from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
 
 from . import data as beacon_data
 from .file_reassembly import (
+    COVERAGE_PACKETS_PER_ROW,
     COVERAGE_ROW_WIDTH_BYTES,
+    DEFAULT_CONFLICT_POLICY,
+    SHA256_HEX_LEN,
     BulkHeaderCandidate,
+    ByteSegment,
+    ByteStatus,
+    ConflictPolicy,
     ReassemblyResult,
+    coverage_png_size,
     detect_picam_image,
     find_header_candidates,
     reassemble_bulk_chunks,
@@ -136,164 +143,260 @@ def _valid_ranges(rows: list[_TimeRangeRow]) -> list[tuple[datetime, datetime]]:
     return ranges
 
 
-def _byte_range_str(start: int, end: int) -> str:
-    return f"{start:,}-{end:,} ({end - start:,} bytes)"
+_STATUS_TEXT_CLASS = {
+    ByteStatus.GOOD: "text-positive",
+    ByteStatus.MISSING: "text-negative",
+    ByteStatus.CONFLICTING: "text-warning",
+}
+_STATUS_ICON = {
+    ByteStatus.GOOD: "check_circle",
+    ByteStatus.MISSING: "warning",
+    ByteStatus.CONFLICTING: "error",
+}
 
 
-def _duplicates_status(result: ReassemblyResult) -> None:
-    """The pass/fail line above the chunks table -- the table itself always
-    renders (see `_build_chunks_table`) regardless of which of these
-    applies, so it's still there to inspect even mid-download, before every gap is
-    filled in.
+def _assessment_summary(result: ReassemblyResult) -> None:
+    """The headline per-byte verdict: how many of the file's bytes are good,
+    missing, and conflicting, above the segment-by-segment breakdown.
+
+    Deliberately phrased in *bytes*, not packets -- a single retransmitted
+    packet that agrees isn't a problem, and a pair that disagree may only
+    disagree about a handful of the bytes they overlap on, which counting
+    packets would round up into a much scarier number than it is.
+    """
+    span = result.span_bytes
+    counts = (
+        (ByteStatus.GOOD, result.good_bytes),
+        (ByteStatus.MISSING, result.missing_bytes),
+        (ByteStatus.CONFLICTING, result.conflict_bytes),
+    )
+    with ui.row().classes("items-center gap-4"):
+        for status, count in counts:
+            percent = (100.0 * count / span) if span else 0.0
+            with ui.row().classes("items-center gap-1"):
+                ui.icon(
+                    _STATUS_ICON[status],
+                    color=_STATUS_TEXT_CLASS[status].removeprefix("text-"),
+                )
+                ui.label(f"{count:,} {status.lower()} ({percent:.1f}%)").classes(
+                    _STATUS_TEXT_CLASS[status]
+                )
+
+    if result.is_complete:
+        ui.label(
+            "Every byte from 0 to the end of the download arrived, and every "
+            "byte agrees."
+        ).classes("text-caption text-positive")
+        return
+
+    next_steps = []
+    if not result.is_gapless:
+        next_steps.append(f"{len(result.gaps):,} missing range(s) need re-downlinking.")
+    if result.has_conflicts:
+        next_steps.append(
+            f"{len(result.conflict_ranges):,} conflicting range(s) came down with "
+            "more than one value -- either narrow the time range(s) until they "
+            "agree, or pick a conflict resolution above and accept its answer."
+        )
+    ui.label(" ".join(next_steps)).classes("text-caption text-grey")
+
+
+def _duplicates_note(result: ReassemblyResult) -> None:
+    """A footnote about repeated offsets -- packet-level bookkeeping, kept
+    well apart from the per-byte verdict above, since a duplicate offset is
+    routine (a retransmission, or two ground stations catching the same
+    overpass) and only matters at all if its copies actually disagree, which
+    the byte assessment has already accounted for.
     """
     if not result.duplicates:
-        with ui.row().classes("items-center gap-2"):
-            ui.icon("check_circle", color="positive")
-            ui.label("Every offset appears exactly once.").classes("text-positive")
-    elif result.has_conflicts:
-        with ui.row().classes("items-center gap-2"):
-            ui.icon("error", color="negative")
-            ui.label(
-                f"{len(result.conflicts)} offset(s) have CONFLICTING "
-                "content -- narrow the time range(s) until these agree "
-                "before trusting the reassembled bytes below (the other "
-                f"{len(result.duplicates) - len(result.conflicts)} "
-                "duplicated offset(s) agree and aren't a problem)."
-            ).classes("text-negative")
-    else:
-        with ui.row().classes("items-center gap-2"):
-            ui.icon("info", color="grey")
-            ui.label(
-                f"{len(result.duplicates)} offset(s) were received more "
-                "than once (e.g. a retransmission), but every copy agrees "
-                "-- not a problem."
-            ).classes("text-caption text-grey")
+        return
+    disagreeing = sum(1 for o in result.duplicates if not o.consistent)
+    note = (
+        f"{len(result.duplicates):,} offset(s) were received more than once"
+        f" ({disagreeing:,} of them with differing payloads)."
+        if disagreeing
+        else f"{len(result.duplicates):,} offset(s) were received more than once, "
+        "every copy agreeing."
+    )
+    ui.label(note).classes("text-caption text-grey")
 
 
-CHUNKS_TABLE_PAGE_SIZE = 100
+def _copies_label(segment: ByteSegment) -> str:
+    """How many packets carried each byte of `segment`: one number when
+    every byte in the run arrived the same number of times, otherwise the
+    range across it ("1-3").
 
-
-def _build_chunks_table(result: ReassemblyResult) -> Callable[[], None]:
-    """Build a paginated, independently-refreshable chunks table.
-
-    A file's chunks (`result.offsets`) are already fully computed
-    server-side by this point -- reassembling the bytes needs every one of
-    them regardless -- but a 20+ MB file is 100,000+ 195-byte chunks, and
-    shipping that many rows to the browser at once (even paginated
-    client-side by Quasar, which still means the whole row set travels over
-    the websocket first) would be its own problem. Paging *here*, before
-    anything is handed to `ui.table`, keeps each page turn down to
-    `CHUNKS_TABLE_PAGE_SIZE` rows -- flipping pages only re-renders this one
-    component (via the returned callable's `.refresh()`), not the whole
-    results section, so it never re-fetches or re-reassembles anything.
+    Worth showing next to the status because the two answer different
+    questions: a `Good` run received once is right but has no corroboration,
+    while one received three times is three packets that agree -- and a
+    `Conflicting` run's count is how many disagreeing copies the resolution
+    policy had to choose between.
     """
-    page_state = {"index": 0}
+    if segment.min_copies == segment.max_copies:
+        return f"{segment.min_copies:,}"
+    return f"{segment.min_copies:,}-{segment.max_copies:,}"
+
+
+SEGMENTS_TABLE_PAGE_SIZE = 100
+_SEGMENT_FILTER_ALL = "All"
+
+# Color the Status cell the same green/red/yellow as the coverage map above,
+# tying each row back to the graphic's blocks at a glance.
+_SEGMENTS_STATUS_CELL_SLOT = r"""
+    <q-td :props="props" :class="props.row.status_class">{{ props.value }}</q-td>
+"""
+
+
+def _build_segments_table(result: ReassemblyResult) -> Callable[[], None]:
+    """Build a paginated, filterable, independently-refreshable table of the
+    file's byte segments -- consecutive runs of bytes sharing one status.
+
+    Segments (not packets) are the unit here on purpose: a clean download of
+    a 20 MB file is *one* row ("0-20,000,000: Good") instead of the 100,000+
+    195-byte chunks it arrived as, and a messy one puts each missing or
+    conflicting run in front of the operator as the single range it actually
+    is. Pagination still happens *here*, before anything reaches `ui.table`,
+    so a pathologically fragmented download can't ship more than
+    `SEGMENTS_TABLE_PAGE_SIZE` rows over the websocket at once -- and
+    flipping pages or changing the filter re-renders only this component
+    (via the returned callable's `.refresh()`), never re-reassembling
+    anything.
+    """
+    state: dict[str, Any] = {"index": 0, "status": _SEGMENT_FILTER_ALL}
 
     @ui.refreshable
-    def chunks_table() -> None:
-        total = len(result.offsets)
-        if total == 0:
+    def segments_table() -> None:
+        selected = state["status"]
+        segments = [
+            s for s in result.segments if selected in (_SEGMENT_FILTER_ALL, s.status)
+        ]
+
+        def _set_filter(value: str) -> None:
+            state["status"] = value
+            state["index"] = 0
+            segments_table.refresh()
+
+        with ui.row().classes("w-full items-center gap-2"):
+            ui.select(
+                [
+                    _SEGMENT_FILTER_ALL,
+                    *(
+                        f"{status}"
+                        for status in (
+                            ByteStatus.MISSING,
+                            ByteStatus.CONFLICTING,
+                            ByteStatus.GOOD,
+                        )
+                    ),
+                ],
+                value=selected,
+                label="Show",
+                on_change=lambda e: _set_filter(e.value),
+            ).classes("w-48")
+
+        if not segments:
+            ui.label(f"No {selected.lower()} byte ranges.").classes(
+                "text-caption text-grey"
+            )
             return
-        total_pages = -(-total // CHUNKS_TABLE_PAGE_SIZE)  # ceil div
-        page_state["index"] = max(0, min(page_state["index"], total_pages - 1))
-        start = page_state["index"] * CHUNKS_TABLE_PAGE_SIZE
-        page_offsets = result.offsets[start : start + CHUNKS_TABLE_PAGE_SIZE]
+
+        total = len(segments)
+        total_pages = -(-total // SEGMENTS_TABLE_PAGE_SIZE)  # ceil div
+        state["index"] = max(0, min(state["index"], total_pages - 1))
+        start = state["index"] * SEGMENTS_TABLE_PAGE_SIZE
+        page = segments[start : start + SEGMENTS_TABLE_PAGE_SIZE]
 
         columns = [
-            {"name": "offset", "label": "Offset", "field": "offset"},
-            {"name": "length", "label": "Length", "field": "length"},
-            {"name": "count", "label": "Copies", "field": "count"},
+            {"name": "start", "label": "First Byte", "field": "start"},
+            {"name": "end", "label": "Last Byte", "field": "end"},
+            {"name": "length", "label": "Length (bytes)", "field": "length"},
+            {"name": "status", "label": "Status", "field": "status"},
             {
-                "name": "distinct_contents_count",
-                "label": "Distinct Contents Count",
-                "field": "distinct_contents_count",
+                "name": "copies",
+                "label": "Copies Received",
+                "field": "copies",
             },
-            {"name": "consistent", "label": "Chunk Status", "field": "consistent"},
         ]
         rows = [
             {
-                "offset": o.offset,
-                "length": ", ".join(str(n) for n in o.lengths),
-                "count": o.count,
-                "distinct_contents_count": o.distinct_contents_count,
-                "consistent": "Good" if o.consistent else "Conflicting",
+                "id": segment.start,
+                "start": f"{segment.start:,}",
+                # Inclusive, unlike `ByteSegment.end` -- "0-194" reads as the
+                # range an operator would quote when asking for a re-downlink,
+                # where a half-open "0-195" invites an off-by-one.
+                "end": f"{segment.end - 1:,}",
+                "length": f"{segment.length:,}",
+                "status": f"{segment.status}",
+                "status_class": _STATUS_TEXT_CLASS[segment.status],
+                "copies": _copies_label(segment),
             }
-            for o in page_offsets
+            for segment in page
         ]
-        table = ui.table(columns=columns, rows=rows, row_key="offset").classes("w-full")
-        # Color "Chunk Status" the same green/yellow as the coverage map above
-        # -- ties this table's rows back to the graphic's blocks at a glance.
-        table.add_slot(
-            "body-cell-consistent",
-            r"""
-                <q-td :props="props"
-                    :class="props.value === 'Good' ? 'text-positive' : 'text-warning'">
-                    {{ props.value }}
-                </q-td>
-            """,
-        )
-
-        if total_pages == 1:
-            ui.label(f"{total:,} distinct offset(s).").classes("text-caption text-grey")
-            return
+        table = ui.table(columns=columns, rows=rows, row_key="id").classes("w-full")
+        table.add_slot("body-cell-status", _SEGMENTS_STATUS_CELL_SLOT)
 
         def _turn_page(delta: int) -> None:
-            page_state["index"] += delta
-            chunks_table.refresh()
+            state["index"] += delta
+            segments_table.refresh()
 
         with ui.row().classes("w-full items-center justify-between mt-2"):
+            shown_to = min(start + SEGMENTS_TABLE_PAGE_SIZE, total)
             ui.label(
-                f"Showing {start + 1:,}-{min(start + CHUNKS_TABLE_PAGE_SIZE, total):,} "
-                f"of {total:,} distinct offset(s)."
+                f"Showing {start + 1:,}-{shown_to:,} of {total:,} byte range(s)."
             ).classes("text-caption text-grey")
-            with ui.row().classes("items-center gap-2"):
-                ui.button(icon="chevron_left", on_click=lambda: _turn_page(-1)).props(
-                    "flat dense round"
-                ).set_enabled(page_state["index"] > 0)
-                ui.label(f"Page {page_state['index'] + 1} / {total_pages}")
-                ui.button(icon="chevron_right", on_click=lambda: _turn_page(1)).props(
-                    "flat dense round"
-                ).set_enabled(page_state["index"] < total_pages - 1)
+            if total_pages > 1:
+                with ui.row().classes("items-center gap-2"):
+                    ui.button(
+                        icon="chevron_left", on_click=lambda: _turn_page(-1)
+                    ).props("flat dense round").set_enabled(state["index"] > 0)
+                    ui.label(f"Page {state['index'] + 1} / {total_pages}")
+                    ui.button(
+                        icon="chevron_right", on_click=lambda: _turn_page(1)
+                    ).props("flat dense round").set_enabled(
+                        state["index"] < total_pages - 1
+                    )
 
-    return chunks_table
+    return segments_table
 
 
-COVERAGE_BLOCK_WIDTH_PX = 3  # on-screen width of one byte's block; may change later
-COVERAGE_BLOCK_HEIGHT_PX = 2  # shorter than wide -- rows are the scarce vertical space
-
-
+# One byte is one screen pixel: the map's whole point is fitting a
+# multi-MB download's shape on screen at once, which any zoom factor
+# immediately spends. `image-rendering: pixelated` stays on so a browser
+# zoom (or a HiDPI display's own scaling) shows hard block edges instead of
+# blurring bytes into each other.
 def _coverage_map(result: ReassemblyResult) -> None:
-    """A byte-coverage map: one block per byte, green if covered, red if
-    still a gap, yellow if covered but conflicting (multiple disagreeing
-    values), `COVERAGE_ROW_WIDTH_BYTES` blocks per row.
+    """A byte-coverage map: one pixel per byte, green if good, red if
+    missing, yellow if conflicting (received with multiple disagreeing
+    values), `COVERAGE_ROW_WIDTH_BYTES` bytes per row.
 
-    `render_coverage_png` encodes one *pixel* per byte -- small and cheap to
-    ship even for a 20+ MB file -- and the on-screen block size is applied
-    here purely with CSS (`image-rendering: pixelated` keeps the block
-    edges crisp instead of blurring the upscale). The block is shorter than
-    it is wide on purpose: width already reads fine at
-    `COVERAGE_BLOCK_WIDTH_PX`, and a file's row count (hence the image's
-    total height) grows with its size, so trimming just the height keeps
-    large files from needing as much scrolling without shrinking each row.
+    Both rulers -- packet boundaries across the top, byte offsets down the
+    left -- are drawn into the PNG by `render_coverage_png` rather than
+    overlaid as HTML here, so there's no way for a tick to end up a pixel
+    off from the byte it points at. That leaves this with nothing to lay out
+    but the image itself, at exactly the size it was encoded at.
     """
     if result.span_bytes == 0:
         return
     data_uri = "data:image/png;base64," + base64.b64encode(
         render_coverage_png(result)
     ).decode("ascii")
-    width_px = COVERAGE_ROW_WIDTH_BYTES * COVERAGE_BLOCK_WIDTH_PX
-    row_count = -(-result.span_bytes // COVERAGE_ROW_WIDTH_BYTES)
-    height_px = row_count * COVERAGE_BLOCK_HEIGHT_PX
+    width_px, height_px = coverage_png_size(result)
     with ui.row().classes("w-full overflow-x-auto"):
         ui.image(data_uri).style(
             f"width: {width_px}px; height: {height_px}px; image-rendering: pixelated;"
         )
+    ui.label(
+        f"One pixel per byte, {COVERAGE_ROW_WIDTH_BYTES:,} bytes "
+        f"({COVERAGE_PACKETS_PER_ROW} packets) per row. Top ruler: byte offset "
+        "within a row, ticked once per packet. Left: byte offset of the row."
+    ).classes("text-caption text-grey")
     with ui.row().classes("items-center gap-4"):
-        for color_class, label in (
-            ("text-positive", "covered"),
-            ("text-negative", "missing (needs re-downlink)"),
-            ("text-warning", "conflicting (multiple values)"),
+        for status, label in (
+            (ByteStatus.GOOD, "good"),
+            (ByteStatus.MISSING, "missing (needs re-downlink)"),
+            (ByteStatus.CONFLICTING, "conflicting (multiple values)"),
         ):
+            color_class = _STATUS_TEXT_CLASS[status]
             with ui.row().classes("items-center gap-1"):
                 ui.icon("square", color=color_class.removeprefix("text-")).classes(
                     "text-xs"
@@ -301,76 +404,107 @@ def _coverage_map(result: ReassemblyResult) -> None:
                 ui.label(label).classes(f"text-caption {color_class}")
 
 
-def _gaps_section(result: ReassemblyResult) -> None:
-    """Byte ranges never received at all -- distinct from `_conflict_ranges_section`
-    (ranges that *were* received, just with disagreeing values); the two are
-    rendered as clearly separate blocks since they call for different next
-    steps -- re-downlink one, narrow the time range for the other.
+PARTIAL_FILENAME_SUFFIX = "_partial"
+
+
+def _partial_reason(
+    result: ReassemblyResult, header: BulkHeaderCandidate | None
+) -> str | None:
+    """Why what's been assembled isn't a verified, complete copy of the file
+    -- or None if it is.
+
+    Ordered worst-first, so the reason shown is the one worth acting on:
+    bytes that never arrived, then bytes that arrived disagreeing, then the
+    two checks that only a header can provide (the assembled span being the
+    wrong size, and the hash not matching). Anything but None gets
+    `PARTIAL_FILENAME_SUFFIX` appended to the exported file's stem, so a
+    half-assembled file can't be mistaken for the real thing later just
+    because it was downloaded and filed away under the satellite's own name
+    for it.
     """
-    ui.label("Missing byte ranges").classes("text-base font-medium")
-    if result.is_gapless:
-        with ui.row().classes("items-center gap-2"):
-            ui.icon("check_circle", color="positive")
-            ui.label("No gaps -- every byte in range is covered.").classes(
-                "text-positive"
-            )
-        return
-
-    with ui.row().classes("items-center gap-2"):
-        ui.icon("warning", color="warning")
-        ui.label(
-            f"{len(result.gaps)} range(s) never received -- these need to be "
-            "re-downlinked:"
-        ).classes("text-warning")
-    for start, end in result.gaps[:50]:
-        ui.label(_byte_range_str(start, end)).classes("font-mono text-sm")
-    if len(result.gaps) > 50:  # noqa: PLR2004
-        ui.label(f"...and {len(result.gaps) - 50} more.").classes(
-            "text-caption text-grey"
+    if result.span_bytes == 0:
+        return "nothing was assembled"
+    if not result.is_gapless:
+        return f"{result.missing_bytes:,} byte(s) never arrived"
+    if result.has_conflicts:
+        return f"{result.conflict_bytes:,} byte(s) arrived with conflicting values"
+    if (
+        header is not None
+        and header.file_size is not None
+        and header.file_size != result.span_bytes
+    ):
+        return (
+            f"the header's file_size ({header.file_size:,} bytes) doesn't match "
+            f"the {result.span_bytes:,} byte(s) assembled"
         )
+    expected = header.sha256 if header is not None else None
+    if expected and len(expected) == SHA256_HEX_LEN and expected != result.sha256:
+        return "the SHA-256 doesn't match the header's"
+    return None
 
 
-def _conflict_ranges_section(result: ReassemblyResult) -> None:
-    """Byte ranges that *were* received but with more than one disagreeing
-    value -- see `_gaps_section` for the (deliberately separate) list of
-    ranges never received at all.
+def _mark_partial(filename: str, *, partial: bool) -> str:
+    """`filename` with `PARTIAL_FILENAME_SUFFIX` appended to its stem (not
+    its extension) when `partial` -- "log_b51a.TLM" -> "log_b51a_partial.TLM"
+    -- so the file still opens in whatever tool its extension implies.
     """
-    ui.label("Conflicting byte ranges").classes("text-base font-medium")
-    if not result.has_conflicts:
-        with ui.row().classes("items-center gap-2"):
-            ui.icon("check_circle", color="positive")
-            ui.label("No conflicts -- every received byte agrees.").classes(
-                "text-positive"
-            )
-        return
-
-    with ui.row().classes("items-center gap-2"):
-        ui.icon("error", color="negative")
-        ui.label(
-            f"{len(result.conflict_ranges)} range(s) have multiple, "
-            "disagreeing values -- narrow the time range(s) until these "
-            "agree:"
-        ).classes("text-negative")
-    for start, end in result.conflict_ranges[:50]:
-        ui.label(_byte_range_str(start, end)).classes("font-mono text-sm")
-    if len(result.conflict_ranges) > 50:  # noqa: PLR2004
-        ui.label(f"...and {len(result.conflict_ranges) - 50} more.").classes(
-            "text-caption text-grey"
-        )
+    if not partial:
+        return filename
+    path = Path(filename)
+    return f"{path.stem}{PARTIAL_FILENAME_SUFFIX}{path.suffix}"
 
 
-def _sha256_comparison(result: ReassemblyResult, expected: str | None) -> None:
+def _verification_section(
+    result: ReassemblyResult,
+    header: BulkHeaderCandidate | None,
+    partial_reason: str | None,
+) -> None:
+    """The cross-check against the header: assembled size vs. `file_size`,
+    assembled hash vs. `sha256`, and a plain statement of whether what's
+    here is a complete, verified file.
+
+    A hash comparison is only run once the bytes are worth hashing (no gaps,
+    no conflicts) -- a zero-filled gap or a conflict resolved the other way
+    guarantees a mismatch, and reporting that as a *hash* failure would send
+    the operator looking for corruption instead of the missing bytes that
+    actually caused it.
+    """
+    expected = header.sha256 if header is not None else None
+    expected_size = header.file_size if header is not None else None
+
+    if expected_size is not None:
+        if expected_size == result.span_bytes:
+            with ui.row().classes("items-center gap-2"):
+                ui.icon("check_circle", color="positive")
+                ui.label(
+                    f"Assembled span matches the header's file_size "
+                    f"({expected_size:,} bytes)."
+                ).classes("text-positive")
+        else:
+            with ui.row().classes("items-center gap-2"):
+                ui.icon("error", color="negative")
+                ui.label(
+                    f"Assembled {result.span_bytes:,} bytes, but the header's "
+                    f"file_size is {expected_size:,} -- the download is cut "
+                    "short (or these are two different files)."
+                ).classes("text-negative")
+
     ui.label(f"SHA-256 of assembled bytes: {result.sha256}").classes(
         "font-mono text-sm"
     )
     if not expected:
-        ui.label("No SHA-256 to compare against -- pick a header below.").classes(
+        ui.label("No SHA-256 to compare against -- pick a header above.").classes(
             "text-caption text-grey"
         )
-    elif len(expected) < 64:  # noqa: PLR2004
+    elif len(expected) < SHA256_HEX_LEN:
         ui.label(
-            f"Header's SHA-256 was truncated ({len(expected)}/64 hex chars) -- "
-            "can't verify."
+            f"Header's SHA-256 was truncated ({len(expected)}/{SHA256_HEX_LEN} "
+            "hex chars) -- can't verify."
+        ).classes("text-caption text-grey")
+    elif not result.is_complete:
+        ui.label(
+            "Not comparing against the header's SHA-256 yet -- missing or "
+            "conflicting bytes would make it mismatch regardless."
         ).classes("text-caption text-grey")
     elif expected == result.sha256:
         with ui.row().classes("items-center gap-2"):
@@ -380,6 +514,11 @@ def _sha256_comparison(result: ReassemblyResult, expected: str | None) -> None:
         with ui.row().classes("items-center gap-2"):
             ui.icon("error", color="negative")
             ui.label("Does NOT match the header's SHA-256.").classes("text-negative")
+
+    if partial_reason is None:
+        with ui.row().classes("items-center gap-2"):
+            ui.icon("verified", color="positive")
+            ui.label("Complete file.").classes("text-positive")
 
 
 def _best_named_candidate(
@@ -400,13 +539,16 @@ def _best_named_candidate(
     return max(named, key=_score)
 
 
-def _is_truncated(candidate: BulkHeaderCandidate) -> bool:
-    """Whether this candidate's SHA-256 looks cut off -- the only field
-    truncation is currently detectable in (see the module docstring: a
-    long file path pushes TCMD_RESPONSE's 186-byte cap into the sha256
-    value before it's fully written).
+def _is_header_truncated(candidate: BulkHeaderCandidate) -> bool:
+    """Whether this candidate's *header* was cut off -- nothing to do with
+    whether the file itself came down whole (that's `_partial_reason`).
+
+    Detected via the SHA-256, the only field truncation is currently
+    visible in (see the module docstring: a long file path pushes
+    TCMD_RESPONSE's 186-byte cap into the sha256 value before it's fully
+    written).
     """
-    return candidate.sha256 is not None and len(candidate.sha256) < 64  # noqa: PLR2004
+    return candidate.sha256 is not None and len(candidate.sha256) < SHA256_HEX_LEN
 
 
 @dataclass(frozen=True, slots=True)
@@ -422,7 +564,7 @@ class _HeaderGroup:
     file_size: int | None
     crc16: str | None
     sha256: str | None
-    truncated: bool
+    is_header_truncated: bool
     members: tuple[BulkHeaderCandidate, ...]
 
 
@@ -453,7 +595,7 @@ def _group_consecutive_candidates(
                     file_size=c.file_size,
                     crc16=c.crc16,
                     sha256=c.sha256,
-                    truncated=_is_truncated(c),
+                    is_header_truncated=_is_header_truncated(c),
                     members=(c,),
                 )
             )
@@ -498,12 +640,14 @@ _HEADER_TABLE_BODY_SLOT = r"""
 """
 
 
-def _header_candidates_table(candidates: list[BulkHeaderCandidate]) -> str | None:
+def _header_candidates_table(candidates: list[BulkHeaderCandidate]) -> None:
     """Render the found header candidates -- sorted by Received, consecutive
     look-alike entries collapsed into one row expandable (via a `+`/`-`
-    button) to its individual timestamps -- and return the SHA-256
-    (possibly None/truncated) of whichever one looks most trustworthy, per
-    `_best_named_candidate`.
+    button) to its individual timestamps.
+
+    Which one the file's name/size/hash are then cross-checked against is
+    `_best_named_candidate`'s call, made by the caller so the same choice
+    drives the export's filename too.
     """
     if not candidates:
         ui.label(
@@ -511,36 +655,53 @@ def _header_candidates_table(candidates: list[BulkHeaderCandidate]) -> str | Non
             "fine, headers are sometimes missing entirely; just cross-check "
             "the file name/size/hash some other way."
         ).classes("text-caption text-grey")
-        return None
+        return
 
     candidates_by_time = sorted(candidates, key=lambda c: c.received_at)
     groups = _group_consecutive_candidates(candidates_by_time)
 
     columns = [
-        {"name": "received_at", "label": "Received", "field": "received_at"},
+        {
+            "name": "received_count",
+            "label": "Times Received",
+            "field": "received_count",
+        },
+        {
+            "name": "first_received_at",
+            "label": "First Received (UTC)",
+            "field": "first_received_at",
+        },
+        {
+            "name": "last_received_at",
+            "label": "Last Received (UTC)",
+            "field": "last_received_at",
+        },
         {"name": "action", "label": "Action", "field": "action"},
         {"name": "file", "label": "File", "field": "file"},
         {"name": "file_size", "label": "Size (bytes)", "field": "file_size"},
         {"name": "crc16", "label": "CRC-16", "field": "crc16"},
         {"name": "sha256", "label": "SHA-256", "field": "sha256"},
-        {"name": "truncated", "label": "Truncated?", "field": "truncated"},
+        {
+            "name": "is_header_truncated",
+            "label": "Header Truncated?",
+            "field": "is_header_truncated",
+        },
     ]
     rows = [
         {
             "id": i,
-            "received_at": (
-                f"{group.members[0].received_at:%Y-%m-%d %H:%M:%S}"
-                if len(group.members) == 1
-                else f"{len(group.members)}x, "
-                f"{group.members[0].received_at:%Y-%m-%d %H:%M:%S} - "
-                f"{group.members[-1].received_at:%Y-%m-%d %H:%M:%S}"
-            ),
+            # `members` is in `received_at` order (see
+            # `_group_consecutive_candidates`), so first/last are its ends --
+            # equal for a group that was only received once.
+            "received_count": len(group.members),
+            "first_received_at": (f"{group.members[0].received_at:%Y-%m-%d %H:%M:%S}"),
+            "last_received_at": f"{group.members[-1].received_at:%Y-%m-%d %H:%M:%S}",
             "action": group.action or "",
             "file": group.file or "",
             "file_size": f"{group.file_size:,}" if group.file_size is not None else "",
             "crc16": group.crc16 or "",
             "sha256": group.sha256 or "",
-            "truncated": "yes" if group.truncated else "",
+            "is_header_truncated": "yes" if group.is_header_truncated else "",
             "member_count": len(group.members),
             "member_timestamps": [
                 f"{c.received_at:%Y-%m-%d %H:%M:%S}" for c in group.members
@@ -552,18 +713,23 @@ def _header_candidates_table(candidates: list[BulkHeaderCandidate]) -> str | Non
     table.add_slot("header", _HEADER_TABLE_HEADER_SLOT)
     table.add_slot("body", _HEADER_TABLE_BODY_SLOT)
 
-    best = _best_named_candidate(candidates)
-    return best.sha256 if best is not None else None
 
-
-def _picam_image_section(jpg_bytes: bytes, filename_hint: str | None) -> None:
+def _picam_image_section(
+    jpg_bytes: bytes, filename_hint: str | None, *, partial: bool
+) -> None:
     """A detected PiCAM image: rendered inline, plus a JPG download button --
     see `file_reassembly.detect_picam_image` for the detection heuristic.
+
+    The JPG is marked partial on the same terms as the raw bytes it was
+    decoded from: a PiCAM image whose middle never arrived still renders
+    (that's the point of showing it mid-download), and its filename is the
+    only thing that will still say so once it's saved to disk.
     """
-    jpg_filename = (
+    jpg_filename = _mark_partial(
         Path(filename_hint).with_suffix(".jpg").name
         if filename_hint
-        else "picam_image.jpg"
+        else "picam_image.jpg",
+        partial=partial,
     )
     with ui.card().classes("w-full"):
         ui.label("Detected PiCAM image").classes("text-lg font-bold")
@@ -579,7 +745,11 @@ def _picam_image_section(jpg_bytes: bytes, filename_hint: str | None) -> None:
 
 
 def _reassembler_results(
-    path: Path, ranges: list[tuple[datetime, datetime]], *, headers_only: bool = False
+    path: Path,
+    ranges: list[tuple[datetime, datetime]],
+    *,
+    policy: ConflictPolicy,
+    headers_only: bool = False,
 ) -> None:
     if not ranges:
         ui.label(
@@ -594,11 +764,12 @@ def _reassembler_results(
 
     with ui.card().classes("w-full"):
         ui.label("Header candidates").classes("text-lg font-bold")
-        expected_sha256 = _header_candidates_table(candidates)
+        _header_candidates_table(candidates)
 
     if headers_only:
         return
 
+    best = _best_named_candidate(candidates)
     chunks = beacon_data.load_bulk_file_downlink_packets(path, ranges=ranges)
 
     with ui.card().classes("w-full"):
@@ -609,44 +780,81 @@ def _reassembler_results(
             )
             return
 
-        result = reassemble_bulk_chunks(chunks)
+        result = reassemble_bulk_chunks(chunks, policy=policy)
         ui.label(
             f"{result.total_chunks:,} packet(s), {result.unique_offsets:,} "
             f"distinct offset(s), spanning {result.span_bytes:,} bytes."
         ).classes("text-caption text-grey")
 
-        _duplicates_status(result)
+        _assessment_summary(result)
         _coverage_map(result)
-        _build_chunks_table(result)()
-        _gaps_section(result)
+        _build_segments_table(result)()
+        _duplicates_note(result)
         ui.separator()
-        _conflict_ranges_section(result)
-        _sha256_comparison(result, expected_sha256)
 
-        best = _best_named_candidate(candidates)
+        partial_reason = _partial_reason(result, best)
+        _verification_section(result, best, partial_reason)
+
         # The full path (e.g. "ADCS/log_b51a.TLM"), not just the basename --
         # slashes become underscores since the browser would otherwise treat
         # them as directory separators in the downloaded filename.
-        filename = (
-            best.file.replace("/", "_") if best is not None and best.file else None
+        base_filename = (
+            best.file.replace("/", "_")
+            if best is not None and best.file
+            else "reassembled_file.bin"
         )
+        filename = _mark_partial(base_filename, partial=partial_reason is not None)
         ui.button(
             "Download reassembled bytes",
             icon="download",
-            on_click=lambda: ui.download.content(
-                result.data, filename=filename or "reassembled_file.bin"
-            ),
+            on_click=lambda: ui.download.content(result.data, filename=filename),
         )
-        if result.has_conflicts or not result.is_gapless:
+        ui.label(f"Exports as: {filename}").classes("font-mono text-caption text-grey")
+        if partial_reason is not None:
             ui.label(
-                "Conflicting offsets and/or gaps are present -- the download "
-                "will still work (missing bytes are filled with 0x00), but "
-                "isn't a verified, complete copy of the file yet."
+                f'Marked "{PARTIAL_FILENAME_SUFFIX}" because {partial_reason}. The '
+                "download still works (missing bytes are filled with 0x00, and "
+                "conflicting ones resolved per the selected policy), but it "
+                "isn't a verified, complete copy of the file."
             ).classes("text-caption text-grey")
 
         picam_jpg = detect_picam_image(result.data)
         if picam_jpg is not None:
-            _picam_image_section(picam_jpg, filename)
+            _picam_image_section(
+                picam_jpg, base_filename, partial=partial_reason is not None
+            )
+
+
+def _conflict_policy_select(on_change: Callable[[str], None]) -> ui.select:
+    """The conflict-resolution picker: which copy of a byte wins when the
+    same byte arrived more than once with different values.
+    """
+    return ui.select(
+        {policy.value: policy.label for policy in ConflictPolicy},
+        value=DEFAULT_CONFLICT_POLICY.value,
+        label="Conflict resolution",
+        on_change=lambda e: on_change(e.value),
+    ).classes("w-80")
+
+
+def _make_policy_setter(
+    search_state: dict[str, Any], results: Any
+) -> Callable[[str], None]:
+    """Switch conflict resolution, re-running the reassembly in place.
+
+    Cheap enough to re-run on every change (the packets are already loaded
+    and the assessment is linear in the file's size), and being able to flip
+    between policies and watch the coverage map and SHA-256 settle -- or not
+    -- is most of how an operator decides which one to trust for a given
+    download.
+    """
+
+    def _set_policy(value: str) -> None:
+        search_state["policy"] = ConflictPolicy(value)
+        if search_state["has_searched"]:
+            results.refresh()
+
+    return _set_policy
 
 
 def build_file_reassembler_page(data_dir: Path) -> None:
@@ -714,7 +922,11 @@ def build_file_reassembler_page(data_dir: Path) -> None:
             on_click=lambda: (rows.append(_TimeRangeRow()), range_editor.refresh()),
         ).props("flat")
 
-    search_state = {"headers_only": False, "has_searched": False}
+    search_state: dict[str, Any] = {
+        "headers_only": False,
+        "has_searched": False,
+        "policy": DEFAULT_CONFLICT_POLICY,
+    }
 
     @ui.refreshable
     def results() -> None:
@@ -730,6 +942,7 @@ def build_file_reassembler_page(data_dir: Path) -> None:
         _reassembler_results(
             parquet_path,
             _valid_ranges(rows),
+            policy=search_state["policy"],
             headers_only=search_state["headers_only"],
         )
 
@@ -755,5 +968,13 @@ def build_file_reassembler_page(data_dir: Path) -> None:
             ).props("outline")
             ui.button(
                 "Search", icon="search", on_click=lambda: _search(headers_only=False)
+            )
+            _conflict_policy_select(
+                on_change=_make_policy_setter(search_state, results)
+            ).tooltip(
+                "Which copy of a byte wins when the same byte came down more "
+                "than once with different values. Conflicting bytes stay "
+                "flagged either way -- this only decides what gets written "
+                "into the exported file."
             )
         results()

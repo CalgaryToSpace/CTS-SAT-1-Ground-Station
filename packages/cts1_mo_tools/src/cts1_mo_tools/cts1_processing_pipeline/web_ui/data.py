@@ -107,7 +107,11 @@ def load_bulk_file_downlink_packets(
 ) -> pl.DataFrame:
     """`BULK_FILE_DOWNLINK` packets restricted to the union of `ranges`,
     ordered by `bulk_file_offset` (the order file-reassembly cares about,
-    not receipt order).
+    not receipt order), then by `received_at` within one offset.
+
+    That secondary sort is what makes a retransmitted offset's copies arrive
+    oldest-first, so `file_reassembly`'s conflict resolution has a stable
+    order to fall back on when two copies share a `received_at` tick.
 
     `ranges=()` (the default) means no time filter -- every such packet ever
     decoded. The web UI's File Reassembler page is what narrows this down to
@@ -118,7 +122,7 @@ def load_bulk_file_downlink_packets(
         return pl.DataFrame()
     lf = lf.filter(pl.col("packet_type") == "BULK_FILE_DOWNLINK")
     lf = _filter_to_ranges(lf, ranges)
-    return lf.sort("bulk_file_offset").collect()
+    return lf.sort("bulk_file_offset", "received_at").collect()
 
 
 def load_tcmd_response_packets(
