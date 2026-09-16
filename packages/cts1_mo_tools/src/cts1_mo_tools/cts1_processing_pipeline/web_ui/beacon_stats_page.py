@@ -1,4 +1,4 @@
-"""The "Beacon Stats" page: recent beacon(s) at a glance, plus line/scatter
+"""The "Beacon Data" page: recent beacon(s) at a glance, plus line/scatter
 charts for every field in the basic and extended beacon packets, grouped by
 subsystem.
 """
@@ -294,7 +294,7 @@ def build_beacon_stats_page(data_dir: Path, hours: float) -> None:
 
     with page_shell():
         with ui.row().classes("w-full items-center justify-between"):
-            ui.label("Beacon Stats").classes("text-2xl font-bold")
+            ui.label("Beacon Data").classes("text-2xl font-bold")
             with ui.row().classes("items-center gap-4"):
                 ui.select(
                     list(WINDOW_CHOICES),

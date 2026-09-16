@@ -90,7 +90,7 @@ def _build_uvicorn_log_config() -> dict:
 
 
 NAV_LINKS = (
-    ("Beacon Stats", "/"),
+    ("Beacon Data", "/"),
     ("Browse Packets", "/browse-packets"),
     ("Satellite Events", "/satellite-events"),
     ("File Reassembler", "/file-reassembler"),
