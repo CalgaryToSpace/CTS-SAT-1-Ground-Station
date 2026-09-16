@@ -35,6 +35,7 @@ cts1_tle_formatter = "cts1_mo_tools.cts1_tle_formatter:main"
 cts1_processing_pipeline = "cts1_mo_tools.cts1_processing_pipeline.cli:main"
 cts1_data_web_ui = "cts1_mo_tools.cts1_processing_pipeline.web_ui.main:main"
 cts1_picam_to_jpg = "cts1_mo_tools.cts1_picam_to_jpg:main"
+cts1_plan_mpi_ops = "cts1_mo_tools.cts1_plan_mpi_ops:main"
 
 [dependency-groups]
 dev = [
