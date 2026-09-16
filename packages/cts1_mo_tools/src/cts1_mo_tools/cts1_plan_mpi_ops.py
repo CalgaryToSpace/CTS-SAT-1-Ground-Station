@@ -22,6 +22,9 @@ from loguru import logger
 
 CELESTRAK_GP_URL = "https://celestrak.org/NORAD/elements/gp.php"
 
+TIME_STEP_SEC = 1.0
+"""Propagation step used to detect region entry/exit."""
+
 
 @dataclass(frozen=True, slots=True)
 class Args:
@@ -56,9 +59,6 @@ class Args:
 
     duration_hours: float = 24.0
     """Length of the planning window."""
-
-    time_step_sec: float = 1.0
-    """Propagation step used to detect region entry/exit."""
 
     tle_file: Path | None = None
     """Optional local TLE file to use instead of fetching from CelesTrak."""
@@ -201,6 +201,11 @@ def plan_mpi_events(
 
 
 def run(args: Args) -> pl.DataFrame:
+    logger.info(
+        "Input settings:\n"
+        + "\n".join(f"  {k} = {getattr(args, k)!r}" for k in args.__dataclass_fields__)
+    )
+
     regions = [
         Region(
             name="north",
@@ -236,10 +241,8 @@ def run(args: Args) -> pl.DataFrame:
     logger.info(f"Using TLE (epoch {tle.epoch}):\n" + "\n".join(tle_lines))
 
     start = _parse_start_time(args.start_time)
-    num_steps = int(args.duration_hours * 3600 / args.time_step_sec) + 1
-    times = [
-        start + timedelta(seconds=i * args.time_step_sec) for i in range(num_steps)
-    ]
+    num_steps = int(args.duration_hours * 3600 / TIME_STEP_SEC) + 1
+    times = [start + timedelta(seconds=i * TIME_STEP_SEC) for i in range(num_steps)]
     logger.info(f"Propagating {num_steps} steps from {start} ({args.duration_hours} h)")
 
     lat, lon = propagate_lat_lon(tle, times)
