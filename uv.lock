@@ -479,6 +479,7 @@ dependencies = [
     { name = "pycountry" },
     { name = "python-dotenv" },
     { name = "requests" },
+    { name = "satkit" },
     { name = "tyro" },
     { name = "tzdata" },
     { name = "xlsxwriter" },
@@ -506,6 +507,7 @@ requires-dist = [
     { name = "pycountry", specifier = ">=26.2.16" },
     { name = "python-dotenv" },
     { name = "requests" },
+    { name = "satkit", specifier = ">=0.22.0" },
     { name = "tyro" },
     { name = "tzdata" },
     { name = "xlsxwriter", specifier = ">=3.2.0" },
@@ -2034,6 +2036,33 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/ea/f9/0ae446942c846b8266059ad8a30702a35afae55f5cdc54c5adf8d7afdc27/ruff-0.15.12-py3-none-win32.whl", hash = "sha256:d0185894e038d7043ba8fd6aee7499ece6462dc0ea9f1e260c7451807c714c20", size = 10657277, upload-time = "2026-04-24T18:17:18.591Z" },
     { url = "https://files.pythonhosted.org/packages/33/f1/9614e03e1cdcbf9437570b5400ced8a720b5db22b28d8e0f1bda429f660d/ruff-0.15.12-py3-none-win_amd64.whl", hash = "sha256:c87a162d61ab3adca47c03f7f717c68672edec7d1b5499e652331780fe74950d", size = 11837758, upload-time = "2026-04-24T18:17:00.113Z" },
     { url = "https://files.pythonhosted.org/packages/c0/98/6beb4b351e472e5f4c4613f7c35a5290b8be2497e183825310c4c3a3984b/ruff-0.15.12-py3-none-win_arm64.whl", hash = "sha256:a538f7a82d061cee7be55542aca1d86d1393d55d81d4fcc314370f4340930d4f", size = 11120821, upload-time = "2026-04-24T18:16:57.979Z" },
+]
+
+[[package]]
+name = "satkit"
+version = "0.22.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a2/fe/390aa300717ec477acf2cbc3341745bcd916f30882cf260e8157a2135cf4/satkit-0.22.0.tar.gz", hash = "sha256:d484d77ae0fa690efbb3bb052514c1b5a02f9ed28fb2cb9dd3f220bbe2e405e0", size = 798769, upload-time = "2026-09-12T17:29:18.564Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f1/b0/52ada22dbf6a5d195bfcd1674ef8297ea702911fa0dbe8948b81d47dd763/satkit-0.22.0-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:8695a5506a4b8f4c52e62f535b621d9f4947376ad2292e37f6586d9ca2e380ff", size = 2792814, upload-time = "2026-09-12T17:28:50.275Z" },
+    { url = "https://files.pythonhosted.org/packages/3a/1d/e72f7ff22f1245ddae53bf8cd649ff9d597b89549d23c02f196e9f0acf5c/satkit-0.22.0-cp311-cp311-manylinux_2_28_aarch64.whl", hash = "sha256:f0baa2e6cd5fead2c6fb41a905b910a8b6a9b3d5a82711cc34785971307bff48", size = 3007394, upload-time = "2026-09-12T17:28:52.007Z" },
+    { url = "https://files.pythonhosted.org/packages/c3/d8/a2a7847444230c316bc250d5779006e64cdcf42f664c0f95ae79e333541d/satkit-0.22.0-cp311-cp311-manylinux_2_28_x86_64.whl", hash = "sha256:5935f8dea83c5aa34d8b5abefaa4d1346ba758f65871298718b9f64ab90f684f", size = 3150305, upload-time = "2026-09-12T17:28:54.086Z" },
+    { url = "https://files.pythonhosted.org/packages/1e/3e/16c47c8df4987edf636446e3360269ccf10495f9d195ba38770a627ea52b/satkit-0.22.0-cp311-cp311-win_amd64.whl", hash = "sha256:f87600c8e701dc471bd1a522a36aa109f7e87cf7847cd0775f7c6bb4764ffff3", size = 2942882, upload-time = "2026-09-12T17:28:55.802Z" },
+    { url = "https://files.pythonhosted.org/packages/da/ca/bd6f4b496f69a0f4d014cfadea5ace403ace013609456577777095877396/satkit-0.22.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:101bea706ef88a6012d3ecc49e8fe985adc99ed4def4e255ecd7ffb2ec45e9ee", size = 2786766, upload-time = "2026-09-12T17:28:57.44Z" },
+    { url = "https://files.pythonhosted.org/packages/f8/fc/6286e7b4d4a18ce27bd7d296598e64df0d8e85700582be06e982021a4210/satkit-0.22.0-cp312-cp312-manylinux_2_28_aarch64.whl", hash = "sha256:1863aeb81210bd6e9fdb5cd924be9e361835167cab27bc26c6ebaf251aef0edf", size = 3006885, upload-time = "2026-09-12T17:28:59.275Z" },
+    { url = "https://files.pythonhosted.org/packages/cd/ac/6ecf57f0c24ea63a910fbd5b41a1dc94673f7424d822d825520d62b2039b/satkit-0.22.0-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:1ba434397e13c6c75dfda5d1bbc10f0bc20bf167dfc8892d439d42c5d70836b7", size = 3153432, upload-time = "2026-09-12T17:29:01.412Z" },
+    { url = "https://files.pythonhosted.org/packages/61/98/27fc51d4e6c1513f110c730381002e2ae7d77c048413c406dbeef51e2ad4/satkit-0.22.0-cp312-cp312-win_amd64.whl", hash = "sha256:a40d6e4f7de9ec83c8d16a75376a2d87fb59ea6452a8ea29d536b5daf87c1e54", size = 2937214, upload-time = "2026-09-12T17:29:03.28Z" },
+    { url = "https://files.pythonhosted.org/packages/d3/81/83ce83f98e88ea3c1cd0cab81089acd521b3d5bbb1320624c29103848e9d/satkit-0.22.0-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:b1e237c0a280e24feb649f06bdf2c4df8676be93ffff879caf71f20a659008b1", size = 2788940, upload-time = "2026-09-12T17:29:04.941Z" },
+    { url = "https://files.pythonhosted.org/packages/9c/e9/4fe180e53f5b2065271e1bf604335fb17812b75d76161f6020dd83626e28/satkit-0.22.0-cp313-cp313-manylinux_2_28_aarch64.whl", hash = "sha256:31903ea4be276a27f6fe645c8d051384f081f9ced8c8fd4c5a0ecd2409fda42c", size = 3010094, upload-time = "2026-09-12T17:29:06.75Z" },
+    { url = "https://files.pythonhosted.org/packages/9c/20/3800855350393619c6035fa14ee2e4f608da29805f77e198ab50169b5571/satkit-0.22.0-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:17381764666ab4a87b84337cdb6d429c4b4843ca6a00e815a96032be85b07ff3", size = 3158686, upload-time = "2026-09-12T17:29:08.669Z" },
+    { url = "https://files.pythonhosted.org/packages/e3/8d/bf0902478878498a029229f2b0cb117a90b161f892a22339a3f261489306/satkit-0.22.0-cp313-cp313-win_amd64.whl", hash = "sha256:30f06c5d5da17bdbfb2dbcd1cda8f953fd448fc655796e9ca2036d4f796e5ca0", size = 2941317, upload-time = "2026-09-12T17:29:10.302Z" },
+    { url = "https://files.pythonhosted.org/packages/6d/e2/3bc781a63b5a93d4edb2307c1b3547f5b32007d59ea514e5884b5a0d39fc/satkit-0.22.0-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:03d5eecbeed3531c57bfd1218bf4233e6ac964b9fc29d441f54bf628f5cc994d", size = 2787742, upload-time = "2026-09-12T17:29:11.953Z" },
+    { url = "https://files.pythonhosted.org/packages/7e/c5/bc837da2fa3c402fb0a83f0b307f16a0b7538d115a2957aa0f2fc9a3e986/satkit-0.22.0-cp314-cp314-manylinux_2_28_aarch64.whl", hash = "sha256:b6812f31b85bdbbc2c8e75cf13ad2d669cb92680ac4b9135b3384e91cde952ec", size = 3008666, upload-time = "2026-09-12T17:29:13.657Z" },
+    { url = "https://files.pythonhosted.org/packages/0d/5e/faf23157fdea337bbe668ee7b00ab3af84010cabf2535374e92a42ff2187/satkit-0.22.0-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:5fc6dcb646dece3e40b474618e44fae1cc83ec9bdcc2556ec95cad1c35317cce", size = 3157387, upload-time = "2026-09-12T17:29:15.27Z" },
+    { url = "https://files.pythonhosted.org/packages/2d/57/3ff36f5023d8d4ed5bda4654880e745b9f836a1030651304b02af7965b14/satkit-0.22.0-cp314-cp314-win_amd64.whl", hash = "sha256:8cd7bd478f2e598303a96c00118c6a5badd05864ed96ba9d25f21e19ebb498a6", size = 3019581, upload-time = "2026-09-12T17:29:16.823Z" },
 ]
 
 [[package]]
