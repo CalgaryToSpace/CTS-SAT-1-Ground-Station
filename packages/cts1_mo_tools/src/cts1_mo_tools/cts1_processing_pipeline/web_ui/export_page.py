@@ -222,7 +222,7 @@ def _options_section(options: _ExportOptions) -> None:
 
 def build_export_page(data_dir: Path) -> None:
     selected_tables: dict[str, bool] = {
-        spec.key: spec.key == export_tables.TABLE_SPECS[-1].key
+        spec.key: spec.key == "everything_decoded"
         for spec in export_tables.TABLE_SPECS
     }
     selected_packet_types: dict[str, bool] = dict.fromkeys(
