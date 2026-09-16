@@ -46,7 +46,7 @@ WORKDIR /src/gr-satellites
 RUN git checkout 6406540453bee26964e96fb41d2e6163994bed82
 WORKDIR /src/gr-satellites/build
 RUN cmake ..
-RUN make -j8
+RUN make -j"$(nproc --ignore=1)"
 RUN make install
 RUN ldconfig
 
@@ -58,7 +58,7 @@ WORKDIR /src/simple_sat_ops
 RUN git checkout 525ed50261f556b6b260edcc988ee0e2ff4fd478
 WORKDIR /src/simple_sat_ops/build
 RUN cmake .. -DWITH_USRP_B210=OFF
-RUN make -j8 rx_replay
+RUN make -j"$(nproc --ignore=1)" rx_replay
 RUN cp rx_replay /usr/local/bin/sso_rx_replay
 RUN ldconfig
 
@@ -88,8 +88,8 @@ ENV UV_COMPILE_BYTECODE=1 \
 # cts1_mo_tools actually gets installed below.
 COPY . .
 
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --package cts1_mo_tools
+# RUN --mount=type=cache,target=/root/.cache/uv \
+RUN uv sync --frozen --no-dev --package cts1_mo_tools
 
 VOLUME ["/opt/cts1_processing_pipeline"]
 
