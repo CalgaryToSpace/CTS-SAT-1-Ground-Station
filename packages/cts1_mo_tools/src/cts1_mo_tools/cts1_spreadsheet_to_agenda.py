@@ -503,6 +503,12 @@ def spreadsheet_file_to_agenda_file(
         encoding="utf-8",
     )
 
+    if Path(output_file).suffix != ".txt":
+        logger.warning(
+            "Output file is not a valid .txt file. "
+            "Please create the agenda again or rename the file with a .txt extension."
+        )
+
     print(f"Generated {len(agenda)} commands → {output_file}")  # noqa: T201
 
     if readable:
