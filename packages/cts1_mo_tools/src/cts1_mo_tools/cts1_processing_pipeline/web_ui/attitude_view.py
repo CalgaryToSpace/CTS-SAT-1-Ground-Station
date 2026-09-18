@@ -30,11 +30,13 @@ camera near-plane comfortably out of the way.
 
 from __future__ import annotations
 
-__all__ = ["AttitudePlayer", "AttitudeView"]
+__all__ = ["AttitudePlayer", "AttitudeView", "Pacing"]
 
 import bisect
 import math
+import time
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 from nicegui import ui
@@ -156,6 +158,23 @@ def _fmt(value: float | None, unit: str) -> str:
     return "?" if value is None else f"{value:+.2f}{unit}"
 
 
+def _mode(row: dict[str, Any] | None, column: str) -> str:
+    value = row.get(column) if row else None
+    return "?" if value is None else str(value)
+
+
+_READOUT_NAMES = (
+    "Roll",
+    "Pitch",
+    "Yaw",
+    "ωx",
+    "ωy",
+    "ωz",
+    "Estimation mode",
+    "Control mode",
+)
+
+
 class AttitudeView:
     """A card holding the 3D scene plus a numeric readout.
 
@@ -181,9 +200,9 @@ class AttitudeView:
                         "No attitude estimate -- shown at zero attitude."
                     ).classes("text-warning")
                     self._readout: dict[str, ui.label] = {}
-                    for name in ("Roll", "Pitch", "Yaw", "ωx", "ωy", "ωz"):
-                        with ui.row().classes("gap-3 items-baseline"):
-                            ui.label(name).classes("text-caption text-grey w-12")
+                    for name in _READOUT_NAMES:
+                        with ui.row().classes("gap-3 items-baseline no-wrap"):
+                            ui.label(name).classes("text-caption text-grey w-28")
                             self._readout[name] = ui.label().classes(
                                 "text-base font-medium font-mono"
                             )
@@ -290,16 +309,54 @@ class AttitudeView:
             ("ωx", _fmt(rates[0], " °/s")),
             ("ωy", _fmt(rates[1], " °/s")),
             ("ωz", _fmt(rates[2], " °/s")),
+            ("Estimation mode", _mode(row, "adcs_attitude_estimation_mode")),
+            ("Control mode", _mode(row, "adcs_control_mode")),
         ):
             self._readout[name].set_text(value)
 
 
-_SPEED_CHOICES: dict[float, str] = {
-    1.0: "1 frame/s",
-    2.0: "2 frames/s",
-    5.0: "5 frames/s",
-    10.0: "10 frames/s",
+class Pacing(StrEnum):
+    """How playback time maps onto the (irregularly spaced) beacons."""
+
+    PER_BEACON = "Per beacon"
+    """Every beacon gets the same screen time, however far apart they were
+    received. Smooth to watch; distorts time (a pass and the hours-long gap
+    after it each take one frame)."""
+
+    REAL_TIME = "Real time"
+    """A playback clock runs at a multiple of real time, showing whichever
+    beacon was most recent at that instant. Timing is true to life, so an
+    irregular cadence shows up as irregular motion."""
+
+
+# Per-beacon speeds: frames per second of playback.
+_FRAME_RATE_CHOICES: dict[float, str] = {
+    1.0: "1 beacon/s",
+    2.0: "2 beacons/s",
+    5.0: "5 beacons/s",
+    10.0: "10 beacons/s",
 }
+# Real-time speeds: seconds of satellite time per second of playback.
+_TIME_SCALE_CHOICES: dict[float, str] = {
+    1.0: "1x (real time)",
+    10.0: "10x",
+    30.0: "30x",
+    60.0: "60x (1 min/s)",
+    300.0: "300x (5 min/s)",
+    3600.0: "3600x (1 h/s)",
+}
+_DEFAULT_FRAME_RATE = 2.0
+_DEFAULT_TIME_SCALE = 30.0
+
+# Real-time mode ticks at a fixed rate and advances the clock by however
+# much wall time actually elapsed, so a slow tick doesn't slow playback.
+_REAL_TIME_TICK_SEC = 0.1
+# "Skip gaps": no frame is held on screen longer than this -- once it has
+# been, the clock jumps straight to the next beacon. So the hours between
+# passes don't mean minutes of a frozen frame, while shorter waits keep
+# their true (scaled) length and a longer gap never plays shorter than a
+# shorter one.
+_MAX_HOLD_SEC = 1.5
 
 
 def _gap_str(delta: timedelta) -> str:
@@ -313,7 +370,8 @@ def _gap_str(delta: timedelta) -> str:
 
 class AttitudePlayer:
     """`AttitudeView` plus playback: a scrubber over every extended beacon
-    in a selectable window, play/pause, stepping, and speed.
+    in a selectable window, play/pause, stepping, speed, and a `Pacing`
+    mode.
 
     Frames are the beacons themselves -- no interpolation between them.
     Extended beacons arrive in bursts during passes with hours-long gaps in
@@ -343,6 +401,14 @@ class AttitudePlayer:
         self._index = 0
         self._showing_fallback = False
 
+        self._pacing = Pacing.PER_BEACON
+        self._speed = _DEFAULT_FRAME_RATE
+        # Real-time mode state: the satellite-time instant being shown, and
+        # (monotonic) wall-clock bookkeeping for advancing it.
+        self._clock: datetime | None = None
+        self._last_tick_wall = 0.0
+        self._frame_shown_wall = 0.0
+
         self._view = AttitudeView()
         with self._view.card:
             with ui.row().classes("w-full items-center gap-1 flex-wrap"):
@@ -352,7 +418,7 @@ class AttitudePlayer:
                     label="Playback window",
                     on_change=lambda e: self._set_window(e.value),
                 ).classes("w-40 mr-2")
-                ui.button(icon="first_page", on_click=lambda: self._seek(0)).props(
+                ui.button(icon="first_page", on_click=lambda: self._jump(0)).props(
                     "flat round"
                 ).tooltip("Oldest")
                 ui.button(icon="skip_previous", on_click=lambda: self._step(-1)).props(
@@ -367,19 +433,37 @@ class AttitudePlayer:
                     "flat round"
                 ).tooltip("Next beacon")
                 ui.button(
-                    icon="last_page", on_click=lambda: self._seek(len(self._frames) - 1)
+                    icon="last_page", on_click=lambda: self._jump(len(self._frames) - 1)
                 ).props("flat round").tooltip("Latest")
-                ui.select(
-                    _SPEED_CHOICES,
-                    value=2.0,
+                ui.toggle(
+                    [p.value for p in Pacing],
+                    value=self._pacing.value,
+                    on_change=lambda e: self._set_pacing(Pacing(e.value)),
+                ).props("dense no-caps").classes("ml-2").tooltip(
+                    "Per beacon: every beacon gets equal screen time. "
+                    "Real time: a playback clock at a multiple of real time "
+                    "(true timing between beacons)."
+                )
+                self._speed_select = ui.select(
+                    _FRAME_RATE_CHOICES,
+                    value=self._speed,
                     label="Speed",
                     on_change=self._set_speed,
-                ).classes("w-32 ml-2")
+                ).classes("w-40 ml-2")
+                self._skip_gaps = (
+                    ui.checkbox("Skip gaps", value=True)
+                    .tooltip(
+                        f"Hold each beacon for at most {_MAX_HOLD_SEC:g}s, "
+                        "skipping long waits (e.g. between passes)."
+                    )
+                    .classes("ml-1")
+                )
+                self._skip_gaps.set_visibility(False)
                 self._position = ui.label().classes("text-caption text-grey ml-2")
             self._slider = ui.slider(
                 min=0, max=1, value=0, on_change=self._on_slider
             ).classes("w-full px-2")
-        self._timer = ui.timer(1.0 / 2.0, self._tick, active=False)
+        self._timer = ui.timer(1.0 / self._speed, self._tick, active=False)
         self.reload()
 
     # -- data ---------------------------------------------------------------
@@ -417,7 +501,7 @@ class AttitudePlayer:
         self._hours = self._window_choices[label]
         self.reload()
 
-    # -- playback -----------------------------------------------------------
+    # -- navigation ---------------------------------------------------------
 
     def _seek(self, index: int, *, force: bool = False) -> None:
         """Move to frame `index`. Every path goes through the slider's value
@@ -426,10 +510,13 @@ class AttitudePlayer:
         index = max(0, min(index, len(self._frames) - 1))
         if self._slider.value == index:
             if force or index != self._index:
-                self._index = index
-                self._show()
+                self._on_frame(index)
         else:
             self._slider.set_value(index)
+
+    def _jump(self, index: int) -> None:
+        """Oldest/latest buttons: move there, keep playing if playing."""
+        self._seek(index)
 
     def _step(self, delta: int) -> None:
         self._pause()
@@ -438,8 +525,51 @@ class AttitudePlayer:
     def _on_slider(self, e: events.ValueChangeEventArguments) -> None:
         if e.value is None or not self._frames:
             return
-        self._index = max(0, min(int(e.value), len(self._frames) - 1))
+        self._on_frame(int(e.value))
+
+    def _on_frame(self, index: int) -> None:
+        self._index = max(0, min(index, len(self._frames) - 1))
+        # Keep the real-time clock inside the shown frame's span. A tick that
+        # advanced the clock into this frame is already inside it (keep its
+        # sub-frame progress); a manual seek isn't (snap to the frame).
+        if self._frames:
+            start = self._times[self._index]
+            end = (
+                self._times[self._index + 1]
+                if self._index + 1 < len(self._times)
+                else None
+            )
+            if self._clock is None or not (
+                start <= self._clock and (end is None or self._clock < end)
+            ):
+                self._clock = start
+        self._frame_shown_wall = time.monotonic()
         self._show()
+
+    # -- playback -----------------------------------------------------------
+
+    def _set_pacing(self, pacing: Pacing) -> None:
+        self._pacing = pacing
+        if pacing is Pacing.PER_BEACON:
+            options, self._speed = _FRAME_RATE_CHOICES, _DEFAULT_FRAME_RATE
+        else:
+            options, self._speed = _TIME_SCALE_CHOICES, _DEFAULT_TIME_SCALE
+        self._speed_select.set_options(options, value=self._speed)
+        self._skip_gaps.set_visibility(pacing is Pacing.REAL_TIME)
+        self._apply_timer_interval()
+
+    def _set_speed(self, e: events.ValueChangeEventArguments) -> None:
+        if e.value is None:
+            return
+        self._speed = float(e.value)
+        self._apply_timer_interval()
+
+    def _apply_timer_interval(self) -> None:
+        self._timer.interval = (
+            1.0 / self._speed
+            if self._pacing is Pacing.PER_BEACON
+            else _REAL_TIME_TICK_SEC
+        )
 
     def _toggle_play(self) -> None:
         if self._timer.active:
@@ -449,6 +579,8 @@ class AttitudePlayer:
             return
         if self._index >= len(self._frames) - 1:
             self._seek(0)  # at the end: play again from the start
+        self._last_tick_wall = time.monotonic()
+        self._frame_shown_wall = self._last_tick_wall
         self._timer.activate()
         self._play_button.props("icon=pause")
 
@@ -460,10 +592,27 @@ class AttitudePlayer:
         if self._index >= len(self._frames) - 1:
             self._pause()
             return
-        self._seek(self._index + 1)
+        if self._pacing is Pacing.PER_BEACON:
+            self._seek(self._index + 1)
+        else:
+            self._tick_real_time()
 
-    def _set_speed(self, e: events.ValueChangeEventArguments) -> None:
-        self._timer.interval = 1.0 / float(e.value)
+    def _tick_real_time(self) -> None:
+        now = time.monotonic()
+        elapsed = now - self._last_tick_wall
+        self._last_tick_wall = now
+        if self._clock is None:
+            self._clock = self._times[self._index]
+        self._clock += timedelta(seconds=elapsed * self._speed)
+
+        if self._skip_gaps.value and now - self._frame_shown_wall >= _MAX_HOLD_SEC:
+            self._clock = max(self._clock, self._times[self._index + 1])
+
+        # The newest beacon at/before the clock. At high speeds this can
+        # skip several beacons in one tick, same as real playback would.
+        index = bisect.bisect_right(self._times, self._clock) - 1
+        if index != self._index:
+            self._seek(index)
 
     # -- rendering ----------------------------------------------------------
 

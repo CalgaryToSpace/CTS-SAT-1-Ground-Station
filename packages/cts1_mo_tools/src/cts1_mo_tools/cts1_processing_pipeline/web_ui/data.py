@@ -12,6 +12,7 @@ from __future__ import annotations
 
 __all__ = [
     "ATTITUDE_COLUMNS",
+    "ATTITUDE_MODE_COLUMNS",
     "BEACON_PACKET_TYPES",
     "DEFAULT_PARQUET_PATH",
     "latest_beacons",
@@ -51,6 +52,8 @@ ATTITUDE_COLUMNS = (
     "adcs_estimated_rate_y_deg_per_sec",
     "adcs_estimated_rate_z_deg_per_sec",
 )
+# Carried alongside each attitude frame, but not what makes a row a frame.
+ATTITUDE_MODE_COLUMNS = ("adcs_attitude_estimation_mode", "adcs_control_mode")
 
 
 def _scan(path: Path) -> pl.LazyFrame | None:
@@ -98,8 +101,9 @@ def load_beacon_window(
 def load_attitude_window(
     path: Path = DEFAULT_PARQUET_PATH, *, since: datetime | None = None
 ) -> pl.DataFrame:
-    """`received_at` + `ATTITUDE_COLUMNS` for every extended beacon received
-    at/after `since` that carries any of them, oldest first -- the frames
+    """`received_at` + `ATTITUDE_COLUMNS` + `ATTITUDE_MODE_COLUMNS` for every
+    extended beacon received at/after `since` that carries any
+    `ATTITUDE_COLUMNS` value, oldest first -- the frames
     the attitude playback steps through. Only those columns are
     materialized, so a multi-day window stays small.
     """
@@ -112,7 +116,11 @@ def load_attitude_window(
     )
     if since is not None:
         lf = lf.filter(pl.col("received_at") >= since)
-    return lf.select("received_at", *ATTITUDE_COLUMNS).sort("received_at").collect()
+    return (
+        lf.select("received_at", *ATTITUDE_COLUMNS, *ATTITUDE_MODE_COLUMNS)
+        .sort("received_at")
+        .collect()
+    )
 
 
 def _filter_to_ranges(
