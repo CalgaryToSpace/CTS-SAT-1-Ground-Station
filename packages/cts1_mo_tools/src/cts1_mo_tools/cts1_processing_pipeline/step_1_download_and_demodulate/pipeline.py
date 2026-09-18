@@ -25,7 +25,7 @@ import tempfile
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import polars as pl
 from loguru import logger
@@ -41,6 +41,9 @@ from .decode_gr_satellites_kiss import run_gr_satellites_kiss
 from .decode_satnogs_data_demod import run_satnogs_data_demod
 from .decode_sso_rx_replay import run_sso_rx_replay
 
+if TYPE_CHECKING:
+    import duckdb
+
 # Every step (and the web UI) takes a single `data_dir` argument and finds
 # its own file(s) inside it by a fixed filename -- see each step's
 # `DEFAULT_DATA_DIR`/`OUTPUT_FILENAME` -- so pointing every process (the
@@ -51,6 +54,12 @@ DEFAULT_DATA_DIR = Path(os.environ.get("CTS1_DATA_DIR", "output"))
 DB_FILENAME = "cts1_processing_pipeline.duckdb"
 DEFAULT_DB_PATH = DEFAULT_DATA_DIR / DB_FILENAME
 CHECKPOINT_INTERVAL = 100
+# Floor on the wall-clock gap between two mid-run checkpoint writeouts.
+# `export_parquets` rewrites every table in full, which on a long run costs
+# far more than the handful of new observations each writeout actually
+# persists, so `CHECKPOINT_INTERVAL` alone isn't enough of a brake. The
+# final writeout at the end of the run ignores this.
+MIN_SECONDS_BETWEEN_CHECKPOINTS = 3 * 60.0
 DEMOD_DOWNLOAD_WORKERS = 50
 DECODERS = (
     "askew_demod_from_file",
@@ -440,7 +449,20 @@ def run(  # noqa: C901, PLR0913, PLR0915
     total_observations = 0
     total_decoded = 0
     since_checkpoint = 0
+    last_checkpoint_at = time.monotonic()
     reached_limit = False
+
+    def write_checkpoint(con: duckdb.DuckDBPyConnection) -> None:
+        nonlocal last_checkpoint_at
+        started_at = time.monotonic()
+        logger.debug(
+            f"Checkpointing after {total_observations} observation(s) "
+            f"({started_at - last_checkpoint_at:.1f}s since the last one)"
+        )
+        con.execute("CHECKPOINT")
+        db.export_parquets(con, db_path)
+        last_checkpoint_at = time.monotonic()
+        logger.debug(f"Checkpoint written in {last_checkpoint_at - started_at:.1f}s")
 
     with (
         db.connect(db_path) as con,
@@ -511,12 +533,20 @@ def run(  # noqa: C901, PLR0913, PLR0915
                 db.upsert_observations(con, observations_df)
 
                 if since_checkpoint >= CHECKPOINT_INTERVAL:
-                    logger.debug(
-                        f"Checkpointing after {total_observations} observation(s)"
-                    )
-                    con.execute("CHECKPOINT")
-                    db.export_parquets(con, db_path)
-                    since_checkpoint = 0
+                    seconds_since_checkpoint = time.monotonic() - last_checkpoint_at
+                    if seconds_since_checkpoint >= MIN_SECONDS_BETWEEN_CHECKPOINTS:
+                        write_checkpoint(con)
+                        since_checkpoint = 0
+                    else:
+                        # Leave `since_checkpoint` alone so the next page
+                        # retests it, rather than waiting another full
+                        # CHECKPOINT_INTERVAL observations after the rate
+                        # limit expires.
+                        logger.debug(
+                            "Skipping checkpoint: only "
+                            f"{seconds_since_checkpoint:.1f}s since the last "
+                            f"one (minimum {MIN_SECONDS_BETWEEN_CHECKPOINTS:.0f}s)"
+                        )
 
                 if reached_limit:
                     continue
@@ -545,8 +575,9 @@ def run(  # noqa: C901, PLR0913, PLR0915
             fast_executor.shutdown(wait=True, cancel_futures=True)
             raise
 
-        con.execute("CHECKPOINT")
-        db.export_parquets(con, db_path)
+        # Final writeout: unconditional, so whatever the rate limit held
+        # back above still lands before the run ends.
+        write_checkpoint(con)
 
     logger.info(
         f"Done. {total_observations} observation(s) listed, {total_decoded} decoded."
