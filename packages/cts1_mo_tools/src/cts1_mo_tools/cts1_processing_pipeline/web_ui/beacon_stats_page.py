@@ -21,7 +21,7 @@ from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
 )
 
 from . import data as beacon_data
-from .attitude_view import AttitudeView
+from .attitude_view import AttitudePlayer
 from .charts import BEACON_CHART_GROUPS, OTHER_CHART_GROUPS, chart_option
 from .layout import page_shell
 
@@ -319,23 +319,6 @@ def build_beacon_stats_page(data_dir: Path, hours: float) -> None:
         _latest_beacon_card(parquet_path)
         _latest_extended_beacon_card(parquet_path)
 
-    # Not a refreshable: the 3D scene is built once and re-posed in place,
-    # so the 30s refresh doesn't remount WebGL or reset the user's camera.
-    def update_attitude(view: AttitudeView) -> None:
-        latest = beacon_data.latest_beacons(
-            parquet_path, n=1, packet_types=("BEACON_EXTENDED",)
-        )
-        if latest.is_empty():
-            view.update(None, "No extended beacon packets decoded yet.")
-            return
-        row = latest.to_dicts()[0]
-        received_at = row["received_at"]
-        view.update(
-            row,
-            f"From extended beacon at {received_at:%Y-%m-%d %H:%M:%S} UTC "
-            f"({_age_str(received_at)})",
-        )
-
     @ui.refreshable
     def recent_status() -> None:
         _recent_beacons_table(parquet_path, ui_state)
@@ -363,14 +346,21 @@ def build_beacon_stats_page(data_dir: Path, hours: float) -> None:
                     "Refresh charts", icon="refresh", on_click=chart_section.refresh
                 )
         live_status()
-        attitude_view = AttitudeView()
-        update_attitude(attitude_view)
+        # Not a refreshable: the 3D scene is built once and re-posed in
+        # place, so the 30s refresh doesn't remount WebGL, reset the user's
+        # camera, or interrupt playback.
+        attitude_player = AttitudePlayer(
+            parquet_path,
+            WINDOW_CHOICES,
+            "Last 24h",
+            lambda t: f"{t:%Y-%m-%d %H:%M:%S} UTC ({_age_str(t)})",
+        )
         recent_status()
         chart_section()
 
     def _refresh_live() -> None:
         live_status.refresh()
-        update_attitude(attitude_view)
+        attitude_player.reload()
         recent_status.refresh()
 
     ui.timer(REFRESH_INTERVAL_SEC, _refresh_live)

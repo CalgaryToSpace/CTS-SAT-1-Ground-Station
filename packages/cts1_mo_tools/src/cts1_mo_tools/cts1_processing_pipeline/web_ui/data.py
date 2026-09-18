@@ -11,10 +11,12 @@ only grows over the mission's lifetime.
 from __future__ import annotations
 
 __all__ = [
+    "ATTITUDE_COLUMNS",
     "BEACON_PACKET_TYPES",
     "DEFAULT_PARQUET_PATH",
     "latest_beacons",
     "latest_local_max_pending_tcmd_count",
+    "load_attitude_window",
     "load_beacon_window",
     "load_bulk_file_downlink_packets",
     "load_packet_window",
@@ -39,6 +41,16 @@ DEFAULT_PARQUET_PATH = (
 )
 
 BEACON_PACKET_TYPES = ("BEACON_BASIC", "BEACON_EXTENDED")
+
+# The ADCS attitude estimate + body rates, only on `BEACON_EXTENDED` packets.
+ATTITUDE_COLUMNS = (
+    "adcs_estimated_roll_angle_deg",
+    "adcs_estimated_pitch_angle_deg",
+    "adcs_estimated_yaw_angle_deg",
+    "adcs_estimated_rate_x_deg_per_sec",
+    "adcs_estimated_rate_y_deg_per_sec",
+    "adcs_estimated_rate_z_deg_per_sec",
+)
 
 
 def _scan(path: Path) -> pl.LazyFrame | None:
@@ -81,6 +93,26 @@ def load_beacon_window(
     if since is not None:
         lf = lf.filter(pl.col("received_at") >= since)
     return lf.sort("received_at").collect()
+
+
+def load_attitude_window(
+    path: Path = DEFAULT_PARQUET_PATH, *, since: datetime | None = None
+) -> pl.DataFrame:
+    """`received_at` + `ATTITUDE_COLUMNS` for every extended beacon received
+    at/after `since` that carries any of them, oldest first -- the frames
+    the attitude playback steps through. Only those columns are
+    materialized, so a multi-day window stays small.
+    """
+    lf = _scan(path)
+    if lf is None:
+        return pl.DataFrame()
+    lf = lf.filter(
+        (pl.col("packet_type") == "BEACON_EXTENDED")
+        & pl.any_horizontal(pl.col(c).is_not_null() for c in ATTITUDE_COLUMNS)
+    )
+    if since is not None:
+        lf = lf.filter(pl.col("received_at") >= since)
+    return lf.select("received_at", *ATTITUDE_COLUMNS).sort("received_at").collect()
 
 
 def _filter_to_ranges(

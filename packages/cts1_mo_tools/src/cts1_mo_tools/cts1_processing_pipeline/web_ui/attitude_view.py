@@ -3,12 +3,15 @@
 A 3U CubeSat (10 x 10 x 34 cm) drawn in the orbit reference frame, rotated
 by the ADCS-estimated roll/pitch/yaw, with the estimated body angular rates
 drawn as an arrow (the angular velocity vector) plus per-axis readouts.
+`AttitudePlayer` wraps that view with playback controls, stepping through
+every extended beacon in a time window.
 
 Frames:
     - Orbit frame: +X = ram (along-track velocity), +Z = nadir, +Y = orbit
       anti-normal (right-handed). The scene is z-up, so orbit coordinates
       are mapped into the scene with `_ORBIT_TO_SCENE` = diag(1, -1, -1):
-      ram stays +x, nadir becomes down.
+      ram stays +x, nadir becomes down, and orbit normal (-Y orbit, the
+      orbital angular momentum direction r x v) becomes +y.
     - Body frame: at zero attitude, it coincides with the orbit frame. The
       3U long axis is body +X, so the +X 1U face (the one with the slit)
       points into ram. The slit runs along body Y, so it's horizontal
@@ -27,16 +30,22 @@ camera near-plane comfortably out of the way.
 
 from __future__ import annotations
 
-__all__ = ["AttitudeView"]
+__all__ = ["AttitudePlayer", "AttitudeView"]
 
+import bisect
 import math
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from nicegui import ui
 
-if TYPE_CHECKING:
-    from collections.abc import Sequence
+from . import data as beacon_data
 
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+    from pathlib import Path
+
+    from nicegui import events
     from nicegui.elements.scene.scene_object3d import Object3D
 
 Matrix = list[list[float]]
@@ -155,7 +164,7 @@ class AttitudeView:
     """
 
     def __init__(self) -> None:
-        with ui.card().classes("w-full"):
+        with ui.card().classes("w-full") as self.card:
             ui.label("Attitude & Body Rates").classes("text-lg font-bold")
             self._caption = ui.label().classes("text-caption text-grey")
             with ui.row().classes("w-full gap-6 items-start flex-wrap"):
@@ -168,9 +177,19 @@ class AttitudeView:
                 ) as self._scene:
                     self._build_static()
                 with ui.column().classes("gap-2"):
-                    self._readout = ui.column().classes("gap-1")
+                    self._no_attitude = ui.label(
+                        "No attitude estimate -- shown at zero attitude."
+                    ).classes("text-warning")
+                    self._readout: dict[str, ui.label] = {}
+                    for name in ("Roll", "Pitch", "Yaw", "ωx", "ωy", "ωz"):
+                        with ui.row().classes("gap-3 items-baseline"):
+                            ui.label(name).classes("text-caption text-grey w-12")
+                            self._readout[name] = ui.label().classes(
+                                "text-base font-medium font-mono"
+                            )
                     ui.label(
-                        "Orbit frame: +X ram, +Z nadir. Euler 3-2-1 "
+                        "Orbit frame: +X ram, +Z nadir, -Y orbit normal. "
+                        "Euler 3-2-1 "
                         "(yaw, pitch, roll). Body rates drawn in body axes; "
                         "yellow arrow = angular velocity vector (log-scaled). "
                         "Drag to orbit the camera."
@@ -186,6 +205,8 @@ class AttitudeView:
         scene.text("Ram", _LABEL_STYLE).move(3.45, 0, 0)
         _arrow(scene, (0, 0, -1), 2.4, _ORBIT_AXIS_COLOR, radius=0.015)
         scene.text("Nadir", _LABEL_STYLE).move(0, 0, -2.65)
+        _arrow(scene, (0, 1, 0), 2.4, _ORBIT_AXIS_COLOR, radius=0.015)
+        scene.text("Orbit normal", _LABEL_STYLE).move(0, 2.65, 0)
 
         # The satellite body, in body coordinates.
         with scene.group() as self._body:
@@ -240,8 +261,9 @@ class AttitudeView:
             else scene_from_body(0.0, 0.0, 0.0)
         )
 
-        if self._dynamic is not None:
-            self._dynamic.delete()
+        # Build the new rate arrow/labels before removing the old ones, so
+        # playback doesn't flicker between frames.
+        previous = self._dynamic
         with self._scene, self._body, self._scene.group() as self._dynamic:
             tips = {"x": (2.8, 0, 0), "y": (0, 1.6, 0), "z": (0, 0, 1.6)}
             for (axis, tip), rate in zip(tips.items(), rates, strict=True):
@@ -257,20 +279,207 @@ class AttitudeView:
                     direction = [c / norm * (length + 0.25) for c in omega]
                     self._scene.text(f"ω {norm:.2f}°/s", _LABEL_STYLE).move(*direction)
 
-        self._readout.clear()
-        with self._readout:
-            if not has_attitude:
-                ui.label("No attitude estimate -- shown at zero attitude.").classes(
-                    "text-warning"
+        if previous is not None:
+            previous.delete()
+
+        self._no_attitude.set_visibility(not has_attitude)
+        for name, value in (
+            ("Roll", _fmt(roll, "°")),
+            ("Pitch", _fmt(pitch, "°")),
+            ("Yaw", _fmt(yaw, "°")),
+            ("ωx", _fmt(rates[0], " °/s")),
+            ("ωy", _fmt(rates[1], " °/s")),
+            ("ωz", _fmt(rates[2], " °/s")),
+        ):
+            self._readout[name].set_text(value)
+
+
+_SPEED_CHOICES: dict[float, str] = {
+    1.0: "1 frame/s",
+    2.0: "2 frames/s",
+    5.0: "5 frames/s",
+    10.0: "10 frames/s",
+}
+
+
+def _gap_str(delta: timedelta) -> str:
+    total_sec = int(delta.total_seconds())
+    if total_sec < 60:  # noqa: PLR2004
+        return f"{total_sec}s"
+    if total_sec < 3600:  # noqa: PLR2004
+        return f"{total_sec // 60}m {total_sec % 60}s"
+    return f"{total_sec // 3600}h {(total_sec % 3600) // 60}m"
+
+
+class AttitudePlayer:
+    """`AttitudeView` plus playback: a scrubber over every extended beacon
+    in a selectable window, play/pause, stepping, and speed.
+
+    Frames are the beacons themselves -- no interpolation between them.
+    Extended beacons arrive in bursts during passes with hours-long gaps in
+    between, and slerping across a gap would invent an attitude history
+    that was never measured. The caption shows each frame's gap to the
+    previous one instead, so a jump across a gap is obvious.
+
+    `reload()` (called on the page's periodic refresh) re-queries the
+    window, keeping the current frame by timestamp -- or, if the scrubber
+    is parked on the newest frame, following the newest one as new
+    beacons arrive.
+    """
+
+    def __init__(
+        self,
+        path: Path,
+        window_choices: dict[str, float],
+        default_window: str,
+        format_time: Callable[[datetime], str],
+    ) -> None:
+        self._path = path
+        self._window_choices = window_choices
+        self._hours = window_choices[default_window]
+        self._format_time = format_time
+        self._frames: list[dict[str, Any]] = []
+        self._times: list[datetime] = []
+        self._index = 0
+        self._showing_fallback = False
+
+        self._view = AttitudeView()
+        with self._view.card:
+            with ui.row().classes("w-full items-center gap-1 flex-wrap"):
+                ui.select(
+                    list(window_choices),
+                    value=default_window,
+                    label="Playback window",
+                    on_change=lambda e: self._set_window(e.value),
+                ).classes("w-40 mr-2")
+                ui.button(icon="first_page", on_click=lambda: self._seek(0)).props(
+                    "flat round"
+                ).tooltip("Oldest")
+                ui.button(icon="skip_previous", on_click=lambda: self._step(-1)).props(
+                    "flat round"
+                ).tooltip("Previous beacon")
+                self._play_button = (
+                    ui.button(icon="play_arrow", on_click=self._toggle_play)
+                    .props("round")
+                    .tooltip("Play / pause")
                 )
-            for label, value in (
-                ("Roll", _fmt(roll, "°")),
-                ("Pitch", _fmt(pitch, "°")),
-                ("Yaw", _fmt(yaw, "°")),
-                ("ωx", _fmt(rates[0], " °/s")),
-                ("ωy", _fmt(rates[1], " °/s")),
-                ("ωz", _fmt(rates[2], " °/s")),
-            ):
-                with ui.row().classes("gap-3 items-baseline"):
-                    ui.label(label).classes("text-caption text-grey w-12")
-                    ui.label(value).classes("text-base font-medium font-mono")
+                ui.button(icon="skip_next", on_click=lambda: self._step(1)).props(
+                    "flat round"
+                ).tooltip("Next beacon")
+                ui.button(
+                    icon="last_page", on_click=lambda: self._seek(len(self._frames) - 1)
+                ).props("flat round").tooltip("Latest")
+                ui.select(
+                    _SPEED_CHOICES,
+                    value=2.0,
+                    label="Speed",
+                    on_change=self._set_speed,
+                ).classes("w-32 ml-2")
+                self._position = ui.label().classes("text-caption text-grey ml-2")
+            self._slider = ui.slider(
+                min=0, max=1, value=0, on_change=self._on_slider
+            ).classes("w-full px-2")
+        self._timer = ui.timer(1.0 / 2.0, self._tick, active=False)
+        self.reload()
+
+    # -- data ---------------------------------------------------------------
+
+    def reload(self) -> None:
+        """Re-query the window, keeping the current frame (by timestamp)
+        unless parked on the newest frame, in which case follow the newest.
+        """
+        at_latest = not self._frames or self._index >= len(self._frames) - 1
+        current_time = None if at_latest else self._times[self._index]
+
+        since = datetime.now(UTC) - timedelta(hours=self._hours)
+        self._frames = beacon_data.load_attitude_window(
+            self._path, since=since
+        ).to_dicts()
+        # Nothing in the window: still show the newest extended beacon ever,
+        # the same way the summary cards ignore the chart window.
+        self._showing_fallback = not self._frames
+        if self._showing_fallback:
+            self._frames = beacon_data.latest_beacons(
+                self._path, n=1, packet_types=("BEACON_EXTENDED",)
+            ).to_dicts()
+        self._times = [f["received_at"] for f in self._frames]
+
+        last = max(len(self._frames) - 1, 0)
+        self._slider.props(f"max={max(last, 1)}")
+        self._slider.set_enabled(len(self._frames) > 1)
+        if current_time is None:
+            index = last
+        else:
+            index = min(bisect.bisect_left(self._times, current_time), last)
+        self._seek(index, force=True)
+
+    def _set_window(self, label: str) -> None:
+        self._hours = self._window_choices[label]
+        self.reload()
+
+    # -- playback -----------------------------------------------------------
+
+    def _seek(self, index: int, *, force: bool = False) -> None:
+        """Move to frame `index`. Every path goes through the slider's value
+        so it always reflects the frame shown; `_on_slider` does the render.
+        """
+        index = max(0, min(index, len(self._frames) - 1))
+        if self._slider.value == index:
+            if force or index != self._index:
+                self._index = index
+                self._show()
+        else:
+            self._slider.set_value(index)
+
+    def _step(self, delta: int) -> None:
+        self._pause()
+        self._seek(self._index + delta)
+
+    def _on_slider(self, e: events.ValueChangeEventArguments) -> None:
+        if e.value is None or not self._frames:
+            return
+        self._index = max(0, min(int(e.value), len(self._frames) - 1))
+        self._show()
+
+    def _toggle_play(self) -> None:
+        if self._timer.active:
+            self._pause()
+            return
+        if len(self._frames) <= 1:
+            return
+        if self._index >= len(self._frames) - 1:
+            self._seek(0)  # at the end: play again from the start
+        self._timer.activate()
+        self._play_button.props("icon=pause")
+
+    def _pause(self) -> None:
+        self._timer.deactivate()
+        self._play_button.props("icon=play_arrow")
+
+    def _tick(self) -> None:
+        if self._index >= len(self._frames) - 1:
+            self._pause()
+            return
+        self._seek(self._index + 1)
+
+    def _set_speed(self, e: events.ValueChangeEventArguments) -> None:
+        self._timer.interval = 1.0 / float(e.value)
+
+    # -- rendering ----------------------------------------------------------
+
+    def _show(self) -> None:
+        if not self._frames:
+            self._view.update(None, "No extended beacon packets decoded yet.")
+            self._position.set_text("")
+            return
+
+        row = self._frames[self._index]
+        received_at = row["received_at"]
+        caption = f"From extended beacon at {self._format_time(received_at)}"
+        if self._showing_fallback:
+            caption += " -- none in the playback window, showing the latest"
+        elif self._index > 0:
+            gap = received_at - self._times[self._index - 1]
+            caption += f" -- {_gap_str(gap)} after the previous frame"
+        self._view.update(row, caption)
+        self._position.set_text(f"Frame {self._index + 1} of {len(self._frames)}")
