@@ -32,7 +32,7 @@ services:
     env_file:
       - .env # CTS1_WEB_STORAGE_SECRET, if you want one unique to this deployment
     volumes:
-      - /opt/cts1_processing_pipeline:/opt/cts1_processing_pipeline:ro # read-only: the web UI never writes to it
+      - /opt/cts1_processing_pipeline:/opt/cts1_processing_pipeline # writable: the web UI drops daemon_pipeline_trigger.json here
     ports:
       - "127.0.0.1:8089:8089" # localhost only; nginx (below) is the public path
     logging: *default-logging
