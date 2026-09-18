@@ -21,6 +21,7 @@ from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
 )
 
 from . import data as beacon_data
+from .attitude_view import AttitudePlayer
 from .charts import BEACON_CHART_GROUPS, OTHER_CHART_GROUPS, chart_option
 from .layout import page_shell
 
@@ -317,6 +318,9 @@ def build_beacon_stats_page(data_dir: Path, hours: float) -> None:
             return
         _latest_beacon_card(parquet_path)
         _latest_extended_beacon_card(parquet_path)
+
+    @ui.refreshable
+    def recent_status() -> None:
         _recent_beacons_table(parquet_path, ui_state)
 
     @ui.refreshable
@@ -342,6 +346,21 @@ def build_beacon_stats_page(data_dir: Path, hours: float) -> None:
                     "Refresh charts", icon="refresh", on_click=chart_section.refresh
                 )
         live_status()
+        # Not a refreshable: the 3D scene is built once and re-posed in
+        # place, so the 30s refresh doesn't remount WebGL, reset the user's
+        # camera, or interrupt playback.
+        attitude_player = AttitudePlayer(
+            parquet_path,
+            WINDOW_CHOICES,
+            "Last 24h",
+            lambda t: f"{t:%Y-%m-%d %H:%M:%S} UTC ({_age_str(t)})",
+        )
+        recent_status()
         chart_section()
 
-    ui.timer(REFRESH_INTERVAL_SEC, live_status.refresh)
+    def _refresh_live() -> None:
+        live_status.refresh()
+        attitude_player.reload()
+        recent_status.refresh()
+
+    ui.timer(REFRESH_INTERVAL_SEC, _refresh_live)
