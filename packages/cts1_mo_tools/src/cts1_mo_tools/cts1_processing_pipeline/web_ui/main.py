@@ -37,6 +37,7 @@ from .export_page import build_export_page
 from .export_raw import register_raw_export_route
 from .file_reassembler_page import build_file_reassembler_page
 from .packet_browser_page import build_packet_browser_page
+from .picam_image_route import register_picam_image_route
 from .pipeline_status_page import build_pipeline_status_page
 from .satellite_events_page import build_satellite_events_page
 
@@ -172,6 +173,7 @@ def _build_pages(args: Args) -> None:
         build_export_page(args.data_dir)
 
     register_raw_export_route(app, args.data_dir)
+    register_picam_image_route(app)
 
 
 def main() -> None:

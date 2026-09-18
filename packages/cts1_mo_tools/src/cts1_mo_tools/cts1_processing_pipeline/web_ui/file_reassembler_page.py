@@ -40,6 +40,7 @@ from .file_reassembly import (
     render_coverage_png,
 )
 from .layout import page_shell
+from .picam_image_route import picam_image_url
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -741,10 +742,7 @@ def _picam_image_section(
     )
     with ui.card().classes("w-full"):
         ui.label("Detected PiCAM image").classes("text-lg font-bold")
-        data_uri = "data:image/jpeg;base64," + base64.b64encode(jpg_bytes).decode(
-            "ascii"
-        )
-        ui.image(data_uri).classes("max-w-full")
+        ui.image(picam_image_url(jpg_bytes, jpg_filename)).classes("max-w-full")
         ui.button(
             "Download as JPG",
             icon="photo_camera",
