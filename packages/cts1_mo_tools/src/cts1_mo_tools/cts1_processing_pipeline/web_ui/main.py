@@ -38,6 +38,7 @@ from .export_raw import register_raw_export_route
 from .file_reassembler_page import build_file_reassembler_page
 from .packet_browser_page import build_packet_browser_page
 from .pipeline_status_page import build_pipeline_status_page
+from .preview_image_route import register_preview_image_route
 from .satellite_events_page import build_satellite_events_page
 
 # Signs the cookie `app.storage.user` uses to remember each browser's dark
@@ -90,7 +91,7 @@ def _build_uvicorn_log_config() -> dict:
 
 
 NAV_LINKS = (
-    ("Beacon Stats", "/"),
+    ("Beacon Data", "/"),
     ("Browse Packets", "/browse-packets"),
     ("Satellite Events", "/satellite-events"),
     ("File Reassembler", "/file-reassembler"),
@@ -117,9 +118,9 @@ class Args:
 def _build_pages(args: Args) -> None:
     def _nav() -> None:
         # Remembered per-browser (see STORAGE_SECRET) so a toggle sticks
-        # across page navigations and later visits; defaults to dark for a
+        # across page navigations and later visits; defaults to light for a
         # browser that's never set a preference.
-        dark = ui.dark_mode(app.storage.user.get("dark_mode", True))
+        dark = ui.dark_mode(app.storage.user.get("dark_mode", False))
 
         def _toggle_dark() -> None:
             dark.toggle()
@@ -172,6 +173,7 @@ def _build_pages(args: Args) -> None:
         build_export_page(args.data_dir)
 
     register_raw_export_route(app, args.data_dir)
+    register_preview_image_route(app)
 
 
 def main() -> None:

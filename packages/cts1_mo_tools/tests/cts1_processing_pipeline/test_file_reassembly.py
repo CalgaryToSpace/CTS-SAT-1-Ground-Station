@@ -19,6 +19,7 @@ from cts1_mo_tools.cts1_processing_pipeline.web_ui.file_reassembly import (
     coverage_label_interval_rows,
     coverage_png_size,
     coverage_ruler_height_px,
+    detect_image,
     find_header_candidates,
     reassemble_bulk_chunks,
     render_coverage_png,
@@ -886,3 +887,62 @@ def test_copies_span_partially_overlapping_chunks() -> None:
     result = reassemble_bulk_chunks(df)
     assert _segments(result) == [(0, 8, "Good")]
     assert _copies(result) == [(1, 2)]
+
+
+def _jpeg_bytes(size: tuple[int, int] = (8, 8)) -> bytes:
+    buffer = io.BytesIO()
+    Image.new("RGB", size, (200, 30, 30)).save(buffer, format="JPEG")
+    return buffer.getvalue()
+
+
+def _bmp_bytes(size: tuple[int, int] = (8, 8)) -> bytes:
+    buffer = io.BytesIO()
+    Image.new("RGB", size, (30, 200, 30)).save(buffer, format="BMP")
+    return buffer.getvalue()
+
+
+def test_detect_image_finds_a_downlinked_jpeg() -> None:
+    data = _jpeg_bytes()
+    image = detect_image(data)
+
+    assert image is not None
+    assert image.media_type == "image/jpeg"
+    assert image.suffix == ".jpg"
+    # Downlinked as-is, so the preview serves the reassembled bytes
+    # themselves rather than a re-encode of them.
+    assert image.data == data
+    assert not image.is_converted
+
+
+def test_detect_image_finds_a_downlinked_bmp() -> None:
+    data = _bmp_bytes()
+    image = detect_image(data)
+
+    assert image is not None
+    assert image.media_type == "image/bmp"
+    assert image.suffix == ".bmp"
+    assert image.data == data
+    assert not image.is_converted
+
+
+def test_detect_image_still_detects_a_truncated_image() -> None:
+    """A download that's missing its tail is exactly when the preview earns
+    its keep -- the browser renders as far as the bytes go.
+    """
+    image = detect_image(_jpeg_bytes((64, 64))[:200])
+
+    assert image is not None
+    assert image.media_type == "image/jpeg"
+
+
+def test_detect_image_ignores_an_image_missing_its_start() -> None:
+    """The magic number is what identifies the file, so a download whose
+    first bytes haven't arrived (zero-filled by the reassembly) isn't
+    claimed as an image rather than previewed as a broken one.
+    """
+    assert detect_image(b"\x00" * 16 + _jpeg_bytes()) is None
+
+
+def test_detect_image_ignores_a_non_image() -> None:
+    assert detect_image(b"timestamp,voltage_mV\n2026-01-01T00:00:00Z,3300\n") is None
+    assert detect_image(b"") is None
