@@ -73,12 +73,14 @@ __all__ = [
     "ByteSegment",
     "ByteStatus",
     "ConflictPolicy",
+    "DetectedImage",
     "OffsetSummary",
     "ReassemblyResult",
     "coverage_gutter_width_px",
     "coverage_label_interval_rows",
     "coverage_png_size",
     "coverage_ruler_height_px",
+    "detect_image",
     "detect_picam_image",
     "find_header_candidates",
     "reassemble_bulk_chunks",
@@ -985,3 +987,68 @@ def detect_picam_image(data: bytes) -> bytes | None:
         return None
 
     return parse_picam_ascii_to_jpg_bytes(text, enable_logs=False)
+
+
+# -- Previewable image detection -----------------------------------------------
+
+# Sniffed from the reassembled bytes rather than trusted from the header's
+# filename: the filename is a best-effort guess in the first place (see
+# `find_header_candidates`), and a file named ".jpg" that isn't one would
+# render as a broken image with no explanation. Magic bytes are also what
+# make a preview possible for a download whose header never arrived at all.
+_IMAGE_MAGIC: tuple[tuple[bytes, str, str], ...] = (
+    # SOI + the first marker of a JFIF/EXIF/raw-APPn JPEG.
+    (b"\xff\xd8\xff", "image/jpeg", ".jpg"),
+    (b"BM", "image/bmp", ".bmp"),
+)
+
+
+@dataclass(frozen=True, slots=True)
+class DetectedImage:
+    """An image found in reassembled bytes, ready to render in the browser.
+
+    `data` is what gets served -- the reassembled bytes themselves for a
+    downlinked .jpg/.bmp, or the decoded JPG for a PiCAM ASCII image, which
+    `is_converted` distinguishes (a converted image needs its own download
+    button; raw bytes are already what the main download hands over).
+    """
+
+    data: bytes
+    media_type: str
+    suffix: str
+    label: str
+    is_converted: bool
+
+
+def detect_image(data: bytes) -> DetectedImage | None:
+    """Best-effort detection of something previewable in reassembled bulk
+    download `data`: a PiCAM ASCII image (decoded to JPG), or a JPEG/BMP
+    file downlinked as-is.
+
+    Returns None for anything else -- including an image whose first bytes
+    haven't arrived yet, since the magic number is what identifies it. A
+    partial image *past* its header is still returned: browsers render what
+    they can of a truncated JPEG/BMP, and watching one fill in mid-download
+    is most of why this preview exists.
+    """
+    picam_jpg = detect_picam_image(data)
+    if picam_jpg is not None:
+        return DetectedImage(
+            data=picam_jpg,
+            media_type="image/jpeg",
+            suffix=".jpg",
+            label="Detected PiCAM image",
+            is_converted=True,
+        )
+
+    for magic, media_type, suffix in _IMAGE_MAGIC:
+        if data.startswith(magic):
+            return DetectedImage(
+                data=data,
+                media_type=media_type,
+                suffix=suffix,
+                label=f"Detected {suffix.removeprefix('.').upper()} image",
+                is_converted=False,
+            )
+
+    return None

@@ -32,15 +32,16 @@ from .file_reassembly import (
     ByteSegment,
     ByteStatus,
     ConflictPolicy,
+    DetectedImage,
     ReassemblyResult,
     coverage_png_size,
-    detect_picam_image,
+    detect_image,
     find_header_candidates,
     reassemble_bulk_chunks,
     render_coverage_png,
 )
 from .layout import page_shell
-from .picam_image_route import picam_image_url
+from .preview_image_route import preview_image_url
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -723,31 +724,42 @@ def _header_candidates_table(candidates: list[BulkHeaderCandidate]) -> None:
     table.add_slot("body", _HEADER_TABLE_BODY_SLOT)
 
 
-def _picam_image_section(
-    jpg_bytes: bytes, filename_hint: str | None, *, partial: bool
+def _image_section(
+    image: DetectedImage, filename_hint: str | None, *, partial: bool
 ) -> None:
-    """A detected PiCAM image: rendered inline, plus a JPG download button --
-    see `file_reassembly.detect_picam_image` for the detection heuristic.
+    """A detected image -- a downlinked .jpg/.bmp, or a PiCAM ASCII image
+    decoded to JPG -- rendered inline; see `file_reassembly.detect_image`
+    for the detection heuristic.
 
-    The JPG is marked partial on the same terms as the raw bytes it was
-    decoded from: a PiCAM image whose middle never arrived still renders
-    (that's the point of showing it mid-download), and its filename is the
-    only thing that will still say so once it's saved to disk.
+    The image is marked partial on the same terms as the bytes it came from:
+    one whose middle never arrived still renders as far as it got (that's
+    the point of showing it mid-download), and its filename is the only
+    thing that will still say so once it's saved to disk.
+
+    Only a *converted* image gets its own download button. A .jpg/.bmp that
+    came down as-is is byte-for-byte what "Download reassembled bytes" above
+    already hands over, under the same name, so a second button would just
+    be the same download twice.
     """
-    jpg_filename = _mark_partial(
-        Path(filename_hint).with_suffix(".jpg").name
+    image_filename = _mark_partial(
+        Path(filename_hint).with_suffix(image.suffix).name
         if filename_hint
-        else "picam_image.jpg",
+        else f"downlinked_image{image.suffix}",
         partial=partial,
     )
     with ui.card().classes("w-full"):
-        ui.label("Detected PiCAM image").classes("text-lg font-bold")
-        ui.image(picam_image_url(jpg_bytes, jpg_filename)).classes("max-w-full")
-        ui.button(
-            "Download as JPG",
-            icon="photo_camera",
-            on_click=lambda: ui.download.content(jpg_bytes, filename=jpg_filename),
-        )
+        ui.label(image.label).classes("text-lg font-bold")
+        ui.image(
+            preview_image_url(image.data, image.media_type, image_filename)
+        ).classes("max-w-full")
+        if image.is_converted:
+            ui.button(
+                f"Download as {image.suffix.removeprefix('.').upper()}",
+                icon="photo_camera",
+                on_click=lambda: ui.download.content(
+                    image.data, filename=image_filename
+                ),
+            )
 
 
 def _reassembler_results(
@@ -824,11 +836,9 @@ def _reassembler_results(
                 "isn't a verified, complete copy of the file."
             ).classes("text-caption text-grey")
 
-        picam_jpg = detect_picam_image(result.data)
-        if picam_jpg is not None:
-            _picam_image_section(
-                picam_jpg, base_filename, partial=partial_reason is not None
-            )
+        image = detect_image(result.data)
+        if image is not None:
+            _image_section(image, base_filename, partial=partial_reason is not None)
 
 
 def _conflict_policy_select(on_change: Callable[[str], None]) -> ui.select:
