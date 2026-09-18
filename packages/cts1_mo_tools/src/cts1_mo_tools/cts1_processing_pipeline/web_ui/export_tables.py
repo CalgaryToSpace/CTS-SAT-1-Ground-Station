@@ -69,6 +69,10 @@ class TableSpec:
     `time_column` is None for a table with no meaningful per-row timestamp
     (none currently, but a future addition might not have one) -- the time
     filter is silently skipped for it rather than erroring.
+
+    `lineage_columns` are the (potentially huge) traceability columns
+    tracing each row back to the raw decodes it came from -- dropped from
+    the export unless explicitly asked for.
     """
 
     key: str
@@ -77,7 +81,15 @@ class TableSpec:
     filename: str
     time_column: str | None
     has_packet_type: bool
+    lineage_columns: tuple[str, ...] = ()
 
+
+# Step 2's JSON-list traceability columns (carried through into step 3's
+# output too). `sources` in particular holds a full JSON object per
+# contributing decode, and routinely dwarfs every other column combined.
+# `decoders` is left out on purpose: it's at most a handful of short names,
+# and handy for filtering/grouping by decoder.
+_STEP_2_LINEAGE_COLUMNS: tuple[str, ...] = ("observation_ids", "sources")
 
 TABLE_SPECS: tuple[TableSpec, ...] = (
     TableSpec(
@@ -124,6 +136,7 @@ TABLE_SPECS: tuple[TableSpec, ...] = (
         filename=pipeline_status.DISTINCT_PACKETS_FILENAME,
         time_column="received_at",
         has_packet_type=False,
+        lineage_columns=_STEP_2_LINEAGE_COLUMNS,
     ),
     TableSpec(
         key="everything_decoded",
@@ -135,6 +148,7 @@ TABLE_SPECS: tuple[TableSpec, ...] = (
         filename=step_3_pipeline.OUTPUT_FILENAME,
         time_column="received_at",
         has_packet_type=True,
+        lineage_columns=_STEP_2_LINEAGE_COLUMNS,
     ),
     TableSpec(
         key="satellite_events_from_beacons",
@@ -215,13 +229,16 @@ def load_filtered_table(  # noqa: PLR0913
     end: datetime | None,
     packet_types: Sequence[str] | None,
     drop_all_null_columns: bool,
+    include_lineage_columns: bool,
 ) -> pl.DataFrame:
     """Load `spec`'s parquet file (if the pipeline has produced it yet),
     with the time range and packet-type filters pushed down into the scan.
 
     `packet_types` is ignored for a table where `spec.has_packet_type` is
-    False -- there's nothing to filter on. Returns an empty DataFrame (no
-    rows, no columns) if the file doesn't exist yet.
+    False -- there's nothing to filter on. `spec.lineage_columns` are
+    dropped (before loading, so they're never even read) unless
+    `include_lineage_columns`. Returns an empty DataFrame (no rows, no
+    columns) if the file doesn't exist yet.
     """
     path = data_dir / spec.filename
     if not path.exists():
@@ -235,6 +252,8 @@ def load_filtered_table(  # noqa: PLR0913
             lf = lf.filter(pl.col(spec.time_column) <= end)
     if spec.has_packet_type and packet_types:
         lf = lf.filter(pl.col("packet_type").is_in(list(packet_types)))
+    if not include_lineage_columns and spec.lineage_columns:
+        lf = lf.drop(spec.lineage_columns, strict=False)
 
     df = lf.collect()
     if drop_all_null_columns:
@@ -414,6 +433,7 @@ def export_selected_tables(  # noqa: PLR0913
     end: datetime | None,
     packet_types: Sequence[str] | None,
     drop_all_null_columns: bool,
+    include_lineage_columns: bool,
     export_format: ExportFormat,
     zip_output: bool,
 ) -> ExportResult:
@@ -428,6 +448,7 @@ def export_selected_tables(  # noqa: PLR0913
             end=end,
             packet_types=packet_types,
             drop_all_null_columns=drop_all_null_columns,
+            include_lineage_columns=include_lineage_columns,
         )
         for spec in specs
     }

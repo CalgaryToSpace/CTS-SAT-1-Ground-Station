@@ -180,7 +180,7 @@ def _time_filter_section(time_state: dict[str, str | None]) -> None:
 
 @dataclass
 class _ExportOptions:
-    """The (mutable) export-format/zip/drop-nulls state `_options_section`
+    """The (mutable) export-format/zip/drop-nulls/lineage state `_options_section`
     edits -- typed fields instead of a `dict[str, object]` so each widget's
     `value=`/`on_change=` can stay bool/str-typed all the way through,
     rather than every read needing an `object` cast.
@@ -189,6 +189,7 @@ class _ExportOptions:
     export_format: export_tables.ExportFormat = export_tables.EXPORT_FORMATS[0]
     zip_output: bool = False
     drop_null_columns: bool = True
+    include_lineage_columns: bool = False
 
 
 def _options_section(options: _ExportOptions) -> None:
@@ -212,6 +213,17 @@ def _options_section(options: _ExportOptions) -> None:
                 on_change=lambda e: setattr(
                     options, "drop_null_columns", bool(e.value)
                 ),
+            )
+            ui.checkbox(
+                "Include lineage columns",
+                value=options.include_lineage_columns,
+                on_change=lambda e: setattr(
+                    options, "include_lineage_columns", bool(e.value)
+                ),
+            ).tooltip(
+                "Keep the huge per-packet traceability columns (sources, "
+                "observation_ids) in distinct_packets_over_time and "
+                "everything_decoded."
             )
         ui.label(
             "CSV and Parquet write one file per table -- selecting more "
@@ -255,6 +267,7 @@ def build_export_page(data_dir: Path) -> None:
                 end=end,
                 packet_types=packet_types,
                 drop_all_null_columns=options.drop_null_columns,
+                include_lineage_columns=options.include_lineage_columns,
                 export_format=options.export_format,
                 zip_output=options.zip_output,
             )
