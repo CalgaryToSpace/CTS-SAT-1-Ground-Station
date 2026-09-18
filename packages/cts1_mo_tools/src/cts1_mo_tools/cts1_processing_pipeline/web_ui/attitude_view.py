@@ -71,6 +71,13 @@ _LABEL_STYLE = (
     "padding: 1px 5px; border-radius: 3px; white-space: nowrap;"
 )
 
+_SCENE_WIDTH = 640
+_SCENE_HEIGHT = 440
+
+# Quasar's expansion slide transition is 300ms; wait it out before asking
+# three.js to re-measure (see `AttitudeView._on_expand`).
+_EXPAND_TRANSITION_SEC = 0.4
+
 
 def _matmul(a: Matrix, b: Matrix) -> Matrix:
     return [
@@ -176,24 +183,31 @@ _READOUT_NAMES = (
 
 
 class AttitudeView:
-    """A card holding the 3D scene plus a numeric readout.
+    """A collapsible panel holding the 3D scene plus a numeric readout.
 
     Built once per page; `update(row)` re-poses it in place, so a periodic
     refresh doesn't reset whatever camera angle the user has orbited to.
     """
 
     def __init__(self) -> None:
-        with ui.card().classes("w-full") as self.card:
-            ui.label("Attitude & Body Rates").classes("text-lg font-bold")
+        with ui.expansion(
+            "Attitude & Body Rates", value=False, on_value_change=self._on_expand
+        ).classes("w-full border rounded") as self.container:
             self._caption = ui.label().classes("text-caption text-grey")
             with ui.row().classes("w-full gap-6 items-start flex-wrap"):
                 with ui.scene(
-                    width=640,
-                    height=440,
+                    width=_SCENE_WIDTH,
+                    height=_SCENE_HEIGHT,
                     grid=False,
                     camera=ui.scene.perspective_camera(fov=45),
                     background_color="#0f172a",
-                ) as self._scene:
+                    # `ui.scene` leaves its own element unsized and lets the
+                    # canvas size it -- which `_on_expand` can't undo once
+                    # the canvas has been zeroed. Pinning the element means
+                    # it measures the intended size as soon as it's shown.
+                ).style(f"width: {_SCENE_WIDTH}px; height: {_SCENE_HEIGHT}px") as (
+                    self._scene
+                ):
                     self._build_static()
                 with ui.column().classes("gap-2"):
                     self._no_attitude = ui.label(
@@ -215,6 +229,24 @@ class AttitudeView:
                     ).classes("text-caption text-grey max-w-xs")
         self._scene.move_camera(3.4, -4.6, 2.6, 0.3, 0, -0.2, duration=0)
         self._dynamic: Object3D | None = None
+
+    def _on_expand(self, e: events.ValueChangeEventArguments) -> None:
+        """Re-measure the scene whenever the panel opens.
+
+        `ui.scene` sizes its renderer and camera from its element's client
+        box, which is 0x0 while the panel is collapsed (its content is
+        `display: none`), and it only re-measures on a window resize. Built
+        collapsed, it would otherwise stay a 0x0 (i.e. invisible) canvas
+        forever.
+        """
+        if not e.value:
+            return
+        with self.container:
+            ui.timer(
+                _EXPAND_TRANSITION_SEC,
+                lambda: self._scene.run_method("resize"),
+                once=True,
+            )
 
     def _build_static(self) -> None:
         scene = self._scene
@@ -410,7 +442,7 @@ class AttitudePlayer:
         self._frame_shown_wall = 0.0
 
         self._view = AttitudeView()
-        with self._view.card:
+        with self._view.container:
             with ui.row().classes("w-full items-center gap-1 flex-wrap"):
                 ui.select(
                     list(window_choices),
