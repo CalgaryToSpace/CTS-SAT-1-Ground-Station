@@ -69,6 +69,18 @@ def _format_uptime(uptime_sec: float | None) -> str:
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
+def _local_max_pending_str(path: Path) -> str:
+    """`pending_queued_tcmd_count` at its most recent local max -- see
+    `beacon_data.latest_local_max_pending_tcmd_count` -- with when that
+    beacon was received.
+    """
+    local_max = beacon_data.latest_local_max_pending_tcmd_count(path)
+    if local_max is None:
+        return "?"
+    count, received_at = local_max
+    return f"{count} (at {received_at:%Y-%m-%d %H:%M:%S} UTC, {_age_str(received_at)})"
+
+
 def _latest_beacon_card(path: Path) -> None:
     latest = beacon_data.latest_beacons(path, n=1)
     with ui.card().classes("w-full"):
@@ -96,6 +108,11 @@ def _latest_beacon_card(path: Path) -> None:
             ("OBC Temp", f"{row.get('obc_temperature_C', '?')} °C"),
             ("EPS Mode", row.get("eps_mode")),
             ("OBC State", row.get("cts1_operation_state")),
+            ("Total TCMD Count", row.get("total_tcmd_queued_count", "?")),
+            ("Pending TCMD Count", row.get("pending_queued_tcmd_count", "?")),
+            ("Latest Local Max Pending TCMD Count", _local_max_pending_str(path)),
+            ("Time Sync Source", row.get("last_time_sync_source")),
+            ("RF Switch Control Mode", row.get("active_rf_switch_control_mode")),
         ]
         with ui.row().classes("w-full gap-8 flex-wrap mt-2"):
             for label, value in stats:
@@ -142,6 +159,12 @@ def _latest_extended_beacon_card(path: Path) -> None:
                 f"{row.get('adcs_estimated_rate_y_deg_per_sec', '?')}, "
                 f"{row.get('adcs_estimated_rate_z_deg_per_sec', '?')} deg/s",
             ),
+            (
+                "Attitude (roll, pitch, yaw)",
+                f"{row.get('adcs_estimated_roll_angle_deg', '?')}, "
+                f"{row.get('adcs_estimated_pitch_angle_deg', '?')}, "
+                f"{row.get('adcs_estimated_yaw_angle_deg', '?')} deg",
+            ),
             ("ADCS Estimation Mode", row.get("adcs_attitude_estimation_mode")),
             ("ADCS Control Mode", row.get("adcs_control_mode")),
             (
@@ -152,6 +175,7 @@ def _latest_extended_beacon_card(path: Path) -> None:
                 "Power Distributed (avg)",
                 f"{row.get('eps_total_avg_power_distributed_W', '?')} W",
             ),
+            ("MPI Last Temp", f"{row.get('mpi_last_temperature_C', '?')} °C"),
         ]
         with ui.row().classes("w-full gap-8 flex-wrap mt-2"):
             for label, value in stats:
