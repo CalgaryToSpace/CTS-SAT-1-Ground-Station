@@ -14,6 +14,7 @@ __all__ = [
     "BEACON_PACKET_TYPES",
     "DEFAULT_PARQUET_PATH",
     "latest_beacons",
+    "latest_local_max_pending_tcmd_count",
     "load_beacon_window",
     "load_bulk_file_downlink_packets",
     "load_packet_window",
@@ -167,3 +168,48 @@ def latest_beacons(
         .head(n)
         .collect()
     )
+
+
+def latest_local_max_pending_tcmd_count(
+    path: Path = DEFAULT_PARQUET_PATH,
+) -> tuple[int, datetime] | None:
+    """The most recent local maximum of `pending_queued_tcmd_count`, and the
+    `received_at` of the beacon that reported it.
+
+    Walks backwards from the newest beacon for as long as the pending count
+    keeps rising (or holds steady), and stops at the first beacon whose
+    older neighbour reports a *lower* count -- i.e. the peak of the most
+    recent climb. With a queue that gets loaded by an uplink and then
+    drains, that's "how many telecommands were queued up before the
+    satellite started working through them". On a plateau, the *oldest*
+    beacon at the peak value wins, so the time is when the peak was first
+    seen. If the count never drops walking backwards, the oldest beacon is
+    the peak.
+
+    Only the two needed columns are materialized. Returns None if no beacon
+    has reported a pending count yet.
+    """
+    lf = _scan(path)
+    if lf is None:
+        return None
+    df = (
+        lf.filter(
+            pl.col("packet_type").is_in(BEACON_PACKET_TYPES)
+            & pl.col("pending_queued_tcmd_count").is_not_null()
+        )
+        .select("received_at", "pending_queued_tcmd_count")
+        .sort("received_at", descending=True)
+        .collect()
+    )
+    if df.is_empty():
+        return None
+
+    count = pl.col("pending_queued_tcmd_count")
+    # Newest-first, so `shift(-1)` is the next-*older* beacon. The first row
+    # whose older neighbour is lower is the peak; `fill_null(True)` makes
+    # the oldest row the fallback when no such drop exists.
+    peak_idx = df.select(
+        (count.shift(-1) < count).fill_null(value=True).arg_true().first()
+    ).item()
+    row = df.row(peak_idx, named=True)
+    return int(row["pending_queued_tcmd_count"]), row["received_at"]

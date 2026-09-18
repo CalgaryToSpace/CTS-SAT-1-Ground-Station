@@ -69,6 +69,18 @@ def _format_uptime(uptime_sec: float | None) -> str:
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
+def _local_max_pending_str(path: Path) -> str:
+    """`pending_queued_tcmd_count` at its most recent local max -- see
+    `beacon_data.latest_local_max_pending_tcmd_count` -- with when that
+    beacon was received.
+    """
+    local_max = beacon_data.latest_local_max_pending_tcmd_count(path)
+    if local_max is None:
+        return "?"
+    count, received_at = local_max
+    return f"{count} (at {received_at:%Y-%m-%d %H:%M:%S} UTC, {_age_str(received_at)})"
+
+
 def _latest_beacon_card(path: Path) -> None:
     latest = beacon_data.latest_beacons(path, n=1)
     with ui.card().classes("w-full"):
@@ -96,6 +108,11 @@ def _latest_beacon_card(path: Path) -> None:
             ("OBC Temp", f"{row.get('obc_temperature_C', '?')} °C"),
             ("EPS Mode", row.get("eps_mode")),
             ("OBC State", row.get("cts1_operation_state")),
+            ("Total TCMD Count", row.get("total_tcmd_queued_count", "?")),
+            ("Pending TCMD Count", row.get("pending_queued_tcmd_count", "?")),
+            ("Latest Local Max Pending TCMD Count", _local_max_pending_str(path)),
+            ("Time Sync Source", row.get("last_time_sync_source")),
+            ("RF Switch Control Mode", row.get("active_rf_switch_control_mode")),
         ]
         with ui.row().classes("w-full gap-8 flex-wrap mt-2"):
             for label, value in stats:
@@ -142,6 +159,12 @@ def _latest_extended_beacon_card(path: Path) -> None:
                 f"{row.get('adcs_estimated_rate_y_deg_per_sec', '?')}, "
                 f"{row.get('adcs_estimated_rate_z_deg_per_sec', '?')} deg/s",
             ),
+            (
+                "Attitude (roll, pitch, yaw)",
+                f"{row.get('adcs_estimated_roll_angle_deg', '?')}, "
+                f"{row.get('adcs_estimated_pitch_angle_deg', '?')}, "
+                f"{row.get('adcs_estimated_yaw_angle_deg', '?')} deg",
+            ),
             ("ADCS Estimation Mode", row.get("adcs_attitude_estimation_mode")),
             ("ADCS Control Mode", row.get("adcs_control_mode")),
             (
@@ -152,6 +175,7 @@ def _latest_extended_beacon_card(path: Path) -> None:
                 "Power Distributed (avg)",
                 f"{row.get('eps_total_avg_power_distributed_W', '?')} W",
             ),
+            ("MPI Last Temp", f"{row.get('mpi_last_temperature_C', '?')} °C"),
         ]
         with ui.row().classes("w-full gap-8 flex-wrap mt-2"):
             for label, value in stats:
@@ -160,10 +184,21 @@ def _latest_extended_beacon_card(path: Path) -> None:
                     ui.label(str(value)).classes("text-base font-medium")
 
 
-def _recent_beacons_table(path: Path) -> None:
+def _recent_beacons_table(path: Path, ui_state: dict[str, bool]) -> None:
+    """Collapsed by default. This is rebuilt by the 30s `live_status`
+    refresh, so whether it's open lives in `ui_state` (per page load)
+    rather than on the widget -- otherwise it'd snap shut every refresh.
+    """
     recent = beacon_data.latest_beacons(path, n=10)
-    with ui.card().classes("w-full"):
-        ui.label("Recent Beacons").classes("text-lg font-bold")
+
+    def _on_toggle(e: events.ValueChangeEventArguments) -> None:
+        ui_state["recent_beacons_open"] = bool(e.value)
+
+    with ui.expansion(
+        "Recent Beacons",
+        value=ui_state.get("recent_beacons_open", False),
+        on_value_change=_on_toggle,
+    ).classes("w-full border rounded"):
         if recent.is_empty():
             ui.label("Nothing to show yet.")
             return
@@ -263,6 +298,7 @@ def _window_label_for_hours(hours: float) -> str:
 def build_beacon_stats_page(data_dir: Path, hours: float) -> None:
     parquet_path = data_dir / step_3_pipeline.OUTPUT_FILENAME
     state: dict[str, float] = {"hours": hours}
+    ui_state: dict[str, bool] = {}
 
     # Split in two so the 30s auto-refresh only ever touches the cheap,
     # DOM-only status widgets -- the chart section (the expensive part,
@@ -281,7 +317,7 @@ def build_beacon_stats_page(data_dir: Path, hours: float) -> None:
             return
         _latest_beacon_card(parquet_path)
         _latest_extended_beacon_card(parquet_path)
-        _recent_beacons_table(parquet_path)
+        _recent_beacons_table(parquet_path, ui_state)
 
     @ui.refreshable
     def chart_section() -> None:
