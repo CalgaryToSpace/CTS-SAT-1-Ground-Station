@@ -41,6 +41,8 @@ def _read_build_info_file(path: str) -> str:
 GIT_COMMIT = _read_build_info_file("/etc/project_git_commit")
 BUILD_DATE = _read_build_info_file("/etc/project_build_date")
 
+REPO_URL = "https://github.com/CalgaryToSpace/CTS-SAT-1-Ground-Station"
+
 # Past these ages, a freshness timestamp is flagged yellow/red -- SatNOGS
 # overpasses aren't constant, so a short gap is normal, but the pipeline
 # genuinely stalling for hours is the thing this page exists to catch.
@@ -346,9 +348,13 @@ def build_pipeline_status_page(data_dir: Path) -> None:
         with ui.row().classes("w-full items-center justify-between"):
             with ui.column().classes("gap-0"):
                 ui.label("Pipeline Status").classes("text-2xl font-bold")
-                ui.label(f"Build {GIT_COMMIT} · {BUILD_DATE}").classes(
-                    "text-caption text-grey"
-                )
+                with ui.row().classes("items-center gap-1"):
+                    ui.label(f"Build {GIT_COMMIT} · {BUILD_DATE} ·").classes(
+                        "text-caption text-grey"
+                    )
+                    # Right next to the build it was built from: the commit
+                    # here is only useful if you can go look at it.
+                    ui.link("GitHub", REPO_URL, new_tab=True).classes("text-caption")
             ui.button("Refresh", icon="refresh", on_click=content.refresh)
         content()
 
