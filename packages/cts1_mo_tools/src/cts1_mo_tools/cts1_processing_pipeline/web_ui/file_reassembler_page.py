@@ -407,8 +407,19 @@ def _coverage_map(result: ReassemblyResult) -> None:
 PARTIAL_FILENAME_SUFFIX = "_partial"
 
 
+def _full_sha256s(candidates: list[BulkHeaderCandidate]) -> set[str]:
+    """Every distinct untruncated SHA-256 among the header candidates."""
+    return {
+        c.sha256
+        for c in candidates
+        if c.sha256 is not None and len(c.sha256) == SHA256_HEX_LEN
+    }
+
+
 def _partial_reason(
-    result: ReassemblyResult, header: BulkHeaderCandidate | None
+    result: ReassemblyResult,
+    header: BulkHeaderCandidate | None,
+    candidates: list[BulkHeaderCandidate],
 ) -> str | None:
     """Why what's been assembled isn't a verified, complete copy of the file
     -- or None if it is.
@@ -416,8 +427,9 @@ def _partial_reason(
     Ordered worst-first, so the reason shown is the one worth acting on:
     bytes that never arrived, then bytes that arrived disagreeing, then the
     two checks that only a header can provide (the assembled span being the
-    wrong size, and the hash not matching). Anything but None gets
-    `PARTIAL_FILENAME_SUFFIX` appended to the exported file's stem, so a
+    wrong size, and the hash matching none of the candidates' full SHA-256s).
+    Anything but None gets `PARTIAL_FILENAME_SUFFIX` appended to the
+    exported file's stem, so a
     half-assembled file can't be mistaken for the real thing later just
     because it was downloaded and filed away under the satellite's own name
     for it.
@@ -437,9 +449,9 @@ def _partial_reason(
             f"the header's file_size ({header.file_size:,} bytes) doesn't match "
             f"the {result.span_bytes:,} byte(s) assembled"
         )
-    expected = header.sha256 if header is not None else None
-    if expected and len(expected) == SHA256_HEX_LEN and expected != result.sha256:
-        return "the SHA-256 doesn't match the header's"
+    full_hashes = _full_sha256s(candidates)
+    if full_hashes and result.sha256 not in full_hashes:
+        return "the SHA-256 doesn't match any header's"
     return None
 
 
@@ -457,19 +469,14 @@ def _mark_partial(filename: str, *, partial: bool) -> str:
 def _verification_section(
     result: ReassemblyResult,
     header: BulkHeaderCandidate | None,
+    candidates: list[BulkHeaderCandidate],
     partial_reason: str | None,
 ) -> None:
-    """The cross-check against the header: assembled size vs. `file_size`,
-    assembled hash vs. `sha256`, and a plain statement of whether what's
-    here is a complete, verified file.
-
-    A hash comparison is only run once the bytes are worth hashing (no gaps,
-    no conflicts) -- a zero-filled gap or a conflict resolved the other way
-    guarantees a mismatch, and reporting that as a *hash* failure would send
-    the operator looking for corruption instead of the missing bytes that
-    actually caused it.
+    """The cross-check against the headers: assembled size vs. the chosen
+    header's `file_size`, assembled hash vs. every header candidate's
+    `sha256` (a truncated one compared as a prefix), and a plain statement
+    of whether what's here is a complete, verified file.
     """
-    expected = header.sha256 if header is not None else None
     expected_size = header.file_size if header is not None else None
 
     if expected_size is not None:
@@ -492,28 +499,29 @@ def _verification_section(
     ui.label(f"SHA-256 of assembled bytes: {result.sha256}").classes(
         "font-mono text-sm"
     )
-    if not expected:
-        ui.label("No SHA-256 to compare against -- pick a header above.").classes(
-            "text-caption text-grey"
-        )
-    elif len(expected) < SHA256_HEX_LEN:
-        ui.label(
-            f"Header's SHA-256 was truncated ({len(expected)}/{SHA256_HEX_LEN} "
-            "hex chars) -- can't verify."
-        ).classes("text-caption text-grey")
-    elif not result.is_complete:
-        ui.label(
-            "Not comparing against the header's SHA-256 yet -- missing or "
-            "conflicting bytes would make it mismatch regardless."
-        ).classes("text-caption text-grey")
-    elif expected == result.sha256:
+    hashes = {c.sha256 for c in candidates if c.sha256}
+    prefix_matches = {
+        h for h in hashes if len(h) < SHA256_HEX_LEN and result.sha256.startswith(h)
+    }
+    if result.sha256 in hashes:
         with ui.row().classes("items-center gap-2"):
             ui.icon("check_circle", color="positive")
-            ui.label("Matches the header's SHA-256.").classes("text-positive")
+            ui.label("Matches a header candidate's SHA-256.").classes("text-positive")
+    elif prefix_matches:
+        with ui.row().classes("items-center gap-2"):
+            ui.icon("check_circle", color="positive")
+            ui.label(
+                "Matches a header candidate's truncated SHA-256 (longest: "
+                f"{max(map(len, prefix_matches))}/{SHA256_HEX_LEN} hex chars)."
+            ).classes("text-positive")
     else:
         with ui.row().classes("items-center gap-2"):
             ui.icon("error", color="negative")
-            ui.label("Does NOT match the header's SHA-256.").classes("text-negative")
+            ui.label(
+                "Does NOT match the SHA-256 of any of the "
+                f"{len(hashes)} distinct header SHA-256(s) in the selected "
+                "range(s)."
+            ).classes("text-negative")
 
     if partial_reason is None:
         with ui.row().classes("items-center gap-2"):
@@ -792,8 +800,8 @@ def _reassembler_results(
         _duplicates_note(result)
         ui.separator()
 
-        partial_reason = _partial_reason(result, best)
-        _verification_section(result, best, partial_reason)
+        partial_reason = _partial_reason(result, best, candidates)
+        _verification_section(result, best, candidates, partial_reason)
 
         # The full path (e.g. "ADCS/log_b51a.TLM"), not just the basename --
         # slashes become underscores since the browser would otherwise treat
