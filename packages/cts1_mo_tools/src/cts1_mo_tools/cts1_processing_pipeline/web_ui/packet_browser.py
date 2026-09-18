@@ -18,6 +18,7 @@ __all__ = [
     "ExcelExportResult",
     "PacketBrowserFilters",
     "PacketPage",
+    "PacketSort",
     "export_filtered_csv",
     "export_filtered_excel",
     "load_page",
@@ -55,6 +56,16 @@ class PacketBrowserFilters:
     end: datetime | None = None
     message_substring: str | None = None
     case_sensitive: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class PacketSort:
+    """Which column the whole filtered set is ordered by (server-side, so a
+    sort spans every page rather than just the one currently loaded).
+    """
+
+    column: str = "received_at"
+    descending: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,11 +149,16 @@ def load_page(
     *,
     offset: int,
     limit: int = DEFAULT_PAGE_SIZE,
+    sort: PacketSort | None = None,
 ) -> PacketPage:
-    """One page of rows matching `filters`, newest first, restricted to
-    columns that aren't all-null across the *entire* filtered set (not just
-    this page).
+    """One page of rows matching `filters`, ordered by `sort` (newest first
+    by default), restricted to columns that aren't all-null across the
+    *entire* filtered set (not just this page).
+
+    A `sort.column` not in the file (e.g. left over from before a schema
+    change) falls back to the default order rather than erroring.
     """
+    sort = sort or PacketSort()
     lf = _scan(path)
     if lf is None:
         return PacketPage(rows=pl.DataFrame(), total_rows=0, columns=[])
@@ -153,8 +169,16 @@ def load_page(
     if total == 0:
         return PacketPage(rows=pl.DataFrame(), total_rows=0, columns=[])
 
+    if sort.column not in column_names:
+        sort = PacketSort()
+    # received_at as a tiebreaker keeps paging stable when sorting by a
+    # low-cardinality column (packet_type, a boolean flag, ...).
+    by, descending = [sort.column], [sort.descending]
+    if sort.column != "received_at":
+        by.append("received_at")
+        descending.append(True)
     rows = (
-        filtered.sort("received_at", descending=True)
+        filtered.sort(by, descending=descending, nulls_last=True)
         .slice(offset, limit)
         .select(non_null_columns)
         .collect()
