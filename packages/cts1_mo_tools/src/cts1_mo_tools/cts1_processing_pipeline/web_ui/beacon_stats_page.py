@@ -184,10 +184,21 @@ def _latest_extended_beacon_card(path: Path) -> None:
                     ui.label(str(value)).classes("text-base font-medium")
 
 
-def _recent_beacons_table(path: Path) -> None:
+def _recent_beacons_table(path: Path, ui_state: dict[str, bool]) -> None:
+    """Collapsed by default. This is rebuilt by the 30s `live_status`
+    refresh, so whether it's open lives in `ui_state` (per page load)
+    rather than on the widget -- otherwise it'd snap shut every refresh.
+    """
     recent = beacon_data.latest_beacons(path, n=10)
-    with ui.card().classes("w-full"):
-        ui.label("Recent Beacons").classes("text-lg font-bold")
+
+    def _on_toggle(e: events.ValueChangeEventArguments) -> None:
+        ui_state["recent_beacons_open"] = bool(e.value)
+
+    with ui.expansion(
+        "Recent Beacons",
+        value=ui_state.get("recent_beacons_open", False),
+        on_value_change=_on_toggle,
+    ).classes("w-full border rounded"):
         if recent.is_empty():
             ui.label("Nothing to show yet.")
             return
@@ -287,6 +298,7 @@ def _window_label_for_hours(hours: float) -> str:
 def build_beacon_stats_page(data_dir: Path, hours: float) -> None:
     parquet_path = data_dir / step_3_pipeline.OUTPUT_FILENAME
     state: dict[str, float] = {"hours": hours}
+    ui_state: dict[str, bool] = {}
 
     # Split in two so the 30s auto-refresh only ever touches the cheap,
     # DOM-only status widgets -- the chart section (the expensive part,
@@ -305,7 +317,7 @@ def build_beacon_stats_page(data_dir: Path, hours: float) -> None:
             return
         _latest_beacon_card(parquet_path)
         _latest_extended_beacon_card(parquet_path)
-        _recent_beacons_table(parquet_path)
+        _recent_beacons_table(parquet_path, ui_state)
 
     @ui.refreshable
     def chart_section() -> None:
