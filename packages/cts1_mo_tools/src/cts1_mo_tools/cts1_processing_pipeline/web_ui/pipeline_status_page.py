@@ -1,7 +1,13 @@
 """The "Pipeline Status" page: an at-a-glance view of whether the
-processing pipeline is up to date and working -- row counts and freshness
-timestamps at every stage, a per-decoder-tool scoreboard, and the most
-recently received packets -- see `pipeline_status` for the data layer.
+processing pipeline is up to date and working -- whether the daemon is
+alive and what it's doing right now, row counts and freshness timestamps at
+every stage, a per-decoder-tool scoreboard, and the most recently received
+packets -- see `pipeline_status` for the data layer.
+
+The daemon card is also the one control on this page: "Trigger Pipeline" asks a
+running daemon to start its next run immediately instead of waiting out its
+interval. Both directions go through files in `data_dir` -- see
+`cts1_processing_pipeline.daemon_signals`.
 """
 
 # pyright: standard
@@ -17,6 +23,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from nicegui import ui
+
+from cts1_mo_tools.cts1_processing_pipeline import daemon_signals
+from cts1_mo_tools.cts1_processing_pipeline.daemon_signals import DaemonState
 
 from . import pipeline_status as status_data
 from .layout import page_shell
@@ -50,6 +59,19 @@ STALE_WARNING_AFTER = timedelta(minutes=90)
 STALE_ERROR_AFTER = timedelta(hours=6)
 
 RECENT_PACKETS_LIMIT = 25
+
+# The daemon card refreshes far more often than the rest of the page: it's
+# a live "is it working right now" indicator, and the file behind it is a
+# few hundred bytes (versus the parquet scans everything else here does).
+DAEMON_REFRESH_INTERVAL_SEC = 3.0
+
+# How the daemon's published state renders: (label, Quasar color, icon).
+_DAEMON_STATE_DISPLAY = {
+    DaemonState.PROCESSING: ("Daemon is running...", "primary", "sync"),
+    DaemonState.SLEEPING: ("Daemon is idle, waiting", "positive", "schedule"),
+    DaemonState.STARTING: ("Daemon is starting up", "primary", "hourglass_empty"),
+    DaemonState.UNKNOWN: ("Daemon is running", "primary", "help"),
+}
 
 
 def _duration_str(total_sec: int) -> str:
@@ -228,6 +250,123 @@ def _counts_section(
                 )
 
 
+def _daemon_state_display(
+    status: daemon_signals.DaemonStatus | None,
+) -> tuple[str, str, str]:
+    """(label, color, icon) for the daemon indicator.
+
+    A status file that exists but has gone stale is reported as "not
+    responding" rather than "not running": the difference matters when
+    deciding whether to go look at the daemon's logs or just start it.
+    """
+    if status is None:
+        return ("Daemon has never run", "grey", "help")
+    if status.state is DaemonState.STOPPED:
+        return ("Daemon is stopped", "grey", "stop_circle")
+    if not status.is_live:
+        return ("Daemon is not responding", "negative", "error")
+    return _DAEMON_STATE_DISPLAY.get(
+        status.state, _DAEMON_STATE_DISPLAY[DaemonState.UNKNOWN]
+    )
+
+
+def _daemon_detail_text(status: daemon_signals.DaemonStatus | None) -> str | None:
+    """The second line under the indicator: what the daemon said it was
+    doing, and how long ago it said so.
+    """
+    if status is None:
+        return (
+            "No daemon status file in the data directory yet -- start the "
+            "daemon (`cts1_processing_pipeline daemon`) to populate it."
+        )
+    parts: list[str] = []
+    if status.detail:
+        parts.append(status.detail)
+    if status.updated_at is not None:
+        parts.append(f"last heartbeat {_age_str(status.updated_at)}")
+    if status.last_run_finished_at is not None and not status.is_processing:
+        parts.append(f"last run finished {_age_str(status.last_run_finished_at)}")
+    return " · ".join(parts) if parts else None
+
+
+def _daemon_section(data_dir: Path) -> None:
+    """The daemon indicator + "Trigger Pipeline" button.
+
+    Refreshes on its own short timer (`DAEMON_REFRESH_INTERVAL_SEC`) rather
+    than with the rest of the page, so "daemon is running..." appears
+    within a few seconds of pressing the button instead of up to
+    `REFRESH_INTERVAL_SEC` later.
+    """
+
+    @ui.refreshable
+    def indicator() -> None:
+        status = daemon_signals.read_status(data_dir)
+        pending = daemon_signals.read_trigger_request(data_dir)
+        label, color, icon = _daemon_state_display(status)
+
+        with ui.column().classes("gap-0"):
+            with ui.row().classes("items-center gap-2"):
+                if status is not None and status.is_processing:
+                    ui.spinner(size="sm", color=color)
+                else:
+                    ui.icon(icon, color=color)
+                ui.label(label).classes(f"text-{color} text-base font-medium")
+            detail = _daemon_detail_text(status)
+            if detail:
+                ui.label(detail).classes("text-caption text-grey")
+            if pending is not None:
+                # The daemon only looks for the request between runs, so a
+                # request raised mid-run legitimately sits here for a while
+                # -- say so, rather than leaving the button looking stuck.
+                requested = (
+                    f" (requested {_age_str(pending.requested_at)})"
+                    if pending.requested_at is not None
+                    else ""
+                )
+                ui.label(
+                    f"Pipeline run requested{requested} -- the daemon picks "
+                    "this up when its current run finishes."
+                ).classes("text-caption text-primary")
+
+    def _trigger_pipeline() -> None:
+        status = daemon_signals.read_status(data_dir)
+        try:
+            daemon_signals.request_pipeline_run(data_dir, note="web UI")
+        except OSError as exc:
+            ui.notify(f"Could not write the trigger request: {exc}", type="negative")
+            return
+        if status is None or not status.is_live:
+            ui.notify(
+                "Pipeline run requested, but no daemon appears to be running "
+                "-- it will be picked up when one starts.",
+                type="warning",
+            )
+        elif status.is_processing:
+            ui.notify(
+                "Pipeline run requested -- the daemon is mid-run and will "
+                "start another pass right after this one.",
+                type="info",
+            )
+        else:
+            ui.notify(
+                "Pipeline run requested -- the daemon starts shortly.",
+                type="positive",
+            )
+        indicator.refresh()
+
+    with (
+        ui.card().classes("w-full"),
+        ui.row().classes("w-full items-center justify-between gap-4 flex-wrap"),
+    ):
+        indicator()
+        ui.button("Trigger Pipeline", icon="bolt", on_click=_trigger_pipeline).tooltip(
+            "Ask the daemon to start a pipeline run immediately, instead "
+            "of waiting out the rest of its interval."
+        )
+
+    ui.timer(DAEMON_REFRESH_INTERVAL_SEC, indicator.refresh)
+
+
 def _decoder_tools_table(stats: list[status_data.DecoderToolStats]) -> None:
     with ui.card().classes("w-full"):
         ui.label("Decoder Tool Scoreboard").classes("text-lg font-bold")
@@ -355,7 +494,11 @@ def build_pipeline_status_page(data_dir: Path) -> None:
                     # Right next to the build it was built from: the commit
                     # here is only useful if you can go look at it.
                     ui.link("GitHub", REPO_URL, new_tab=True).classes("text-caption")
-            ui.button("Refresh", icon="refresh", on_click=content.refresh)
+            ui.button("Refresh", icon="refresh", on_click=content.refresh).tooltip(
+                "Re-read this page's data from disk. To make the daemon go "
+                'fetch new data, use "Trigger Pipeline" below.'
+            )
+        _daemon_section(data_dir)
         content()
 
     ui.timer(REFRESH_INTERVAL_SEC, content.refresh)

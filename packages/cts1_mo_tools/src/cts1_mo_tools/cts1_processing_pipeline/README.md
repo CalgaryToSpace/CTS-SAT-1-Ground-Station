@@ -41,8 +41,12 @@ web UI as two containers sharing that directory.
 * Runs steps 1-4 continuously instead of one-off: an initial backfill of `--start` (default: 24h), then every `--interval` minutes (default: 15), requeries step 1 for observations starting in the trailing `interval + 30` minutes and reruns steps 2 through 4.
 * The 30-minute overlap on every requery catches a SatNOGS observation that was still uploading/being vetted during the previous poll; it doesn't waste decode time since step 1 already skips any observation/decoder pair already recorded in `decoder_runs`.
 * Runs until interrupted (Ctrl+C).
+* While sleeping between requeries, it polls the data directory for `daemon_pipeline_trigger.json` (written by the web UI's "Trigger Pipeline" button), and starts its next run immediately when it finds one -- deleting the file as it picks it up.
+* It also publishes what it's doing to `daemon_status.json` in the same directory, on a ~5s heartbeat, which backs the web UI's "daemon is running..." indicator. A stale or missing heartbeat means no daemon is running.
+* Both files are described in `daemon_signals.py`; both are disposable, and deleting either costs nothing more than a missing indicator until the next heartbeat.
 
 ### Web UI
 
 * Read any/all of the above parquet files/tables.
 * Serve a multi-user, web-based UI for exploring packets, exporting files, etc.
+* The Pipeline Status page shows whether the daemon is alive and what it's doing, and its "Trigger Pipeline" button asks the daemon to start a run immediately rather than waiting out its interval -- see the Daemon section above for the two files that carry those signals.
