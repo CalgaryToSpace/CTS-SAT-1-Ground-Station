@@ -37,7 +37,7 @@ Parameter list 1:
   0x0011 csp_rs                 BL  true 
   0x0012 csp_crc                BL  false 
   0x0013 csp_rand               BL  true 
-  0x0020 csp_hmac_key           DAT ABCDABCDABCDABCDABCDABCDABCDABCD
+  0x0020 csp_hmac_key           DAT ABCDABCDABCDABCDABCDABCDABCDABCD  # Placeholder/fake HMAC key.
   0x0030 ax25_call              STR "      " 
   0x0040 bw                     U32 0 
   0x0044 afcrange               I32 -4 

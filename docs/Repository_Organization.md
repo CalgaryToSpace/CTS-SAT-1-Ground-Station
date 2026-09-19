@@ -11,3 +11,4 @@ This repo uses a `uv` workspace for Python packages (other than the GNU Radio as
 - `packages/cts1_gs_tool_lib`: Library for use in any tool(s) for connecting to the `cts1_gs_forwarder`.
 - `packages/cts1_gs_database`: CLI program, which connects to the `cts1_gs_forwarder`, and writes all downlinked data to a database for later querying. Imports the `cts1_gs_tool_lib`.
 - `packages/cts1_gs_dashboard`: GUI program which presents a dashboard of the current satellite state from the latest beacon package.
+- `packages/cts1_mo_tools`: Mission Operations tools that are mostly independent of the ground station (uplink and downlink) capabilities. Can run on the ground station, but mostly meant to run on local personal computers.

@@ -1,0 +1,20 @@
+name: FRONTIERSAT
+norad: 69015
+data:
+  &tlm Telemetry:
+    telemetry: hexdump
+transmitters:
+  9k6 FSK downlink:
+    frequency: 436.150e+6
+    modulation: FSK
+    baudrate: 9600
+    deviation: 3200
+    framing: AX100 ASM+Golay
+    scrambler: CCSDS
+    syncword: 4
+    data:
+    - *tlm
+
+# Usage:
+# gr_satellites ./gr_satellites_frontiersat.yml --hexdump --wavfile file.wav
+# gr_satellites ./gr_satellites_frontiersat.yml --hexdump --samp_rate 57600 --iq --rawint16 iq_1696_14274865_436150000_57600.raw
