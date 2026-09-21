@@ -203,7 +203,7 @@ def _parse_mission_start(mission_date: str, start_utc_value: str | None) -> date
             parsed = parsed.replace(tzinfo=UTC)
 
         if parsed <= datetime.now(UTC):
-            logger.warning(f"Start UTC value is in the past: {parsed}")
+            logger.warning(f"Start UTC value is in the past: {parsed.isoformat()}")
 
         return parsed
 
@@ -341,12 +341,17 @@ def _build_single_entries(
     if tssent is None:
         msg = f"Missing tssent for {ctx.cmd}"
         raise ValueError(msg)
+    if tssent <= datetime.now(UTC):
+        logger.warning(f"tssent for {ctx.cmd} is in the past: {tssent.isoformat()}")
+
     tsexec = parse_time(
         ctx.mission_date, ctx.mission_start, ctx.row["tsexec Start (UTC)"]
     )
     if tsexec is None:
         msg = f"Missing tsexec for {ctx.cmd}"
         raise ValueError(msg)
+    if tsexec <= datetime.now(UTC):
+        logger.warning(f"tsexec for {ctx.cmd} is in the past: {tsexec.isoformat()}")
 
     command = format_command(ctx.cmd, tssent, tsexec, ctx.resp)
 
@@ -357,20 +362,32 @@ def _build_single_entries(
 
 
 def _build_interval_entries(ctx: _RowContext) -> list[tuple[int, str]]:
-    start = parse_time(
+    tsexec_start = parse_time(
         ctx.mission_date, ctx.mission_start, ctx.row["tsexec Start (UTC)"]
     )
-    end = parse_time(ctx.mission_date, ctx.mission_start, ctx.row["tsexec End (UTC)"])
+    tsexec_end = parse_time(
+        ctx.mission_date, ctx.mission_start, ctx.row["tsexec End (UTC)"]
+    )
     interval = parse_interval(ctx.row["Interval"])
 
-    if start is None or end is None or interval is None:
+    if tsexec_start is None or tsexec_end is None or interval is None:
         msg = f"Interval missing for {ctx.cmd}"
         raise ValueError(msg)
 
-    entries: list[tuple[int, str]] = []
-    current = start
+    if tsexec_start <= datetime.now(UTC):
+        logger.warning(
+            f"tsexec start for {ctx.cmd} is in the past: {tsexec_start.isoformat()}"
+        )
 
-    while current <= end:
+    if tsexec_end <= datetime.now(UTC):
+        logger.warning(
+            f"tsexec end for {ctx.cmd} is in the past: {tsexec_end.isoformat()}"
+        )
+
+    entries: list[tuple[int, str]] = []
+    current = tsexec_start
+
+    while current <= tsexec_end:
         command = format_command(ctx.cmd, current, current, ctx.resp)
         entries.append((epoch_ms(current), command))
         current += interval
