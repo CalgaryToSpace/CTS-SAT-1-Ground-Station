@@ -39,7 +39,7 @@ from .audio import convert_ogg_to_wav, download_audio
 from .decode_askew_demod import run_askew_demod_from_file
 from .decode_gr_satellites import DEFAULT_SATCFG_PATH, run_gr_satellites_pdu
 from .decode_gr_satellites_kiss import run_gr_satellites_kiss
-from .decode_satnogs_data_demod import run_satnogs_data_demod
+from .decode_satnogs_client_live_data import run_satnogs_client_live_data
 from .decode_sso_rx_replay import run_sso_rx_replay
 
 if TYPE_CHECKING:
@@ -74,22 +74,22 @@ DECODERS = (
     "sso_rx_replay",
     "gr_satellites_pdu",
     "gr_satellites_kiss",
-    "satnogs_data_demod",
+    "satnogs_client_live_data",
 )
 # Command each decoder's underlying tool is invoked as `<cmd> --version`
 # with, for `decoder_runs.version`. None means the decoder has no versioned
-# external tool (satnogs_data_demod just downloads pre-decoded packet URLs
-# from SatNOGS -- see _SATNOGS_DATA_DEMOD_VERSION below for its version).
+# external tool (satnogs_client_live_data just downloads pre-decoded packet URLs
+# from SatNOGS -- see _SATNOGS_CLIENT_LIVE_DATA_VERSION_HARDCODE below for its version).
 _DECODER_VERSION_COMMAND = {
     "askew_demod_from_file": "askew_demod_from_file",
     "sso_rx_replay": "sso_rx_replay",
     "gr_satellites_pdu": "gr_satellites",
     "gr_satellites_kiss": "gr_satellites",
-    "satnogs_data_demod": None,
+    "satnogs_client_live_data": None,
 }
-# satnogs_data_demod has no local versioned tool -- it downloads packets
+# satnogs_client_live_data has no local versioned tool -- it downloads packets
 # already decoded by SatNOGS's own (continuously-deployed) infrastructure.
-_SATNOGS_DATA_DEMOD_VERSION = "SatNOGS Rolling Release"
+_SATNOGS_CLIENT_LIVE_DATA_VERSION_HARDCODE = "SatNOGS Rolling Release"
 
 
 def _resolve_decoder_versions(tools: frozenset[str]) -> dict[str, str | None]:
@@ -102,8 +102,8 @@ def _resolve_decoder_versions(tools: frozenset[str]) -> dict[str, str | None]:
     for decoder, command in _DECODER_VERSION_COMMAND.items():
         if decoder not in tools:
             continue
-        if decoder == "satnogs_data_demod":
-            versions[decoder] = _SATNOGS_DATA_DEMOD_VERSION
+        if decoder == "satnogs_client_live_data":
+            versions[decoder] = _SATNOGS_CLIENT_LIVE_DATA_VERSION_HARDCODE
             continue
         if command is None:
             versions[decoder] = None
@@ -168,7 +168,7 @@ def _received_at(obs: dict[str, Any], *, time_in_file_ms: float | None) -> datet
 
     `time_in_file_ms` is an offset from the observation's start; decoders
     that can't determine a within-file position (gr_satellites_pdu, and
-    sso_rx_replay/gr_satellites_kiss/satnogs_data_demod on the rare row that
+    sso_rx_replay/gr_satellites_kiss/satnogs_client_live_data on the rare row that
     lacks one) fall back to the observation's end time as the best available
     estimate.
     """
@@ -303,10 +303,10 @@ def _process_demod(obs: dict[str, Any], tools: frozenset[str]) -> list[dict[str,
     Unlike the audio decoders, this needs no download of its own audio and
     no temp dir: each `demoddata` entry is already a standalone packet URL,
     downloaded via a thread pool nested inside this (already-pooled) call
-    (see `run_satnogs_data_demod`). A no-op unless "satnogs_data_demod" is
+    (see `run_satnogs_client_live_data`). A no-op unless "satnogs_client_live_data" is
     in `tools`.
     """
-    if "satnogs_data_demod" not in tools:
+    if "satnogs_client_live_data" not in tools:
         return []
 
     obs_id = obs["id"]
@@ -314,13 +314,13 @@ def _process_demod(obs: dict[str, Any], tools: frozenset[str]) -> list[dict[str,
     rows: list[dict[str, Any]] = []
 
     try:
-        demod_rows = run_satnogs_data_demod(
+        demod_rows = run_satnogs_client_live_data(
             obs["demoddata"],
             observation_id=obs_id,
             max_workers=DEMOD_DOWNLOAD_WORKERS,
         )
     except Exception:  # noqa: BLE001
-        logger.exception(f"satnogs_data_demod failed for observation {obs_id}")
+        logger.exception(f"satnogs_client_live_data failed for observation {obs_id}")
         demod_rows = []
 
     for row in demod_rows:
@@ -331,7 +331,7 @@ def _process_demod(obs: dict[str, Any], tools: frozenset[str]) -> list[dict[str,
         rows.append(
             {
                 "observation_id": obs_id,
-                "decoder": "satnogs_data_demod",
+                "decoder": "satnogs_client_live_data",
                 "audio_url": audio_url,
                 "ingested_at": datetime.now(UTC),
                 "time_in_file_ms": time_in_file_ms,
@@ -417,8 +417,8 @@ def run(  # noqa: C901, PLR0913, PLR0915
         limit: Cap the number of observations decoded this run (for testing).
         workers: Concurrency for the decoders (askew_demod_from_file,
             sso_rx_replay, gr_satellites --hexdump, gr_satellites
-            --kiss_out, satnogs_data_demod), which each finish in a few
-            seconds (satnogs_data_demod spins up its own
+            --kiss_out, satnogs_client_live_data), which each finish in a few
+            seconds (satnogs_client_live_data spins up its own
             nested pool -- see DEMOD_DOWNLOAD_WORKERS -- for its own
             observation's packet downloads).
         temp_dir: Directory to create per-observation temp dirs (audio

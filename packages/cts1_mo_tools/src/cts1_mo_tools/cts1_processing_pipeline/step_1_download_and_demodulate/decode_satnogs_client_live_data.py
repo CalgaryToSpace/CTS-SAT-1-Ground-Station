@@ -19,7 +19,7 @@ offset baked in (observed on some SatNOGS stations' filenames):
 
 from __future__ import annotations
 
-__all__ = ["parse_demod_filename_time", "run_satnogs_data_demod"]
+__all__ = ["parse_demod_filename_time", "run_satnogs_client_live_data"]
 
 import concurrent.futures
 import re
@@ -32,7 +32,7 @@ from loguru import logger
 from cts1_mo_tools.cts1_decode_satnogs_packets import verify_csp_packet_crc32c
 from cts1_mo_tools.cts1_processing_pipeline import resource_limits
 
-DECODER_NAME = "satnogs_data_demod"
+DECODER_NAME = "satnogs_client_live_data"
 
 _FILENAME_RE = re.compile(
     r"data_\d+_(?P<date>\d{4}-\d{2}-\d{2})T(?P<time>\d{2}-\d{2}-\d{2})"
@@ -86,7 +86,7 @@ def _download_one(url: str) -> bytes | None:
         resp = requests.get(url, timeout=30)
         resp.raise_for_status()
     except requests.RequestException:
-        logger.warning(f"satnogs_data_demod: failed to download {url}")
+        logger.warning(f"satnogs_client_live_data: failed to download {url}")
         return None
     return resp.content
 
@@ -114,14 +114,14 @@ def _timestamped_urls(
             continue
         if url.lower().endswith(".png"):
             logger.debug(
-                f"satnogs_data_demod: observation {observation_id}: skipping "
+                f"satnogs_client_live_data: observation {observation_id}: skipping "
                 f"mislabelled waterfall image {url}"
             )
             continue
         received_at = parse_demod_filename_time(url)
         if received_at is None:
             logger.warning(
-                f"satnogs_data_demod: observation {observation_id}: discarding "
+                f"satnogs_client_live_data: observation {observation_id}: discarding "
                 f"packet with no parseable timestamp in its filename: {url}"
             )
             continue
@@ -129,7 +129,7 @@ def _timestamped_urls(
     return urls
 
 
-def run_satnogs_data_demod(
+def run_satnogs_client_live_data(
     demoddata: list[dict[str, Any]],
     *,
     observation_id: int,
@@ -181,6 +181,7 @@ def run_satnogs_data_demod(
             )
 
     logger.debug(
-        f"satnogs_data_demod: {len(rows)}/{len(timestamped_urls)} packet(s) downloaded"
+        f"satnogs_client_live_data: {len(rows)}/{len(timestamped_urls)} packet(s) "
+        "downloaded"
     )
     return rows

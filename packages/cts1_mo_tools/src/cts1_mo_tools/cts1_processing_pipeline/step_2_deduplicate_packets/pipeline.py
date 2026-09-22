@@ -3,7 +3,7 @@
 `raw_packets` (see step 1) has one row per *decode*: the same physical
 transmission commonly shows up several times over -- once per decoder that
 managed to decode it (sso_rx_replay / gr_satellites_pdu /
-gr_satellites_kiss / satnogs_data_demod), and again per SatNOGS ground
+gr_satellites_kiss / satnogs_client_live_data), and again per SatNOGS ground
 station that happened to record the same overpass. This step collapses
 those into one row per *distinct received packet*, each carrying a single
 best-guess `received_at` and JSON columns tracing back to every
@@ -72,7 +72,7 @@ OUTPUT_FILENAME = "distinct_packets_over_time.parquet"
 
 ASKEW_DECODER = "askew_demod_from_file"
 SSO_DECODER = "sso_rx_replay"
-DEMOD_DECODER = "satnogs_data_demod"
+DEMOD_DECODER = "satnogs_client_live_data"
 
 # Both have trustworthy within-file timing, so both anchor the baseline
 # clustering below -- in this trust order (highest first) for picking a
@@ -102,7 +102,7 @@ _SOURCE_FIELDS: Sequence[str] = (
 
 
 def _complete_missing_crc(packets: pl.DataFrame) -> pl.DataFrame:
-    """satnogs_data_demod sometimes reports a packet with its trailing CSP
+    """satnogs_client_live_data sometimes reports a packet with its trailing CSP
     CRC-32C already stripped and sometimes doesn't -- there's no way to tell
     from SatNOGS's API alone which case a given packet is. Any row from that
     decoder whose `data_hex` doesn't already carry a valid CRC (per step 1's

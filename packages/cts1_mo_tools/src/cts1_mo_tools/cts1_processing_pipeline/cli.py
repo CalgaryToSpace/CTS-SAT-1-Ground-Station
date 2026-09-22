@@ -61,7 +61,7 @@ class Step1Args:
 
     workers: int = resource_limits.DEFAULT_DECODER_WORKERS
     """Concurrency for the decoders (sso_rx_replay, gr_satellites --hexdump,
-    gr_satellites --kiss_out, satnogs_data_demod). Defaults low so a run
+    gr_satellites --kiss_out, satnogs_client_live_data). Defaults low so a run
     doesn't saturate a small box out from under the web UI -- see
     `resource_limits`."""
 
@@ -77,7 +77,7 @@ class Step1Args:
 
     tools: tuple[str, ...] | None = None
     """Which decoders to run, from {askew_demod_from_file, sso_rx_replay,
-    gr_satellites_pdu, gr_satellites_kiss, satnogs_data_demod}. Omit to run
+    gr_satellites_pdu, gr_satellites_kiss, satnogs_client_live_data}. Omit to run
     all of them."""
 
 
