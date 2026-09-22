@@ -12,14 +12,12 @@ services:
       CTS1_DATA_DIR: /opt/cts1_processing_pipeline
       # Tuned for the 2-vCPU / 3 GB deployment box: a refresh shouldn't be
       # noticeable to someone using the web UI while it runs. The code
-      # already defaults to these values (see resource_limits.py); they're
-      # repeated here because this file is where you'd actually change them
-      # -- e.g. raise CTS1_DECODER_WORKERS for a one-off backfill nobody is
-      # browsing during. Full rundown of every knob here:
-      # packages/cts1_mo_tools/docs/resource-tuning.md
+      # Full rundown: packages/cts1_mo_tools/docs/resource-tuning.md
       CTS1_DECODER_WORKERS: "2" # observations decoded at once
       CTS1_DEMOD_DOWNLOAD_WORKERS: "8" # downloads in flight per observation
       CTS1_POLARS_THREADS: "1" # steps 2-4 are seconds of work either way
+      CTS1_DUCKDB_THREADS: "1" # appends and exports, not heavy analytics
+      CTS1_DUCKDB_MEMORY_LIMIT: "500MB" # spills to disk past this, never OOMs
       CTS1_DAEMON_NICENESS: "10" # yield the CPU to the web server
     env_file:
       - .env # SATNOGS_NETWORK_API_KEY, if you have one -- see .env.sample
@@ -31,14 +29,7 @@ services:
       - "24 hours"
       - --interval
       - "15"
-    # CPU only -- deliberately no `mem_limit`/`memswap_limit`. A cgroup
-    # memory cap is a hard ceiling: crossing it gets the daemon SIGKILLed
-    # (exit 137) by the kernel even when the host has gigabytes of swap
-    # sitting free, which is what an earlier revision of this file caused.
-    # This box has 4 GB of swap and we would much rather a heavy run swap
-    # and finish slowly than die and restart. Responsiveness is protected
-    # by the CPU controls here plus the daemon's niceness, none of which
-    # can kill anything.
+    # CPU only -- deliberately no `mem_limit`/`memswap_limit`.
     cpus: 1.5
     cpu_shares: 512 # half the default weight, so `web` wins any contention
     logging: *default-logging

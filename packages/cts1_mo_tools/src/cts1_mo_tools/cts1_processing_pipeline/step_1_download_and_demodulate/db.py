@@ -56,7 +56,7 @@ DECODER_RUNS_TABLE = "decoder_runs"
 # its packets arrive with the CSP CRC-32C trailer sometimes stripped, and an
 # absent trailer can't be told from a wrong one.
 QUALITY_TIER_ORDER = (
-    "good",
+    "verified",
     "crc_absent_assumed_good",
     "rs_correctable_crc_fail",
     "believable",

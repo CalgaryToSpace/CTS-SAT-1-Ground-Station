@@ -6,7 +6,7 @@ from collections.abc import Iterator
 
 import polars as pl
 import pytest
-from cts1_mo_tools.cts1_processing_pipeline import resource_limits
+from cts1_mo_tools.cts1_processing_pipeline import common, resource_limits
 from loguru import logger
 
 
@@ -80,11 +80,70 @@ def test_env_int_reads_a_good_value(monkeypatch: pytest.MonkeyPatch) -> None:
     assert resource_limits.env_int("CTS1_TEST_KNOB", 4) == 6
 
 
-def test_defaults_are_conservative() -> None:
-    """These sit on a 2-vCPU box shared with the web server (see the tuning doc)."""
-    assert resource_limits.DEFAULT_POLARS_THREADS <= 2
-    assert resource_limits.DEFAULT_DECODER_WORKERS <= 2
-    assert resource_limits.DEFAULT_DEMOD_DOWNLOAD_WORKERS <= 16
+def test_defaults_leave_half_the_box_alone() -> None:
+    """Whatever machine this runs on, the caps take at most half of it.
+
+    The absolute numbers are a property of the box, so this pins the rule
+    instead: nothing here may size itself to every core, since the daemon is
+    never the only thing running (see the tuning doc).
+    """
+    cores = resource_limits.usable_cpu_count()
+    thread_ceiling = max(1, cores // 2)
+    worker_ceiling = max(2, cores // 2)
+    assert thread_ceiling >= resource_limits.DEFAULT_POLARS_THREADS
+    assert worker_ceiling >= resource_limits.DEFAULT_DECODER_WORKERS
+    # Not scaled with the box at all -- it's SatNOGS's servers on the other
+    # end of those sockets, not this machine's cores.
+    assert resource_limits.DEFAULT_DEMOD_DOWNLOAD_WORKERS <= 200
+
+
+@pytest.mark.parametrize(
+    ("cores", "expected_threads", "expected_workers"),
+    [
+        (1, 1, 2),  # minimum=2 keeps one slow observation from stalling the queue
+        (2, 1, 2),  # the deployment box: exactly the values it was tuned to
+        (4, 2, 2),
+        (16, 8, 8),  # a development machine
+    ],
+)
+def test_half_the_cores_scales_with_the_box(
+    cores: int,
+    expected_threads: int,
+    expected_workers: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_affinity(_pid: int) -> set[int]:
+        return set(range(cores))
+
+    monkeypatch.setattr(os, "sched_getaffinity", fake_affinity)
+    assert resource_limits.half_the_cores() == expected_threads
+    assert resource_limits.half_the_cores(minimum=2) == expected_workers
+
+
+def test_usable_memory_bytes_is_a_plausible_amount() -> None:
+    """None is an allowed answer; a nonsense number is not."""
+    usable = resource_limits.usable_memory_bytes()
+    assert usable is None or 64 * 1024**2 < usable < 1 << 50
+
+
+@pytest.mark.parametrize(
+    ("usable_gib", "expected"),
+    [
+        (None, "500MB"),  # couldn't tell -- stay conservative
+        (3, "500MB"),  # the 3 GB deployment box, floored
+        (8, "1073MB"),
+        (64, "4000MB"),  # ceiling: no reason to hand DuckDB more than this
+    ],
+)
+def test_duckdb_memory_limit_tracks_the_box(
+    usable_gib: int | None, expected: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        resource_limits,
+        "usable_memory_bytes",
+        lambda: None if usable_gib is None else usable_gib * 1024**3,
+    )
+    assert common.default_duckdb_memory_limit() == expected
 
 
 def test_lower_process_priority_is_a_no_op_at_zero() -> None:

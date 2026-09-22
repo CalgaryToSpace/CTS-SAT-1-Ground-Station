@@ -63,7 +63,7 @@ def test_parse_forensics_line_frame() -> None:
 
 def test_parse_forensics_line_frame_rs_corrected_crc_fail() -> None:
     # RS corrected the codeword, but the CSP CRC-32C trailer doesn't verify:
-    # the frame is plausible, not trustworthy, so it isn't "good".
+    # the frame is plausible, not trustworthy, so it isn't "verified".
     line = (
         '{"filename":"sample.ogg","time_in_file_ms":45802.229,'
         '"rssi":-2.1,"rs":3,"data_base64":"wiKKABCR"}'
@@ -94,7 +94,7 @@ def test_parse_forensics_line_frame_rs_corrected_crc_pass() -> None:
         "rs_correctable": True,
         "data_hex": "c2228a001091b1a55db6",
         "data_length_bytes": 10,
-        "quality_tier": "good",
+        "quality_tier": "verified",
     }
 
 
@@ -143,7 +143,7 @@ def test_parse_askew_line_frame() -> None:
     line = (
         '{"data_length_bytes":138,"time_in_file_ms":279888.092,'
         '"rs_corrected_error_count":0,"rs_correctable":true,"crc_pass":true,'
-        '"rssi_db":-3.4,"data_hex":"c2a28a00","tier":"good"}'
+        '"rssi_db":-3.4,"data_hex":"c2a28a00","tier":"verified"}'
     )
     row = parse_askew_line(line)
     assert row == {
@@ -153,7 +153,7 @@ def test_parse_askew_line_frame() -> None:
         "rs_corrected_error_count": 0,
         "rs_correctable": True,
         "rssi_db": -3.4,
-        "quality_tier": "good",
+        "quality_tier": "verified",
     }
 
 
@@ -222,7 +222,7 @@ def test_parse_kiss_file_timestamp_then_data() -> None:
             "data_length_bytes": 3,
             "data_hex": "aabbcc",
             "time_in_file_ms": 12_345,
-            "quality_tier": "good",
+            "quality_tier": "verified",
         }
     ]
 
@@ -345,7 +345,7 @@ def test_run_satnogs_client_live_data_tier_good_when_crc_verifies(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     packet = bytes.fromhex("c2228a001091b1a55db6")  # payload + valid CRC-32C
-    assert _run_one_demod_packet(monkeypatch, packet)["quality_tier"] == "good"
+    assert _run_one_demod_packet(monkeypatch, packet)["quality_tier"] == "verified"
 
 
 def test_run_satnogs_client_live_data_tier_assumes_crc_absent_otherwise(
@@ -362,10 +362,12 @@ def test_run_satnogs_client_live_data_tier_assumes_crc_absent_otherwise(
 
 
 def test_format_counts_orders_quality_tiers_best_first() -> None:
-    df = pl.DataFrame({"quality_tier": ["believable", "good", "good", "sketchy", None]})
+    df = pl.DataFrame(
+        {"quality_tier": ["believable", "verified", "verified", "sketchy", None]}
+    )
     assert (
         db.format_counts(df, "quality_tier", order=db.QUALITY_TIER_ORDER)
-        == "good=2, believable=1, <none>=1, sketchy=1"
+        == "verified=2, believable=1, <none>=1, sketchy=1"
     )
 
 
