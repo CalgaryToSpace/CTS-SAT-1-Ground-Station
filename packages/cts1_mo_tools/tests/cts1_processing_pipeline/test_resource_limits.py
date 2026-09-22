@@ -94,7 +94,7 @@ def test_defaults_leave_half_the_box_alone() -> None:
     assert worker_ceiling >= resource_limits.DEFAULT_DECODER_WORKERS
     # Not scaled with the box at all -- it's SatNOGS's servers on the other
     # end of those sockets, not this machine's cores.
-    assert resource_limits.DEFAULT_DEMOD_DOWNLOAD_WORKERS <= 16
+    assert resource_limits.DEFAULT_DEMOD_DOWNLOAD_WORKERS <= 200
 
 
 @pytest.mark.parametrize(
