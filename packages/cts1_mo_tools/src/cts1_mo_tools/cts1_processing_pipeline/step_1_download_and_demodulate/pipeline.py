@@ -32,6 +32,7 @@ from loguru import logger
 
 from cts1_mo_tools.cts1_agenda_maker.satnogs_data import fetch_all_observations
 from cts1_mo_tools.cts1_decode_satnogs_packets import verify_csp_packet_crc32c
+from cts1_mo_tools.cts1_processing_pipeline import resource_limits
 
 from . import db
 from .audio import convert_ogg_to_wav, download_audio
@@ -59,8 +60,15 @@ CHECKPOINT_INTERVAL = 100
 # far more than the handful of new observations each writeout actually
 # persists, so `CHECKPOINT_INTERVAL` alone isn't enough of a brake. The
 # final writeout at the end of the run ignores this.
-MIN_SECONDS_BETWEEN_CHECKPOINTS = 3 * 60.0
-DEMOD_DOWNLOAD_WORKERS = 50
+#
+# On the deployment box (btrfs with compression, and swap it would rather
+# not touch) a full rewrite is the single most disruptive thing the
+# pipeline does to the web UI reading those same files, so the floor is
+# generous: a crash loses at most this much decode work, which is cheap
+# next to paying for the rewrite every few minutes. See
+# `cts1_mo_tools/docs/resource-tuning.md`.
+MIN_SECONDS_BETWEEN_CHECKPOINTS = 10 * 60.0
+DEMOD_DOWNLOAD_WORKERS = resource_limits.DEFAULT_DEMOD_DOWNLOAD_WORKERS
 DECODERS = (
     "askew_demod_from_file",
     "sso_rx_replay",
@@ -391,7 +399,7 @@ def run(  # noqa: C901, PLR0913, PLR0915
     data_dir: Path = DEFAULT_DATA_DIR,
     start: str | None = None,
     limit: int | None = None,
-    workers: int = 4,
+    workers: int = resource_limits.DEFAULT_DECODER_WORKERS,
     temp_dir: Path | None = None,
     force_rerun: bool = False,
     tools: tuple[str, ...] | None = None,

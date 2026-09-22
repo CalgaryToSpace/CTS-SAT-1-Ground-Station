@@ -29,7 +29,7 @@ Invoked via the top-level CLI's `daemon` subcommand -- see
 
 from __future__ import annotations
 
-__all__ = ["run", "sleep_until_next_run"]
+__all__ = ["STEP_NAMES", "run", "run_all_steps", "sleep_until_next_run"]
 
 import time
 from datetime import UTC, datetime, timedelta
@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
-from . import daemon_signals
+from . import daemon_signals, resource_limits
 from .daemon_signals import DaemonState, StatusReporter
 from .step_1_download_and_demodulate import pipeline as step_1_pipeline
 from .step_2_deduplicate_packets import pipeline as step_2_pipeline
@@ -46,6 +46,17 @@ from .step_4_detect_satellite_events import pipeline as step_4_pipeline
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+# What each step is announced as, both in the log ("Starting step 2/4:
+# deduplicate packets.") and in the web UI's status indicator. One table so
+# the two can't drift apart, and so the step count in those messages stays
+# right if a step 5 ever shows up.
+STEP_NAMES = {
+    1: "download and demodulate",
+    2: "deduplicate packets",
+    3: "decode packets",
+    4: "detect satellite events",
+}
 
 # The overlap added to `interval` for every requery after the initial
 # backfill -- see the module docstring for why.
@@ -57,7 +68,7 @@ REQUERY_OVERLAP = timedelta(minutes=30)
 TRIGGER_POLL_INTERVAL_SEC = daemon_signals.HEARTBEAT_INTERVAL_SEC
 
 
-def _run_all_steps(  # noqa: PLR0913
+def run_all_steps(  # noqa: PLR0913
     *,
     norad_id: str,
     data_dir: Path,
@@ -76,7 +87,16 @@ def _run_all_steps(  # noqa: PLR0913
     indicator) -- e.g. the backfill vs. a scheduled requery vs. one a
     person asked for from the web UI.
     """
-    reporter.set(DaemonState.PROCESSING, detail=f"{run_label}: step 1 (download)")
+
+    def announce(number: int) -> None:
+        """Log and publish that step `number` is starting."""
+        name = STEP_NAMES[number]
+        logger.info(f"Starting step {number}/{len(STEP_NAMES)}: {name} -- {run_label}.")
+        reporter.set(
+            DaemonState.PROCESSING, detail=f"{run_label}: step {number} ({name})"
+        )
+
+    announce(1)
     step_1_pipeline.run(
         norad_id=norad_id,
         data_dir=data_dir,
@@ -87,12 +107,14 @@ def _run_all_steps(  # noqa: PLR0913
         force_rerun=force_rerun,
         tools=tools,
     )
-    reporter.set(DaemonState.PROCESSING, detail=f"{run_label}: step 2 (deduplicate)")
+    announce(2)
     step_2_pipeline.run(data_dir=data_dir)
-    reporter.set(DaemonState.PROCESSING, detail=f"{run_label}: step 3 (decode)")
+    announce(3)
     step_3_pipeline.run(data_dir=data_dir)
-    reporter.set(DaemonState.PROCESSING, detail=f"{run_label}: step 4 (events)")
+    announce(4)
     step_4_pipeline.run(data_dir=data_dir)
+
+    logger.info(f"Finished all {len(STEP_NAMES)} steps -- {run_label}.")
 
 
 def sleep_until_next_run(
@@ -136,7 +158,7 @@ def run(  # noqa: PLR0913
     start: str = "24 hours",
     interval: float = 15.0,
     limit: int | None = None,
-    workers: int = 4,
+    workers: int = resource_limits.DEFAULT_DECODER_WORKERS,
     temp_dir: Path | None = None,
     force_rerun: bool = False,
     tools: tuple[str, ...] | None = None,
@@ -181,7 +203,7 @@ def run(  # noqa: PLR0913
         daemon_signals.clear_trigger_request(data_dir)
 
         logger.info(f"Daemon: initial backfill, start={start!r}")
-        _run_all_steps(
+        run_all_steps(
             norad_id=norad_id,
             data_dir=data_dir,
             start=start,
@@ -202,7 +224,7 @@ def run(  # noqa: PLR0913
 
             requery_start = (datetime.now(UTC) - requery_window).isoformat()
             logger.info(f"Daemon: requerying since {requery_start}")
-            _run_all_steps(
+            run_all_steps(
                 norad_id=norad_id,
                 data_dir=data_dir,
                 start=requery_start,

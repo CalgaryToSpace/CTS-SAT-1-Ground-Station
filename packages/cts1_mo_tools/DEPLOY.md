@@ -47,6 +47,7 @@ occasional reload -- e.g. a host cron entry:
 ## Update
 
 ```bash
+docker compose down daemon  # Optionally shut off the daemon for faster builds.
 git pull
 docker compose build
 docker compose up -d
@@ -57,10 +58,6 @@ docker compose up -d
 ```bash
 sudo cp -a /opt/cts1_processing_pipeline /path/to/backup/
 ```
-
-## Configure
-
-Edit NORAD ID / `--start` / `--interval`: `daemon.command` in `docker-compose.yml`.
 
 ## Backfill history
 
@@ -79,3 +76,6 @@ docker compose run --rm daemon 69015 --start "2026-05-01" --interval 15
 # Once complete, resume the normal rolling daemon.
 docker compose start daemon
 ```
+
+A backfill is worth raising the daemon's resource caps for -- see
+[docs/resource-tuning.md](docs/resource-tuning.md#backfills).
