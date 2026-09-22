@@ -29,6 +29,7 @@ from typing import Any
 import requests
 from loguru import logger
 
+from cts1_mo_tools.cts1_decode_satnogs_packets import verify_csp_packet_crc32c
 from cts1_mo_tools.cts1_processing_pipeline import resource_limits
 
 DECODER_NAME = "satnogs_data_demod"
@@ -39,6 +40,27 @@ _FILENAME_RE = re.compile(
 )
 _SEQ_STEP_MS = 100
 _G_OFFSET_MS = 50
+
+
+def _quality_tier(data: bytes) -> str:
+    """Tier for a downloaded packet, from its trailing CSP CRC-32C (if any).
+
+    SatNOGS has already run FEC, so the only open question is the CRC -- and a
+    trailer that doesn't verify here almost never means a corrupt packet. Some
+    stations report the packet with its CRC-32C already stripped and some
+    don't, with nothing in the API to say which, so a packet 4 bytes short of
+    carrying a trailer is indistinguishable from one whose trailer is wrong
+    (`_complete_missing_crc` in step 2 synthesizes the missing CRC so these
+    still dedupe against other decoders' copies of the same transmission).
+
+    Measured over the 157,854 rows collected up to 2026-09-21: only 4.0% carry
+    a verifying trailer, no byte window of the rest verifies as a CRC, and
+    9,704 distinct payloads turn up in another decoder's rows as exactly these
+    bytes plus a trailer that does verify. Hence "absent" rather than "fail",
+    named to keep the assumption visible.
+    """
+    crc_pass, _computed, _received = verify_csp_packet_crc32c(data)
+    return "good" if crc_pass else "crc_absent_assumed_good"
 
 
 def parse_demod_filename_time(url: str) -> datetime | None:
@@ -154,6 +176,7 @@ def run_satnogs_data_demod(
                     "data_hex": data.hex(),
                     "data_length_bytes": len(data),
                     "satnogs_demod_url": url,
+                    "quality_tier": _quality_tier(data),
                 }
             )
 

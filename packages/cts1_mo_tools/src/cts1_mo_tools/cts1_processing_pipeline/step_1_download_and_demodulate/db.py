@@ -52,8 +52,12 @@ RAW_PACKETS_TABLE = "raw_packets"
 DECODER_RUNS_TABLE = "decoder_runs"
 
 # Quality tiers, best first; unknown tiers sort after these, alphabetically.
+# "crc_absent_assumed_good" is satnogs_data_demod-only -- FEC already ran, but
+# its packets arrive with the CSP CRC-32C trailer sometimes stripped, and an
+# absent trailer can't be told from a wrong one.
 QUALITY_TIER_ORDER = (
     "good",
+    "crc_absent_assumed_good",
     "rs_correctable_crc_fail",
     "believable",
     "candidate",

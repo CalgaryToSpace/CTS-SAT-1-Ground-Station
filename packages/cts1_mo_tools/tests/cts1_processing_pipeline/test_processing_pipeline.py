@@ -321,6 +321,42 @@ def test_run_satnogs_data_demod_discards_pngs_and_untimestamped(
     assert rows[0]["data_hex"] == "0102"
 
 
+def _run_one_demod_packet(
+    monkeypatch: pytest.MonkeyPatch, data: bytes
+) -> dict[str, object]:
+    def fake_download_one(_url: str) -> bytes:
+        return data
+
+    monkeypatch.setattr(decode_satnogs_data_demod, "_download_one", fake_download_one)
+    rows = decode_satnogs_data_demod.run_satnogs_data_demod(
+        [{"payload_demod": _DEMOD_URL_BASE}],
+        observation_id=14759295,
+        max_workers=1,
+    )
+    assert len(rows) == 1
+    return rows[0]
+
+
+def test_run_satnogs_data_demod_tier_good_when_crc_verifies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    packet = bytes.fromhex("c2228a001091b1a55db6")  # payload + valid CRC-32C
+    assert _run_one_demod_packet(monkeypatch, packet)["quality_tier"] == "good"
+
+
+def test_run_satnogs_data_demod_tier_assumes_crc_absent_otherwise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The same packet as reported by a station that strips the CRC trailer.
+    # Nothing distinguishes that from a wrong trailer, and measurement says
+    # stripped is overwhelmingly the real case, so it isn't tiered as a fail.
+    packet = bytes.fromhex("c2228a001091")
+    assert (
+        _run_one_demod_packet(monkeypatch, packet)["quality_tier"]
+        == "crc_absent_assumed_good"
+    )
+
+
 def test_format_counts_orders_quality_tiers_best_first() -> None:
     df = pl.DataFrame({"quality_tier": ["believable", "good", "good", "sketchy", None]})
     assert (
