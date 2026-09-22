@@ -46,7 +46,7 @@ def parse_askew_line(line: str) -> dict[str, Any] | None:
 
 
 def run_askew_demod_from_file(audio_path: Path) -> list[dict[str, Any]]:
-    """Run `askew_demod_from_file --output-filter=all` on an audio file.
+    """Run `askew_demod_from_file --output-filter=believable` on an audio file.
 
     Args:
         audio_path: Path to a local .ogg/.wav recording.
@@ -56,7 +56,7 @@ def run_askew_demod_from_file(audio_path: Path) -> list[dict[str, Any]]:
         a non-zero exit -- a bad/unreadable file just yields no rows).
     """
     proc = _subprocess_registry.run_tracked(
-        ["askew_demod_from_file", "--output-filter=all", str(audio_path)],
+        ["askew_demod_from_file", "--output-filter=believable", str(audio_path)],
         check=False,
         text=True,
     )
