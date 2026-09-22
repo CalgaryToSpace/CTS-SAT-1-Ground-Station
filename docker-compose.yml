@@ -31,18 +31,15 @@ services:
       - "24 hours"
       - --interval
       - "15"
-    # A hard backstop under the in-process caps above.
-    # Memory is sized against DuckDB's own
-    # 500MB cap (see common.py) with room for polars and the decoder
-    # subprocesses on top. `memswap_limit` is the RAM+swap ceiling, so the
-    # 400m of headroom over `mem_limit` is all the swap a decode run can
-    # ever take -- on this box (btrfs + zswap, 4 GB of swap) a pipeline run
-    # that swaps freely costs the web server far more than the run saves,
-    # but cutting swap off entirely (memswap_limit == mem_limit) would turn
-    # a heavy backfill into an OOM-kill/restart loop instead.
+    # CPU only -- deliberately no `mem_limit`/`memswap_limit`. A cgroup
+    # memory cap is a hard ceiling: crossing it gets the daemon SIGKILLed
+    # (exit 137) by the kernel even when the host has gigabytes of swap
+    # sitting free, which is what an earlier revision of this file caused.
+    # This box has 4 GB of swap and we would much rather a heavy run swap
+    # and finish slowly than die and restart. Responsiveness is protected
+    # by the CPU controls here plus the daemon's niceness, none of which
+    # can kill anything.
     cpus: 1.5
-    mem_limit: 1600m
-    memswap_limit: 2000m
     cpu_shares: 512 # half the default weight, so `web` wins any contention
     logging: *default-logging
     restart: unless-stopped
@@ -60,11 +57,11 @@ services:
       - /opt/cts1_processing_pipeline:/opt/cts1_processing_pipeline # writable: the web UI drops daemon_pipeline_trigger.json here
     ports:
       - "127.0.0.1:8089:8089" # localhost only; nginx (below) is the public path
-    # No `cpus` cap: the web server is the one thing here that should be
-    # able to take the whole box for the moment it needs to. The default
-    # cpu_shares (1024, twice the daemon's) is what makes it win when the
-    # daemon is mid-refresh.
-    mem_limit: 900m
+    # No caps at all: the web server is the one thing here that should be
+    # able to take the whole box for the moment it needs to, and the
+    # default cpu_shares (1024, twice the daemon's) is what makes it win
+    # when the daemon is mid-refresh. See the daemon above for why there's
+    # no `mem_limit` either.
     logging: *default-logging
     restart: unless-stopped
 

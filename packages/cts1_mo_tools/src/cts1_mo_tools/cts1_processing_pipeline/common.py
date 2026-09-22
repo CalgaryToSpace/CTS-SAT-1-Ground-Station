@@ -9,6 +9,7 @@ __all__ = [
     "drop_timezones_for_excel",
 ]
 
+import os
 from typing import TYPE_CHECKING
 
 import duckdb
@@ -21,7 +22,13 @@ if TYPE_CHECKING:
 # pipeline's single-satellite data volume needs, and enough to crowd out
 # everything else on a small deployment box (see
 # `cts1_mo_tools/docs/resource-tuning.md`).
-DEFAULT_DUCKDB_MEMORY_LIMIT = "500MB"
+#
+# Unlike a container memory cap, this one can't get anything OOM-killed:
+# DuckDB spills to its temp directory when it hits this, and only raises
+# `duckdb.OutOfMemoryException` if it can't. So the failure mode to look
+# for if this is too low is an error in the log, not a dead daemon.
+# Overridable (e.g. `CTS1_DUCKDB_MEMORY_LIMIT=1GB`) for a big backfill.
+DEFAULT_DUCKDB_MEMORY_LIMIT = os.environ.get("CTS1_DUCKDB_MEMORY_LIMIT", "500MB")
 
 # ...and, likewise, defaults to one thread per *host* core, on top of the
 # thread pools polars and step 1's decoder pool have already sized
