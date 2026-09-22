@@ -1,11 +1,12 @@
-"""Tests for the daemon <-> web UI file signalling, and for the daemon's
-sleep loop honouring a trigger request.
+"""Tests for the daemon <-> web UI file signalling, for the daemon's sleep
+loop honouring a trigger request, and for what it announces per step.
 """
 
 import json
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 from cts1_mo_tools.cts1_processing_pipeline import daemon, daemon_signals
@@ -13,6 +14,7 @@ from cts1_mo_tools.cts1_processing_pipeline.daemon_signals import (
     DaemonState,
     StatusReporter,
 )
+from loguru import logger
 
 # ---------------------------------------------------------------------------
 # Trigger requests (web UI -> daemon).
@@ -291,3 +293,68 @@ def test_sleeping_publishes_a_next_run_time(tmp_path: Path) -> None:
     assert status is not None
     assert status.state is DaemonState.SLEEPING
     assert status.next_run_at is not None
+
+
+# ---------------------------------------------------------------------------
+# Per-step announcements.
+# ---------------------------------------------------------------------------
+
+
+def test_every_step_announces_itself(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each step logs a "Starting step N/4: <name> -- <run label>." line
+    before it runs, and publishes the same name to the web UI's status
+    indicator.
+    """
+
+    def do_nothing(**_kwargs: Any) -> None:
+        """Stand in for a step's `run`, so this exercises only the daemon."""
+
+    for module in (
+        daemon.step_1_pipeline,
+        daemon.step_2_pipeline,
+        daemon.step_3_pipeline,
+        daemon.step_4_pipeline,
+    ):
+        monkeypatch.setattr(module, "run", do_nothing)
+
+    messages: list[str] = []
+    sink_id = logger.add(messages.append, level="INFO", format="{message}")
+    details: list[str | None] = []
+
+    with StatusReporter(tmp_path, interval_sec=0.05) as reporter:
+        original_set = reporter.set
+
+        def recording_set(state: DaemonState, **kwargs: Any) -> None:
+            details.append(kwargs.get("detail"))
+            original_set(state, **kwargs)
+
+        monkeypatch.setattr(reporter, "set", recording_set)
+        try:
+            daemon.run_all_steps(
+                norad_id="69015",
+                data_dir=tmp_path,
+                start=None,
+                limit=None,
+                workers=1,
+                temp_dir=None,
+                force_rerun=False,
+                tools=None,
+                reporter=reporter,
+                run_label="backfill",
+            )
+        finally:
+            logger.remove(sink_id)
+
+    log = "\n".join(messages)
+    for number, name in daemon.STEP_NAMES.items():
+        assert f"Starting step {number}/4: {name} -- backfill." in log
+        assert f"backfill: step {number} ({name})" in details
+
+    assert "Finished all 4 steps -- backfill." in log
+    # In order, and once each.
+    starts = [m for m in messages if m.startswith("Starting step ")]
+    assert [m.split("/")[0] for m in starts] == [
+        f"Starting step {n}" for n in daemon.STEP_NAMES
+    ]
