@@ -52,7 +52,12 @@ RAW_PACKETS_TABLE = "raw_packets"
 DECODER_RUNS_TABLE = "decoder_runs"
 
 # Quality tiers, best first; unknown tiers sort after these, alphabetically.
-QUALITY_TIER_ORDER = ("good", "believable")
+QUALITY_TIER_ORDER = (
+    "good",
+    "rs_correctable_crc_fail",
+    "believable",
+    "candidate",
+)
 
 
 def connect(

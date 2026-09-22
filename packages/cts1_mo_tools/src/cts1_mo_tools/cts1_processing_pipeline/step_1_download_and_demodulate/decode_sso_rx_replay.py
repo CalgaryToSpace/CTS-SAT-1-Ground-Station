@@ -20,12 +20,25 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
+from cts1_mo_tools.cts1_decode_satnogs_packets import verify_csp_packet_crc32c
+
 from . import _subprocess_registry
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 DECODER_NAME = "sso_rx_replay"
+
+
+def _quality_tier(*, rs_correctable: bool, crc_pass: bool) -> str:
+    """Tier for a frame, from its RS and CSP CRC-32C outcomes.
+
+    RS-uncorrectable frames are "believable" whatever their CRC says: the
+    payload is known-damaged, so a CRC that happens to pass is not meaningful.
+    """
+    if not rs_correctable:
+        return "believable"
+    return "good" if crc_pass else "rs_correctable_crc_fail"
 
 
 def parse_forensics_line(line: str) -> dict[str, Any] | None:
@@ -54,6 +67,10 @@ def parse_forensics_line(line: str) -> dict[str, Any] | None:
 
     data_bytes = base64.b64decode(obj["data_base64"])
     rs = obj["rs"]
+    # We run with --no-csp-crc32, so sso_rx_replay reports no CRC verdict of
+    # its own and leaves the trailer in place -- check it here, otherwise an
+    # RS-corrected frame with a broken CRC would be tiered as "good".
+    crc_pass, _computed, _received = verify_csp_packet_crc32c(data_bytes)
 
     return {
         # Ignore as useless - "sso_filename": obj["filename"],
@@ -64,7 +81,7 @@ def parse_forensics_line(line: str) -> dict[str, Any] | None:
         "rs_correctable": rs >= 0,
         "data_hex": data_bytes.hex(),
         "data_length_bytes": len(data_bytes),
-        "quality_tier": "good" if rs >= 0 else "believable",
+        "quality_tier": _quality_tier(rs_correctable=rs >= 0, crc_pass=crc_pass),
     }
 
 

@@ -61,7 +61,9 @@ def test_parse_forensics_line_frame() -> None:
     }
 
 
-def test_parse_forensics_line_frame_rs_corrected() -> None:
+def test_parse_forensics_line_frame_rs_corrected_crc_fail() -> None:
+    # RS corrected the codeword, but the CSP CRC-32C trailer doesn't verify:
+    # the frame is plausible, not trustworthy, so it isn't "good".
     line = (
         '{"filename":"sample.ogg","time_in_file_ms":45802.229,'
         '"rssi":-2.1,"rs":3,"data_base64":"wiKKABCR"}'
@@ -74,8 +76,38 @@ def test_parse_forensics_line_frame_rs_corrected() -> None:
         "rs_correctable": True,
         "data_hex": "c2228a001091",
         "data_length_bytes": 6,
+        "quality_tier": "rs_correctable_crc_fail",
+    }
+
+
+def test_parse_forensics_line_frame_rs_corrected_crc_pass() -> None:
+    # Same frame, with a valid CRC-32C trailer over the payload.
+    line = (
+        '{"filename":"sample.ogg","time_in_file_ms":45802.229,'
+        '"rssi":-2.1,"rs":3,"data_base64":"wiKKABCRsaVdtg=="}'
+    )
+    row = parse_forensics_line(line)
+    assert row == {
+        "time_in_file_ms": 45802.229,
+        "rssi_db": -2.1,
+        "rs_corrected_error_count": 3,
+        "rs_correctable": True,
+        "data_hex": "c2228a001091b1a55db6",
+        "data_length_bytes": 10,
         "quality_tier": "good",
     }
+
+
+def test_parse_forensics_line_frame_rs_uncorrectable_crc_pass() -> None:
+    # A passing CRC over a known-damaged codeword doesn't promote the frame:
+    # RS-uncorrectable stays "believable".
+    line = (
+        '{"filename":"sample.ogg","time_in_file_ms":45802.229,'
+        '"rssi":-2.1,"rs":-2,"data_base64":"wiKKABCRsaVdtg=="}'
+    )
+    row = parse_forensics_line(line)
+    assert row is not None
+    assert row["quality_tier"] == "believable"
 
 
 def test_parse_forensics_line_no_decode() -> None:
