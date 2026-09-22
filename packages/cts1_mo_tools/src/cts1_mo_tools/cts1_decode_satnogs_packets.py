@@ -525,7 +525,7 @@ def decode_beacon_basic_packet(
         msg = f"Unexpected packet_type byte for BEACON_BASIC: {vals[0]:#04x}"
         raise ValueError(msg)
 
-    rf = dict(zip(BEACON_FIELD_NAMES, vals, strict=True))
+    rf: dict[str, Any] = dict(zip(BEACON_FIELD_NAMES, vals, strict=True))
     fm_raw = payload[BEACON_FIXED_SIZE : BEACON_FIXED_SIZE + FRIENDLY_MESSAGE_SIZE]
     friendly = fm_raw.split(b"\x00")[0].decode("utf-8", errors="replace")
     sat_name = rf["satellite_name"].decode("ascii", errors="replace").rstrip("\x00")
@@ -639,7 +639,7 @@ def decode_beacon_extended_packet(
         msg = f"Unexpected packet_type byte for BEACON_EXTENDED: {vals[0]:#04x}"
         raise ValueError(msg)
 
-    rf = dict(zip(BEACON_FIELD_NAMES, vals, strict=True))
+    rf: dict[str, Any] = dict(zip(BEACON_FIELD_NAMES, vals, strict=True))
 
     fm_raw = payload[BEACON_FIXED_SIZE : BEACON_FIXED_SIZE + FRIENDLY_MESSAGE_SIZE]
     friendly = fm_raw.split(b"\x00")[0].decode("utf-8", errors="replace")
@@ -650,7 +650,7 @@ def decode_beacon_extended_packet(
 
     ext_offset = end_offset + END_MESSAGE_SIZE
     ext_vals = struct.unpack_from(EXTENDED_FMT, payload, ext_offset)
-    ef = dict(zip(EXTENDED_FIELD_NAMES, ext_vals, strict=True))
+    ef: dict[str, Any] = dict(zip(EXTENDED_FIELD_NAMES, ext_vals, strict=True))
 
     sat_name = rf["satellite_name"].decode("ascii", errors="replace").rstrip("\x00")
     epoch_ms = rf["unix_epoch_time_ms"]

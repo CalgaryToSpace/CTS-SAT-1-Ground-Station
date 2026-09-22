@@ -5,8 +5,8 @@ from typing import Any
 
 import polars as pl
 import pytest
+from cts1_mo_tools.cts1_decode_satnogs_packets import BULK_DOWNLINK_MAX_DATA
 from cts1_mo_tools.cts1_processing_pipeline.web_ui.file_reassembly import (
-    BULK_DOWNLINK_MAX_DATA,
     CONFLICT_ISLAND_MAX_BYTES,
     COVERAGE_OFFSET_LABEL_INTERVAL_ROWS,
     COVERAGE_ROW_WIDTH_BYTES,

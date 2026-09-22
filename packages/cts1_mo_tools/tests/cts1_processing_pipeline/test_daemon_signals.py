@@ -14,6 +14,18 @@ from cts1_mo_tools.cts1_processing_pipeline.daemon_signals import (
     DaemonState,
     StatusReporter,
 )
+from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate import (
+    pipeline as step_1_pipeline,
+)
+from cts1_mo_tools.cts1_processing_pipeline.step_2_deduplicate_packets import (
+    pipeline as step_2_pipeline,
+)
+from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
+    pipeline as step_3_pipeline,
+)
+from cts1_mo_tools.cts1_processing_pipeline.step_4_detect_satellite_events import (
+    pipeline as step_4_pipeline,
+)
 from loguru import logger
 
 # ---------------------------------------------------------------------------
@@ -312,10 +324,10 @@ def test_every_step_announces_itself(
         """Stand in for a step's `run`, so this exercises only the daemon."""
 
     for module in (
-        daemon.step_1_pipeline,
-        daemon.step_2_pipeline,
-        daemon.step_3_pipeline,
-        daemon.step_4_pipeline,
+        step_1_pipeline,
+        step_2_pipeline,
+        step_3_pipeline,
+        step_4_pipeline,
     ):
         monkeypatch.setattr(module, "run", do_nothing)
 
