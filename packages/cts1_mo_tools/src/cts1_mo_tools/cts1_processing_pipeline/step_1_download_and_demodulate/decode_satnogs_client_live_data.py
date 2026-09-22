@@ -60,7 +60,7 @@ def _quality_tier(data: bytes) -> str:
     named to keep the assumption visible.
     """
     crc_pass, _computed, _received = verify_csp_packet_crc32c(data)
-    return "good" if crc_pass else "crc_absent_assumed_good"
+    return "verified" if crc_pass else "crc_absent_assumed_good"
 
 
 def parse_demod_filename_time(url: str) -> datetime | None:

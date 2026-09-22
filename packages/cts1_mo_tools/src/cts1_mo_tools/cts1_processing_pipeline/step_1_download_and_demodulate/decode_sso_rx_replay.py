@@ -38,7 +38,7 @@ def _quality_tier(*, rs_correctable: bool, crc_pass: bool) -> str:
     """
     if not rs_correctable:
         return "believable"
-    return "good" if crc_pass else "rs_correctable_crc_fail"
+    return "verified" if crc_pass else "rs_correctable_crc_fail"
 
 
 def parse_forensics_line(line: str) -> dict[str, Any] | None:
@@ -69,7 +69,7 @@ def parse_forensics_line(line: str) -> dict[str, Any] | None:
     rs = obj["rs"]
     # We run with --no-csp-crc32, so sso_rx_replay reports no CRC verdict of
     # its own and leaves the trailer in place -- check it here, otherwise an
-    # RS-corrected frame with a broken CRC would be tiered as "good".
+    # RS-corrected frame with a broken CRC would be tiered as "verified".
     crc_pass, _computed, _received = verify_csp_packet_crc32c(data_bytes)
 
     return {
