@@ -41,6 +41,7 @@ def parse_askew_line(line: str) -> dict[str, Any] | None:
         "rs_corrected_error_count": obj["rs_corrected_error_count"],
         "rs_correctable": obj["rs_correctable"],
         "rssi_db": obj["rssi_db"],
+        "quality_tier": obj["tier"],
         # Skip including - We calculate it in here anyway - "crc_pass": obj["crc_pass"],
     }
 

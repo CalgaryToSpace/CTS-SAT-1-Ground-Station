@@ -55,6 +55,7 @@ def test_parse_forensics_line_frame() -> None:
         "rs_correctable": False,
         "data_hex": "c2228a001091",
         "data_length_bytes": 6,
+        "quality_tier": "believable",
     }
 
 
@@ -71,6 +72,7 @@ def test_parse_forensics_line_frame_rs_corrected() -> None:
         "rs_correctable": True,
         "data_hex": "c2228a001091",
         "data_length_bytes": 6,
+        "quality_tier": "good",
     }
 
 
@@ -107,7 +109,7 @@ def test_parse_askew_line_frame() -> None:
     line = (
         '{"data_length_bytes":138,"time_in_file_ms":279888.092,'
         '"rs_corrected_error_count":0,"rs_correctable":true,"crc_pass":true,'
-        '"rssi_db":-3.4,"data_hex":"c2a28a00"}'
+        '"rssi_db":-3.4,"data_hex":"c2a28a00","tier":"good"}'
     )
     row = parse_askew_line(line)
     assert row == {
@@ -117,6 +119,7 @@ def test_parse_askew_line_frame() -> None:
         "rs_corrected_error_count": 0,
         "rs_correctable": True,
         "rssi_db": -3.4,
+        "quality_tier": "good",
     }
 
 
@@ -185,6 +188,7 @@ def test_parse_kiss_file_timestamp_then_data() -> None:
             "data_length_bytes": 3,
             "data_hex": "aabbcc",
             "time_in_file_ms": 12_345,
+            "quality_tier": "good",
         }
     ]
 

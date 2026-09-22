@@ -64,6 +64,7 @@ def parse_forensics_line(line: str) -> dict[str, Any] | None:
         "rs_correctable": rs >= 0,
         "data_hex": data_bytes.hex(),
         "data_length_bytes": len(data_bytes),
+        "quality_tier": "good" if rs >= 0 else "believable",
     }
 
 
