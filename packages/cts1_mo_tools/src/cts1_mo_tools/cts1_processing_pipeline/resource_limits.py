@@ -14,10 +14,18 @@ happily saturates the box:
   CPU-bound subprocess (see `DEFAULT_DECODER_WORKERS`).
 
 None of these are individually unreasonable; stacked on 2 vCPUs they add up
-to several times the machine. The caps here are deliberately conservative:
-this pipeline handles one satellite's packets, and finishing a requery a
-minute later is far cheaper than a web UI that stalls whenever the data
-refreshes.
+to several times the machine. So the defaults here take *half* the cores
+this process is allowed to run on, rather than all of them: on the
+deployment box that works out to the same conservative numbers it was
+hand-tuned to (1 polars thread, 2 decoder workers), while a 16-core
+development machine running the same daemon gets 8 of each and finishes a
+backfill in the time it used to.
+
+Half rather than all, everywhere, because nothing here is ever the only
+thing running: on the deployment box it shares with the web server, and on
+a development box with whatever the person is actually doing. Finishing a
+requery a minute later is far cheaper than a box that stalls whenever the
+data refreshes.
 
 The operator-facing version of all this -- what to turn when, and the
 host-side knobs that aren't in Python at all -- is in
@@ -45,10 +53,14 @@ __all__ = [
     "THREAD_LIMIT_ENV_VARS",
     "apply_thread_limits",
     "env_int",
+    "half_the_cores",
     "lower_process_priority",
+    "usable_cpu_count",
+    "usable_memory_bytes",
 ]
 
 import os
+import pathlib
 import sys
 
 from loguru import logger
@@ -75,33 +87,96 @@ def env_int(name: str, default: int, *, minimum: int = 1) -> int:
     return value
 
 
+def usable_cpu_count() -> int:
+    """How many cores this process is actually allowed to run on.
+
+    `sched_getaffinity` rather than `cpu_count` so a taskset/cpuset pinning
+    is respected. Note that neither sees Docker's `cpus:` quota, which is a
+    CFS bandwidth limit rather than a mask -- a container capped at 1.5 CPUs
+    on a 2-core host still reports 2 here, which is what we want: the caps
+    below want the size of the box, and the quota then does its own
+    throttling on top.
+    """
+    if hasattr(os, "sched_getaffinity"):
+        return len(os.sched_getaffinity(0)) or 1
+    return os.cpu_count() or 1
+
+
+def half_the_cores(*, minimum: int = 1) -> int:
+    """Half this process's cores, never below `minimum`.
+
+    The sizing rule for every CPU-bound default in this module -- see the
+    module docstring for why half.
+    """
+    return max(minimum, usable_cpu_count() // 2)
+
+
+def usable_memory_bytes() -> int | None:
+    """Total memory this process may use, or None if it can't be determined.
+
+    Its cgroup's limit where there is one, so a container with a `mem_limit`
+    sizes itself to that rather than to the host it happens to be on, and
+    the host's total otherwise. Only used to size a soft cap (DuckDB's
+    working memory, see `common`), so None is a fine answer -- the caller
+    falls back to a fixed conservative value.
+    """
+    for path, unlimited in (
+        ("/sys/fs/cgroup/memory.max", "max"),  # cgroup v2
+        ("/sys/fs/cgroup/memory/memory.limit_in_bytes", None),  # cgroup v1
+    ):
+        try:
+            raw = pathlib.Path(path).read_text().strip()
+        except OSError:
+            continue
+        if raw == unlimited:
+            continue
+        try:
+            value = int(raw)
+        except ValueError:
+            continue
+        # v1 reports "no limit" as a number so large it's meaningless
+        # (PAGE_SIZE * 2**63-ish); treat anything past a petabyte as unset.
+        if 0 < value < 1 << 50:
+            return value
+
+    try:
+        for line in pathlib.Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemTotal:"):
+                return int(line.split()[1]) * 1024
+    except (OSError, IndexError, ValueError):
+        pass
+    return None
+
+
 # Threads this process gives polars (and the other rayon-backed libraries).
-# One, because the process this default is aimed at is the daemon: steps
-# 2-4 are seconds of work on this data volume, and a second polars thread
-# buys nothing next to the web server it would be taking a core from.
+# Half the box: one thread on the 2-vCPU deployment box, where steps 2-4 are
+# seconds of work either way and a second thread would be taken from the web
+# server; eight on a 16-core development machine, where nothing else wants
+# them and steps 2-4 are the bulk of a re-run.
 #
-# The web UI wants a wider cap -- someone is waiting on that work -- but
-# the cap has to be applied from this package's `__init__` (see there for
-# why), which runs long before anything knows which entry point it's under.
-# So the split lives in the environment instead of in the code: the `web`
-# service sets CTS1_POLARS_THREADS=2 in docker-compose.yml. That's the
-# right place for it anyway, since it's a property of the deployment rather
-# than of the web UI.
-DEFAULT_POLARS_THREADS = env_int("CTS1_POLARS_THREADS", 1)
+# A deployment can still pin it per service -- the cap has to be applied
+# from this package's `__init__` (see there for why), which runs long before
+# anything knows which entry point it's under, so the daemon/web split lives
+# in docker-compose.yml rather than in the code.
+DEFAULT_POLARS_THREADS = env_int("CTS1_POLARS_THREADS", half_the_cores())
 
 # Step 1's decoder concurrency: how many observations are decoded at once,
 # each running native CPU-bound decoders (askew_demod_from_file,
-# sso_rx_replay, gr_satellites x2) as subprocesses. At the old default of 4
-# on a 2-vCPU box this alone was a 2x oversubscription before polars,
-# DuckDB or the web server got a look in.
-DEFAULT_DECODER_WORKERS = env_int("CTS1_DECODER_WORKERS", 2)
+# sso_rx_replay, gr_satellites x2) as subprocesses. A flat 4 was a 2x
+# oversubscription of the deployment box before polars, DuckDB or the web
+# server got a look in; half the cores is 2 there and 8 on a 16-core
+# development machine, which is where a backfill's wall-clock time actually
+# comes from. Never below 2, so one slow observation can't stall the queue
+# on a 1-core box.
+DEFAULT_DECODER_WORKERS = env_int("CTS1_DECODER_WORKERS", half_the_cores(minimum=2))
 
 # Downloads in flight inside a single observation's satnogs_client_live_data
 # call -- and this pool is nested inside the decoder pool above, so the
-# real ceiling is this times `DEFAULT_DECODER_WORKERS`. These are
-# I/O-bound, so the cap is about sockets and buffered response bodies
-# rather than CPU; the old default of 50 (200 with the nesting) was enough
-# concurrent connections to be rude to SatNOGS as well as expensive here.
+# real ceiling is this times `DEFAULT_DECODER_WORKERS`. Deliberately *not*
+# scaled with the box: this one is about how many sockets we open against
+# SatNOGS's servers, not about local CPU, and the old default of 50 (200
+# with the nesting) was enough concurrent connections to be rude. Eight
+# still rises to 64 in flight on a 16-core machine, via the decoder pool.
 DEFAULT_DEMOD_DOWNLOAD_WORKERS = env_int("CTS1_DEMOD_DOWNLOAD_WORKERS", 8)
 
 # How much nicer than normal the daemon runs -- see

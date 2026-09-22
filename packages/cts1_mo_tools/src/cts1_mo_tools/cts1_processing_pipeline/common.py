@@ -6,6 +6,7 @@ __all__ = [
     "DEFAULT_DUCKDB_MEMORY_LIMIT",
     "DEFAULT_DUCKDB_THREADS",
     "connect_duckdb",
+    "default_duckdb_memory_limit",
     "drop_timezones_for_excel",
 ]
 
@@ -15,28 +16,34 @@ from typing import TYPE_CHECKING
 import duckdb
 import polars as pl
 
+from cts1_mo_tools.cts1_processing_pipeline import resource_limits
+
 if TYPE_CHECKING:
     from pathlib import Path
 
-# DuckDB otherwise defaults to ~80% of *host* RAM -- far more than this
-# pipeline's single-satellite data volume needs, and enough to crowd out
-# everything else on a small deployment box (see
-# `cts1_mo_tools/docs/resource-tuning.md`).
-#
-# Unlike a container memory cap, this one can't get anything OOM-killed:
-# DuckDB spills to its temp directory when it hits this, and only raises
-# `duckdb.OutOfMemoryException` if it can't. So the failure mode to look
-# for if this is too low is an error in the log, not a dead daemon.
-# Overridable (e.g. `CTS1_DUCKDB_MEMORY_LIMIT=1GB`) for a big backfill.
-DEFAULT_DUCKDB_MEMORY_LIMIT = os.environ.get("CTS1_DUCKDB_MEMORY_LIMIT", "500MB")
+# Limit DuckDB to 1/8th of the host's memory, clamped within 500MB to 4GB.
+_DUCKDB_MEMORY_SHARE = 8
+_DUCKDB_MEMORY_FLOOR_MB = 500
+_DUCKDB_MEMORY_CEILING_MB = 4000
 
-# ...and, likewise, defaults to one thread per *host* core, on top of the
-# thread pools polars and step 1's decoder pool have already sized
-# themselves from the same core count (see `resource_limits`). One thread
-# is plenty for the queries here, which are appends and full-table exports
-# over a single satellite's packets rather than anything that parallelizes
-# interestingly.
-DEFAULT_DUCKDB_THREADS = 1
+
+def default_duckdb_memory_limit() -> str:
+    """DuckDB's working-memory cap for this box -- see the comment above."""
+    usable = resource_limits.usable_memory_bytes()
+    if usable is None:
+        return f"{_DUCKDB_MEMORY_FLOOR_MB}MB"
+    megabytes = usable // _DUCKDB_MEMORY_SHARE // 1_000_000
+    clamped = min(max(megabytes, _DUCKDB_MEMORY_FLOOR_MB), _DUCKDB_MEMORY_CEILING_MB)
+    return f"{clamped}MB"
+
+
+DEFAULT_DUCKDB_MEMORY_LIMIT = (
+    os.environ.get("CTS1_DUCKDB_MEMORY_LIMIT") or default_duckdb_memory_limit()
+)
+
+DEFAULT_DUCKDB_THREADS = resource_limits.env_int(
+    "CTS1_DUCKDB_THREADS", resource_limits.half_the_cores()
+)
 
 
 def connect_duckdb(
