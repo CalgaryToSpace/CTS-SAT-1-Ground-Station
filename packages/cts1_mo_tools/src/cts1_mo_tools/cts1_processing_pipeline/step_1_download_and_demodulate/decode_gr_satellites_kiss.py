@@ -99,6 +99,7 @@ def parse_kiss_file(data: bytes, *, launch_time_ms: int) -> list[dict[str, Any]]
                 "data_hex": payload.hex(),
                 "data_length_bytes": len(payload),
                 "time_in_file_ms": time_in_file_ms,
+                "quality_tier": "good",
             }
         )
         pending_timestamp_ms = None  # each timestamp frame covers one PDU

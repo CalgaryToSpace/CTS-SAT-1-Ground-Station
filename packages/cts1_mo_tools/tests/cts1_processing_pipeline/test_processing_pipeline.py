@@ -1,5 +1,7 @@
+import polars as pl
 import pytest
 from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate import (
+    db,
     decode_satnogs_data_demod,
 )
 from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate.decode_askew_demod import (  # noqa: E501
@@ -55,10 +57,13 @@ def test_parse_forensics_line_frame() -> None:
         "rs_correctable": False,
         "data_hex": "c2228a001091",
         "data_length_bytes": 6,
+        "quality_tier": "believable",
     }
 
 
-def test_parse_forensics_line_frame_rs_corrected() -> None:
+def test_parse_forensics_line_frame_rs_corrected_crc_fail() -> None:
+    # RS corrected the codeword, but the CSP CRC-32C trailer doesn't verify:
+    # the frame is plausible, not trustworthy, so it isn't "good".
     line = (
         '{"filename":"sample.ogg","time_in_file_ms":45802.229,'
         '"rssi":-2.1,"rs":3,"data_base64":"wiKKABCR"}'
@@ -71,7 +76,38 @@ def test_parse_forensics_line_frame_rs_corrected() -> None:
         "rs_correctable": True,
         "data_hex": "c2228a001091",
         "data_length_bytes": 6,
+        "quality_tier": "rs_correctable_crc_fail",
     }
+
+
+def test_parse_forensics_line_frame_rs_corrected_crc_pass() -> None:
+    # Same frame, with a valid CRC-32C trailer over the payload.
+    line = (
+        '{"filename":"sample.ogg","time_in_file_ms":45802.229,'
+        '"rssi":-2.1,"rs":3,"data_base64":"wiKKABCRsaVdtg=="}'
+    )
+    row = parse_forensics_line(line)
+    assert row == {
+        "time_in_file_ms": 45802.229,
+        "rssi_db": -2.1,
+        "rs_corrected_error_count": 3,
+        "rs_correctable": True,
+        "data_hex": "c2228a001091b1a55db6",
+        "data_length_bytes": 10,
+        "quality_tier": "good",
+    }
+
+
+def test_parse_forensics_line_frame_rs_uncorrectable_crc_pass() -> None:
+    # A passing CRC over a known-damaged codeword doesn't promote the frame:
+    # RS-uncorrectable stays "believable".
+    line = (
+        '{"filename":"sample.ogg","time_in_file_ms":45802.229,'
+        '"rssi":-2.1,"rs":-2,"data_base64":"wiKKABCRsaVdtg=="}'
+    )
+    row = parse_forensics_line(line)
+    assert row is not None
+    assert row["quality_tier"] == "believable"
 
 
 def test_parse_forensics_line_no_decode() -> None:
@@ -107,7 +143,7 @@ def test_parse_askew_line_frame() -> None:
     line = (
         '{"data_length_bytes":138,"time_in_file_ms":279888.092,'
         '"rs_corrected_error_count":0,"rs_correctable":true,"crc_pass":true,'
-        '"rssi_db":-3.4,"data_hex":"c2a28a00"}'
+        '"rssi_db":-3.4,"data_hex":"c2a28a00","tier":"good"}'
     )
     row = parse_askew_line(line)
     assert row == {
@@ -117,6 +153,7 @@ def test_parse_askew_line_frame() -> None:
         "rs_corrected_error_count": 0,
         "rs_correctable": True,
         "rssi_db": -3.4,
+        "quality_tier": "good",
     }
 
 
@@ -185,6 +222,7 @@ def test_parse_kiss_file_timestamp_then_data() -> None:
             "data_length_bytes": 3,
             "data_hex": "aabbcc",
             "time_in_file_ms": 12_345,
+            "quality_tier": "good",
         }
     ]
 
@@ -281,3 +319,52 @@ def test_run_satnogs_data_demod_discards_pngs_and_untimestamped(
     assert rows[0]["satnogs_demod_url"] == _DEMOD_URL_BASE
     assert rows[0]["received_at"].isoformat() == "2026-08-12T19:36:50+00:00"
     assert rows[0]["data_hex"] == "0102"
+
+
+def _run_one_demod_packet(
+    monkeypatch: pytest.MonkeyPatch, data: bytes
+) -> dict[str, object]:
+    def fake_download_one(_url: str) -> bytes:
+        return data
+
+    monkeypatch.setattr(decode_satnogs_data_demod, "_download_one", fake_download_one)
+    rows = decode_satnogs_data_demod.run_satnogs_data_demod(
+        [{"payload_demod": _DEMOD_URL_BASE}],
+        observation_id=14759295,
+        max_workers=1,
+    )
+    assert len(rows) == 1
+    return rows[0]
+
+
+def test_run_satnogs_data_demod_tier_good_when_crc_verifies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    packet = bytes.fromhex("c2228a001091b1a55db6")  # payload + valid CRC-32C
+    assert _run_one_demod_packet(monkeypatch, packet)["quality_tier"] == "good"
+
+
+def test_run_satnogs_data_demod_tier_assumes_crc_absent_otherwise(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The same packet as reported by a station that strips the CRC trailer.
+    # Nothing distinguishes that from a wrong trailer, and measurement says
+    # stripped is overwhelmingly the real case, so it isn't tiered as a fail.
+    packet = bytes.fromhex("c2228a001091")
+    assert (
+        _run_one_demod_packet(monkeypatch, packet)["quality_tier"]
+        == "crc_absent_assumed_good"
+    )
+
+
+def test_format_counts_orders_quality_tiers_best_first() -> None:
+    df = pl.DataFrame({"quality_tier": ["believable", "good", "good", "sketchy", None]})
+    assert (
+        db.format_counts(df, "quality_tier", order=db.QUALITY_TIER_ORDER)
+        == "good=2, believable=1, <none>=1, sketchy=1"
+    )
+
+
+def test_format_counts_returns_none_for_missing_column() -> None:
+    df = pl.DataFrame({"decoder": ["askew_demod_from_file"]})
+    assert db.format_counts(df, "quality_tier") is None

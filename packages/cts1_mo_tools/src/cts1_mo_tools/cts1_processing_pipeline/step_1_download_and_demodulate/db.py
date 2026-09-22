@@ -19,12 +19,14 @@ from __future__ import annotations
 
 __all__ = [
     "DECODER_RUNS_TABLE",
+    "QUALITY_TIER_ORDER",
     "RAW_OBSERVATIONS_TABLE",
     "RAW_PACKETS_TABLE",
     "already_decoded_pairs",
     "append_packets",
     "connect",
     "export_parquets",
+    "format_counts",
     "record_decoder_runs",
     "upsert_observations",
 ]
@@ -42,12 +44,24 @@ from cts1_mo_tools.cts1_processing_pipeline.common import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
     from pathlib import Path
 
 RAW_OBSERVATIONS_TABLE = "raw_observations"
 RAW_PACKETS_TABLE = "raw_packets"
 DECODER_RUNS_TABLE = "decoder_runs"
+
+# Quality tiers, best first; unknown tiers sort after these, alphabetically.
+# "crc_absent_assumed_good" is satnogs_data_demod-only -- FEC already ran, but
+# its packets arrive with the CSP CRC-32C trailer sometimes stripped, and an
+# absent trailer can't be told from a wrong one.
+QUALITY_TIER_ORDER = (
+    "good",
+    "crc_absent_assumed_good",
+    "rs_correctable_crc_fail",
+    "believable",
+    "candidate",
+)
 
 
 def connect(
@@ -192,6 +206,28 @@ def upsert_observations(
     logger.info(f"{RAW_OBSERVATIONS_TABLE}: upserted {len(df)} row(s)")
 
 
+def format_counts(
+    df: pl.DataFrame, col: str, *, order: Sequence[str] = ()
+) -> str | None:
+    """Render "a=2, b=1" counts of `col`'s values, or None if `col` is absent.
+
+    Values listed in `order` come first, in that order; anything else
+    (including nulls) follows alphabetically.
+    """
+    if col not in df.columns:
+        return None
+
+    ranks = {value: rank for rank, value in enumerate(order)}
+    counts = sorted(
+        (
+            ("<none>" if value is None else str(value), count)
+            for value, count in df[col].value_counts().rows()
+        ),
+        key=lambda pair: (ranks.get(pair[0], len(ranks)), pair[0]),
+    )
+    return ", ".join(f"{value}={count}" for value, count in counts)
+
+
 def append_packets(con: duckdb.DuckDBPyConnection, df: pl.DataFrame) -> None:
     """Append decoded-packet rows to raw_packets."""
     if df.is_empty():
@@ -210,14 +246,12 @@ def append_packets(con: duckdb.DuckDBPyConnection, df: pl.DataFrame) -> None:
     finally:
         con.unregister("_incoming_packets")
 
-    if "decoder" in df.columns:
-        by_decoder = ", ".join(
-            f"{decoder}={count}"
-            for decoder, count in df["decoder"].value_counts().sort("decoder").rows()
-        )
-        logger.info(f"{RAW_PACKETS_TABLE}: appended {len(df)} row(s) ({by_decoder})")
-    else:
-        logger.info(f"{RAW_PACKETS_TABLE}: appended {len(df)} row(s)")
+    breakdowns = [
+        format_counts(df, "decoder"),
+        format_counts(df, "quality_tier", order=QUALITY_TIER_ORDER),
+    ]
+    suffix = "".join(f" ({part})" for part in breakdowns if part)
+    logger.info(f"{RAW_PACKETS_TABLE}: appended {len(df)} row(s){suffix}")
 
 
 def record_decoder_runs(
