@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
-from . import daemon_signals
+from . import daemon_signals, resource_limits
 from .daemon_signals import DaemonState, StatusReporter
 from .step_1_download_and_demodulate import pipeline as step_1_pipeline
 from .step_2_deduplicate_packets import pipeline as step_2_pipeline
@@ -136,7 +136,7 @@ def run(  # noqa: PLR0913
     start: str = "24 hours",
     interval: float = 15.0,
     limit: int | None = None,
-    workers: int = 4,
+    workers: int = resource_limits.DEFAULT_DECODER_WORKERS,
     temp_dir: Path | None = None,
     force_rerun: bool = False,
     tools: tuple[str, ...] | None = None,

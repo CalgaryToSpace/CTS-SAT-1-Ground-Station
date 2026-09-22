@@ -10,6 +10,17 @@ services:
       dockerfile: packages/cts1_mo_tools/Dockerfile.daemon
     environment:
       CTS1_DATA_DIR: /opt/cts1_processing_pipeline
+      # Tuned for the 2-vCPU / 3 GB deployment box: a refresh shouldn't be
+      # noticeable to someone using the web UI while it runs. The code
+      # already defaults to these values (see resource_limits.py); they're
+      # repeated here because this file is where you'd actually change them
+      # -- e.g. raise CTS1_DECODER_WORKERS for a one-off backfill nobody is
+      # browsing during. Full rundown of every knob here:
+      # packages/cts1_mo_tools/docs/resource-tuning.md
+      CTS1_DECODER_WORKERS: "2" # observations decoded at once
+      CTS1_DEMOD_DOWNLOAD_WORKERS: "8" # downloads in flight per observation
+      CTS1_POLARS_THREADS: "1" # steps 2-4 are seconds of work either way
+      CTS1_DAEMON_NICENESS: "10" # yield the CPU to the web server
     env_file:
       - .env # SATNOGS_NETWORK_API_KEY, if you have one -- see .env.sample
     volumes:
@@ -20,6 +31,19 @@ services:
       - "24 hours"
       - --interval
       - "15"
+    # A hard backstop under the in-process caps above.
+    # Memory is sized against DuckDB's own
+    # 500MB cap (see common.py) with room for polars and the decoder
+    # subprocesses on top. `memswap_limit` is the RAM+swap ceiling, so the
+    # 400m of headroom over `mem_limit` is all the swap a decode run can
+    # ever take -- on this box (btrfs + zswap, 4 GB of swap) a pipeline run
+    # that swaps freely costs the web server far more than the run saves,
+    # but cutting swap off entirely (memswap_limit == mem_limit) would turn
+    # a heavy backfill into an OOM-kill/restart loop instead.
+    cpus: 1.5
+    mem_limit: 1600m
+    memswap_limit: 2000m
+    cpu_shares: 512 # half the default weight, so `web` wins any contention
     logging: *default-logging
     restart: unless-stopped
 
@@ -29,12 +53,18 @@ services:
       dockerfile: packages/cts1_mo_tools/Dockerfile.web
     environment:
       CTS1_DATA_DIR: /opt/cts1_processing_pipeline
+      CTS1_POLARS_THREADS: "2" # someone is waiting on this work, unlike the daemon's
     env_file:
       - .env # CTS1_WEB_STORAGE_SECRET, if you want one unique to this deployment
     volumes:
       - /opt/cts1_processing_pipeline:/opt/cts1_processing_pipeline # writable: the web UI drops daemon_pipeline_trigger.json here
     ports:
       - "127.0.0.1:8089:8089" # localhost only; nginx (below) is the public path
+    # No `cpus` cap: the web server is the one thing here that should be
+    # able to take the whole box for the moment it needs to. The default
+    # cpu_shares (1024, twice the daemon's) is what makes it win when the
+    # daemon is mid-refresh.
+    mem_limit: 900m
     logging: *default-logging
     restart: unless-stopped
 

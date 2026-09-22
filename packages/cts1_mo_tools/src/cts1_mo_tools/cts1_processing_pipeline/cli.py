@@ -35,7 +35,7 @@ from dotenv import load_dotenv
 from loguru import logger
 from tyro.conf import OmitSubcommandPrefixes
 
-from . import daemon
+from . import daemon, resource_limits
 from .step_1_download_and_demodulate import pipeline as step_1_download_and_demodulate
 from .step_2_deduplicate_packets import pipeline as step_2_deduplicate_packets
 from .step_3_decode_packets import pipeline as step_3_decode_packets
@@ -59,9 +59,11 @@ class Step1Args:
     limit: int | None = None
     """Cap the number of observations decoded this run (for testing)."""
 
-    workers: int = 4
+    workers: int = resource_limits.DEFAULT_DECODER_WORKERS
     """Concurrency for the decoders (sso_rx_replay, gr_satellites --hexdump,
-    gr_satellites --kiss_out, satnogs_data_demod)."""
+    gr_satellites --kiss_out, satnogs_data_demod). Defaults low so a run
+    doesn't saturate a small box out from under the web UI -- see
+    `resource_limits`."""
 
     temp_dir: Path | None = None
     """Directory to create per-observation temp dirs (audio
@@ -118,7 +120,7 @@ class DaemonArgs:
     limit: int | None = None
     """Cap the number of observations decoded per step-1 run (for testing)."""
 
-    workers: int = 4
+    workers: int = resource_limits.DEFAULT_DECODER_WORKERS
     """Concurrency for the decoders, same as step 1."""
 
     temp_dir: Path | None = None
@@ -171,6 +173,11 @@ def main() -> None:
         level="DEBUG" if args.debug else "INFO",
         format="<green>{time:HH:mm:ss}</green> | <level>{level:<8}</level> | {message}",
     )
+
+    # Nothing is waiting on a pipeline run, so it yields the CPU to
+    # whatever is (the web UI, on the deployment box) -- and every decoder
+    # subprocess inherits this. See `resource_limits`.
+    resource_limits.lower_process_priority()
 
     try:
         if isinstance(args.command, Step1Args):

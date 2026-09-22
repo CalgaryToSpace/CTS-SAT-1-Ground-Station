@@ -29,6 +29,8 @@ from typing import Any
 import requests
 from loguru import logger
 
+from cts1_mo_tools.cts1_processing_pipeline import resource_limits
+
 DECODER_NAME = "satnogs_data_demod"
 
 _FILENAME_RE = re.compile(
@@ -109,7 +111,7 @@ def run_satnogs_data_demod(
     demoddata: list[dict[str, Any]],
     *,
     observation_id: int,
-    max_workers: int = 50,
+    max_workers: int = resource_limits.DEFAULT_DEMOD_DOWNLOAD_WORKERS,
 ) -> list[dict[str, Any]]:
     """Download every `payload_demod` URL, one row per packet.
 
@@ -123,6 +125,9 @@ def run_satnogs_data_demod(
             SatNOGS API (each entry has a `payload_demod` URL).
         observation_id: The observation these entries belong to, for logging.
         max_workers: Size of the download pool spun up for this call.
+            Kept small on purpose -- this pool is nested inside the
+            caller's, so the real ceiling is this times the decoder
+            concurrency (see `resource_limits`).
 
     Returns:
         One dict per successfully downloaded packet whose filename carried a
