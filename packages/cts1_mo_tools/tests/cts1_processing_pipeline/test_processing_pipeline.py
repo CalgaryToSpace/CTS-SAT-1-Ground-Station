@@ -1,5 +1,7 @@
+import polars as pl
 import pytest
 from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate import (
+    db,
     decode_satnogs_data_demod,
 )
 from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate.decode_askew_demod import (  # noqa: E501
@@ -285,3 +287,16 @@ def test_run_satnogs_data_demod_discards_pngs_and_untimestamped(
     assert rows[0]["satnogs_demod_url"] == _DEMOD_URL_BASE
     assert rows[0]["received_at"].isoformat() == "2026-08-12T19:36:50+00:00"
     assert rows[0]["data_hex"] == "0102"
+
+
+def test_format_counts_orders_quality_tiers_best_first() -> None:
+    df = pl.DataFrame({"quality_tier": ["believable", "good", "good", "sketchy", None]})
+    assert (
+        db.format_counts(df, "quality_tier", order=db.QUALITY_TIER_ORDER)
+        == "good=2, believable=1, <none>=1, sketchy=1"
+    )
+
+
+def test_format_counts_returns_none_for_missing_column() -> None:
+    df = pl.DataFrame({"decoder": ["askew_demod_from_file"]})
+    assert db.format_counts(df, "quality_tier") is None
