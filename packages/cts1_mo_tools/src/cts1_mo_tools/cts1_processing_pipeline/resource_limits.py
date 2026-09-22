@@ -1,5 +1,7 @@
 """Caps on how much of a small box this pipeline is allowed to take.
 
+### Slop Explanation
+
 The daemon and the web UI are deployed side by side on one small VPS (2
 vCPUs, 3 GB RAM), so every refresh the daemon runs is competing for CPU,
 RAM and disk with the web server serving the very data it's refreshing.
@@ -149,35 +151,16 @@ def usable_memory_bytes() -> int | None:
 
 
 # Threads this process gives polars (and the other rayon-backed libraries).
-# Half the box: one thread on the 2-vCPU deployment box, where steps 2-4 are
-# seconds of work either way and a second thread would be taken from the web
-# server; eight on a 16-core development machine, where nothing else wants
-# them and steps 2-4 are the bulk of a re-run.
-#
-# A deployment can still pin it per service -- the cap has to be applied
-# from this package's `__init__` (see there for why), which runs long before
-# anything knows which entry point it's under, so the daemon/web split lives
-# in docker-compose.yml rather than in the code.
 DEFAULT_POLARS_THREADS = env_int("CTS1_POLARS_THREADS", half_the_cores())
 
 # Step 1's decoder concurrency: how many observations are decoded at once,
 # each running native CPU-bound decoders (askew_demod_from_file,
-# sso_rx_replay, gr_satellites x2) as subprocesses. A flat 4 was a 2x
-# oversubscription of the deployment box before polars, DuckDB or the web
-# server got a look in; half the cores is 2 there and 8 on a 16-core
-# development machine, which is where a backfill's wall-clock time actually
-# comes from. Never below 2, so one slow observation can't stall the queue
-# on a 1-core box.
+# sso_rx_replay, gr_satellites x2) as subprocesses, one decoder at a time.
 DEFAULT_DECODER_WORKERS = env_int("CTS1_DECODER_WORKERS", half_the_cores(minimum=2))
 
 # Downloads in flight inside a single observation's satnogs_client_live_data
-# call -- and this pool is nested inside the decoder pool above, so the
-# real ceiling is this times `DEFAULT_DECODER_WORKERS`. Deliberately *not*
-# scaled with the box: this one is about how many sockets we open against
-# SatNOGS's servers, not about local CPU, and the old default of 50 (200
-# with the nesting) was enough concurrent connections to be rude. Eight
-# still rises to 64 in flight on a 16-core machine, via the decoder pool.
-DEFAULT_DEMOD_DOWNLOAD_WORKERS = env_int("CTS1_DEMOD_DOWNLOAD_WORKERS", 8)
+# call. Cheap, tiny downloads from a CDN. Note: These are per-worker.
+DEFAULT_DEMOD_DOWNLOAD_WORKERS = env_int("CTS1_DEMOD_DOWNLOAD_WORKERS", 50)
 
 # How much nicer than normal the daemon runs -- see
 # `lower_process_priority`.

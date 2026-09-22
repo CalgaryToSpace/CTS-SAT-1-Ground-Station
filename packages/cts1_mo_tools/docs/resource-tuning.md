@@ -48,7 +48,7 @@ development machine:
 | Variable | Default | 2 vCPU | 16 core | What it caps |
 | --- | --- | --- | --- | --- |
 | `CTS1_DECODER_WORKERS` | half the cores, min 2 | 2 | 8 | Observations decoded at once in step 1, each running native CPU-bound decoders |
-| `CTS1_DEMOD_DOWNLOAD_WORKERS` | 8 | 8 | 8 | Packet downloads in flight *per observation* -- nested inside the pool above, so the real ceiling is the product. Not scaled with the box: it's how hard we lean on SatNOGS's servers, not on local CPU |
+| `CTS1_DEMOD_DOWNLOAD_WORKERS` | 50 | 50 | 50 | Packet downloads in flight *per observation* -- nested inside the pool above, so the real ceiling is the product. Not scaled with the box: it's how hard we lean on SatNOGS's servers, not on local CPU |
 | `CTS1_POLARS_THREADS` | half the cores | 1 | 8 | polars (and the other rayon/OpenMP pools). Set per service: the `web` service pins it to 2, since someone is waiting on that work |
 | `CTS1_DUCKDB_THREADS` | half the cores | 1 | 8 | DuckDB's thread pool, which otherwise sizes itself from the cores it can see |
 | `CTS1_DUCKDB_MEMORY_LIMIT` | an eighth of usable RAM, 500MB--4GB | `500MB` | `4000MB` | DuckDB's working memory, which otherwise defaults to ~80% of what it can see |
