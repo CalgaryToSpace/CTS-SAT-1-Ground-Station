@@ -9,9 +9,9 @@ FROM rust:1-slim-bookworm AS askew-build
 RUN apt-get update && apt-get install -y --no-install-recommends \
         pkg-config \
     && rm -rf /var/lib/apt/lists/*
-RUN cargo install --locked \
-        --git https://github.com/parker-research/askew-radio-tools \
-        askew-radio-tools
+# Project: https://github.com/parker-research/askew-radio-tools (install latest v0.3.x)
+RUN cargo install --locked --version "~0.3" askew-radio-tools
+RUN which askew_demod_from_file
 
 # ----- Final image ----
 FROM python:3.13-slim-bookworm
