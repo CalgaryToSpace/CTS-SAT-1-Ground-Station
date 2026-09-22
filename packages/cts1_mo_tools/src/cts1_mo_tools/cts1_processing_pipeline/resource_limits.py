@@ -96,7 +96,7 @@ DEFAULT_POLARS_THREADS = env_int("CTS1_POLARS_THREADS", 1)
 # DuckDB or the web server got a look in.
 DEFAULT_DECODER_WORKERS = env_int("CTS1_DECODER_WORKERS", 2)
 
-# Downloads in flight inside a single observation's satnogs_data_demod
+# Downloads in flight inside a single observation's satnogs_client_live_data
 # call -- and this pool is nested inside the decoder pool above, so the
 # real ceiling is this times `DEFAULT_DECODER_WORKERS`. These are
 # I/O-bound, so the cap is about sockets and buffered response bodies

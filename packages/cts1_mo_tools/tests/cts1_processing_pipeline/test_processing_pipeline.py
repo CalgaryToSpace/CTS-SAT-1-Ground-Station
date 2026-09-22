@@ -2,7 +2,7 @@ import polars as pl
 import pytest
 from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate import (
     db,
-    decode_satnogs_data_demod,
+    decode_satnogs_client_live_data,
 )
 from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate.decode_askew_demod import (  # noqa: E501
     parse_askew_line,
@@ -13,7 +13,7 @@ from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate.decod
 from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate.decode_gr_satellites_kiss import (  # noqa: E501
     parse_kiss_file,
 )
-from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate.decode_satnogs_data_demod import (  # noqa: E501
+from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate.decode_satnogs_client_live_data import (  # noqa: E501
     parse_demod_filename_time,
 )
 from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate.decode_sso_rx_replay import (  # noqa: E501
@@ -261,7 +261,7 @@ def test_parse_kiss_file_empty() -> None:
 
 
 # ---------------------------------------------------------------------------
-# satnogs_data_demod filename timestamp parsing
+# satnogs_client_live_data filename timestamp parsing
 # ---------------------------------------------------------------------------
 
 _DEMOD_URL_BASE = (
@@ -292,7 +292,7 @@ def test_parse_demod_filename_time_unrecognized_filename() -> None:
     assert parse_demod_filename_time("https://example.com/not-a-demod-file") is None
 
 
-def test_run_satnogs_data_demod_discards_pngs_and_untimestamped(
+def test_run_satnogs_client_live_data_discards_pngs_and_untimestamped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Mislabelled waterfall PNGs and unparseable filenames never get downloaded."""
@@ -302,9 +302,11 @@ def test_run_satnogs_data_demod_discards_pngs_and_untimestamped(
         requested.append(url)
         return b"\x01\x02"
 
-    monkeypatch.setattr(decode_satnogs_data_demod, "_download_one", fake_download_one)
+    monkeypatch.setattr(
+        decode_satnogs_client_live_data, "_download_one", fake_download_one
+    )
 
-    rows = decode_satnogs_data_demod.run_satnogs_data_demod(
+    rows = decode_satnogs_client_live_data.run_satnogs_client_live_data(
         [
             {"payload_demod": _DEMOD_URL_BASE},
             {"payload_demod": _DEMOD_URL_BASE + ".png"},
@@ -327,8 +329,10 @@ def _run_one_demod_packet(
     def fake_download_one(_url: str) -> bytes:
         return data
 
-    monkeypatch.setattr(decode_satnogs_data_demod, "_download_one", fake_download_one)
-    rows = decode_satnogs_data_demod.run_satnogs_data_demod(
+    monkeypatch.setattr(
+        decode_satnogs_client_live_data, "_download_one", fake_download_one
+    )
+    rows = decode_satnogs_client_live_data.run_satnogs_client_live_data(
         [{"payload_demod": _DEMOD_URL_BASE}],
         observation_id=14759295,
         max_workers=1,
@@ -337,14 +341,14 @@ def _run_one_demod_packet(
     return rows[0]
 
 
-def test_run_satnogs_data_demod_tier_good_when_crc_verifies(
+def test_run_satnogs_client_live_data_tier_good_when_crc_verifies(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     packet = bytes.fromhex("c2228a001091b1a55db6")  # payload + valid CRC-32C
     assert _run_one_demod_packet(monkeypatch, packet)["quality_tier"] == "good"
 
 
-def test_run_satnogs_data_demod_tier_assumes_crc_absent_otherwise(
+def test_run_satnogs_client_live_data_tier_assumes_crc_absent_otherwise(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The same packet as reported by a station that strips the CRC trailer.

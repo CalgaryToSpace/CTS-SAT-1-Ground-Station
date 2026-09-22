@@ -386,7 +386,7 @@ def test_other_decoder_not_matched_becomes_its_own_leftover_row() -> None:
         [
             _packet(
                 observation_id=6,
-                decoder="satnogs_data_demod",
+                decoder="satnogs_client_live_data",
                 received_at="2026-08-12T23:59:00",
                 data_hex="c2a28a00ee",
                 csp_crc_valid=True,  # already has a valid CRC -- no completion needed
@@ -404,7 +404,7 @@ def test_other_decoder_not_matched_becomes_its_own_leftover_row() -> None:
     row = result.row(0, named=True)
     assert row["received_at_source"] == "estimated"
     assert row["received_at"] == _dt("2026-08-12T23:59:00")
-    assert json.loads(row["decoders"]) == ["satnogs_data_demod"]
+    assert json.loads(row["decoders"]) == ["satnogs_client_live_data"]
     assert row["rssi_db"] is None
     assert row["rs_corrected_error_count"] is None
 
@@ -436,7 +436,7 @@ def test_leftover_content_clusters_by_fifteen_minute_gaps() -> None:
         [
             _packet(
                 observation_id=7,
-                decoder="satnogs_data_demod",
+                decoder="satnogs_client_live_data",
                 received_at="2026-08-12T10:05:00",
                 data_hex="c2a28a00ff",
                 csp_crc_valid=True,
@@ -447,7 +447,7 @@ def test_leftover_content_clusters_by_fifteen_minute_gaps() -> None:
             ),
             _packet(
                 observation_id=8,
-                decoder="satnogs_data_demod",
+                decoder="satnogs_client_live_data",
                 received_at="2026-08-12T10:12:00",  # 7 min later, within 15 min
                 data_hex="c2a28a00ff",
                 csp_crc_valid=True,
@@ -458,7 +458,7 @@ def test_leftover_content_clusters_by_fifteen_minute_gaps() -> None:
             ),
             _packet(
                 observation_id=9,
-                decoder="satnogs_data_demod",
+                decoder="satnogs_client_live_data",
                 received_at="2026-08-13T10:05:00",  # a day later
                 data_hex="c2a28a00ff",
                 csp_crc_valid=True,
@@ -478,7 +478,7 @@ def test_leftover_content_clusters_by_fifteen_minute_gaps() -> None:
 
 
 def test_demod_packet_missing_crc_merges_with_sso_baseline() -> None:
-    """satnogs_data_demod sometimes reports a packet with its trailing CSP
+    """satnogs_client_live_data sometimes reports a packet with its trailing CSP
     CRC-32C already stripped; step 2 should complete it and match it to an
     sso_rx_replay baseline of the same underlying payload.
     """
@@ -506,7 +506,7 @@ def test_demod_packet_missing_crc_merges_with_sso_baseline() -> None:
             ),
             _packet(
                 observation_id=2,
-                decoder="satnogs_data_demod",
+                decoder="satnogs_client_live_data",
                 received_at="2026-08-12T19:35:05",
                 data_hex=payload_hex,  # missing its trailing CRC
                 data_length_bytes=len(payload),
@@ -526,12 +526,14 @@ def test_demod_packet_missing_crc_merges_with_sso_baseline() -> None:
     assert row["data_hex"] == full_hex
     assert row["csp_crc_valid"] is True
     assert row["packet_count"] == 2
-    assert json.loads(row["decoders"]) == ["satnogs_data_demod", "sso_rx_replay"]
+    assert json.loads(row["decoders"]) == ["satnogs_client_live_data", "sso_rx_replay"]
 
     sources = json.loads(row["sources"])
     sources_by_decoder = {s["decoder"]: s for s in sources}
     assert sources_by_decoder["sso_rx_replay"]["csp_crc_source"] == "decoded"
-    assert sources_by_decoder["satnogs_data_demod"]["csp_crc_source"] == "computed"
+    assert (
+        sources_by_decoder["satnogs_client_live_data"]["csp_crc_source"] == "computed"
+    )
 
 
 def test_demod_only_packet_gets_a_completed_self_consistent_crc() -> None:
@@ -553,7 +555,7 @@ def test_demod_only_packet_gets_a_completed_self_consistent_crc() -> None:
         [
             _packet(
                 observation_id=5,
-                decoder="satnogs_data_demod",
+                decoder="satnogs_client_live_data",
                 received_at="2026-08-12T19:35:05",
                 data_hex=payload.hex(),
                 data_length_bytes=len(payload),
@@ -581,7 +583,7 @@ def test_demod_only_packet_gets_a_completed_self_consistent_crc() -> None:
 
 
 def test_demod_packet_with_already_valid_crc_is_left_alone() -> None:
-    """A satnogs_data_demod row that already carries a valid CRC shouldn't
+    """A satnogs_client_live_data row that already carries a valid CRC shouldn't
     have a second one appended on top.
     """
     payload = bytes.fromhex("c2a28a0011223344")
@@ -600,7 +602,7 @@ def test_demod_packet_with_already_valid_crc_is_left_alone() -> None:
         [
             _packet(
                 observation_id=6,
-                decoder="satnogs_data_demod",
+                decoder="satnogs_client_live_data",
                 received_at="2026-08-12T19:35:05",
                 data_hex=full_hex,
                 data_length_bytes=len(payload) + 4,
