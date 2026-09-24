@@ -623,6 +623,7 @@ _HEADER_TABLE_HEADER_SLOT = r"""
         <q-th v-for="col in props.cols" :key="col.name" :props="props">
             {{ col.label }}
         </q-th>
+        <q-th auto-width />
     </q-tr>
 """
 _HEADER_TABLE_BODY_SLOT = r"""
@@ -638,6 +639,11 @@ _HEADER_TABLE_BODY_SLOT = r"""
             :style="col.name === 'sha256' ? 'max-width: 220px' : ''">
             {{ col.value }}
         </q-td>
+        <q-td auto-width>
+            <q-btn size="sm" color="primary" flat dense no-caps
+                icon="filter_alt" label="Apply as filter"
+                @click="() => $parent.$emit('apply_filter', props.row.id)" />
+        </q-td>
     </q-tr>
     <q-tr v-show="props.expand" :props="props">
         <q-td colspan="100%">
@@ -650,10 +656,23 @@ _HEADER_TABLE_BODY_SLOT = r"""
 """
 
 
-def _header_candidates_table(candidates: list[BulkHeaderCandidate]) -> None:
+# How far past a header's last receipt "Apply as filter" extends the range:
+# the header goes out at the start of a download, so the chunks that follow it
+# keep arriving for a while afterwards.
+HEADER_FILTER_TRAILING_PADDING = timedelta(minutes=15)
+
+
+def _header_candidates_table(
+    candidates: list[BulkHeaderCandidate],
+    on_apply_filter: Callable[[datetime, datetime], None] | None = None,
+) -> None:
     """Render the found header candidates -- sorted by Received, consecutive
     look-alike entries collapsed into one row expandable (via a `+`/`-`
     button) to its individual timestamps.
+
+    Each row's "Apply as filter" button calls `on_apply_filter` with that
+    group's first receipt through its last receipt plus
+    `HEADER_FILTER_TRAILING_PADDING`, covering the rest of the transmission.
 
     Which one the file's name/size/hash are then cross-checked against is
     `_best_named_candidate`'s call, made by the caller so the same choice
@@ -723,6 +742,17 @@ def _header_candidates_table(candidates: list[BulkHeaderCandidate]) -> None:
     table.add_slot("header", _HEADER_TABLE_HEADER_SLOT)
     table.add_slot("body", _HEADER_TABLE_BODY_SLOT)
 
+    def _apply_filter(e: events.GenericEventArguments) -> None:
+        if on_apply_filter is None:
+            return
+        group = groups[e.args]
+        on_apply_filter(
+            group.members[0].received_at,
+            group.members[-1].received_at + HEADER_FILTER_TRAILING_PADDING,
+        )
+
+    table.on("apply_filter", _apply_filter)
+
 
 def _image_section(
     image: DetectedImage, filename_hint: str | None, *, partial: bool
@@ -768,6 +798,7 @@ def _reassembler_results(
     *,
     policy: ConflictPolicy,
     headers_only: bool = False,
+    on_apply_filter: Callable[[datetime, datetime], None] | None = None,
 ) -> None:
     if not ranges:
         ui.label(
@@ -782,7 +813,7 @@ def _reassembler_results(
 
     with ui.card().classes("w-full"):
         ui.label("Header candidates").classes("text-lg font-bold")
-        _header_candidates_table(candidates)
+        _header_candidates_table(candidates, on_apply_filter)
 
     if headers_only:
         return
@@ -873,6 +904,29 @@ def _make_policy_setter(
     return _set_policy
 
 
+def _make_filter_applier(
+    rows: list[_TimeRangeRow], range_editor: Any
+) -> Callable[[datetime, datetime], None]:
+    """Replace the range list with just `start`-`end` (from a header
+    candidate's "Apply as filter" button). Doesn't re-run the search on its
+    own -- the operator may still want to tweak the range first.
+    """
+
+    def _apply_filter(start: datetime, end: datetime) -> None:
+        rows[:] = [
+            _TimeRangeRow(
+                start=_format_range_input(start), end=_format_range_input(end)
+            )
+        ]
+        range_editor.refresh()
+        ui.notify(
+            f"Time range set to {rows[0].start} - {rows[0].end} (UTC). "
+            "Click Search to apply."
+        )
+
+    return _apply_filter
+
+
 def build_file_reassembler_page(data_dir: Path) -> None:
     parquet_path = data_dir / step_3_pipeline.OUTPUT_FILENAME
     rows: list[_TimeRangeRow] = [_default_time_range_row()]
@@ -960,6 +1014,7 @@ def build_file_reassembler_page(data_dir: Path) -> None:
             _valid_ranges(rows),
             policy=search_state["policy"],
             headers_only=search_state["headers_only"],
+            on_apply_filter=_make_filter_applier(rows, range_editor),
         )
 
     def _search(*, headers_only: bool) -> None:
