@@ -311,6 +311,30 @@ class TestDecodeBeaconBasic:
         result = self._valid(eps_enabled_channels_bitfield=0xDEADBEEF)
         assert result["eps_enabled_channels_bitfield"] == "0xDEADBEEF"
 
+    def test_eps_enabled_channels_list(self) -> None:
+        result = self._valid(
+            eps_enabled_channels_bitfield=(1 << 0) | (1 << 8) | (1 << 13)
+        )
+        assert json.loads(result["eps_enabled_channels_list"]) == [
+            "VBATT_STACK",
+            "3V3_GNSS",
+            "12V_BOOM",
+        ]
+
+    def test_eps_enabled_channels_list_empty(self) -> None:
+        result = self._valid(eps_enabled_channels_bitfield=0)
+        assert json.loads(result["eps_enabled_channels_list"]) == []
+
+    def test_eps_enabled_channels_list_invalid_bits(self) -> None:
+        result = self._valid(
+            eps_enabled_channels_bitfield=(1 << 16) | (1 << 17) | (1 << 31)
+        )
+        assert json.loads(result["eps_enabled_channels_list"]) == [
+            "28V6_CH16_UNUSED",
+            "INVALID_CHANNEL(17)",
+            "INVALID_CHANNEL(31)",
+        ]
+
     def test_is_fs_mounted_bool(self) -> None:
         assert self._valid(is_fs_mounted=1)["is_fs_mounted"] is True
         assert self._valid(is_fs_mounted=0)["is_fs_mounted"] is False
@@ -541,6 +565,13 @@ class TestDecodeBeaconExtended:
         result = self._valid(satellite_name=b"CTS1", uptime_ms=90_000)
         assert result["satellite_name"] == "CTS1"
         assert result["uptime_sec"] == 90.0
+
+    def test_eps_enabled_channels_list(self) -> None:
+        result = self._valid(eps_enabled_channels_bitfield=(1 << 4) | (1 << 12))
+        assert json.loads(result["eps_enabled_channels_list"]) == [
+            "5V_MPI",
+            "12V_MPI",
+        ]
 
     def test_end_version_number(self) -> None:
         result = self._valid(end_version_number=b" X2\x00")
