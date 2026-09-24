@@ -20,3 +20,7 @@ test:
 fmt:
     uv run ruff format .
     uv run ruff check --fix .
+
+# Bootstrap local web UI dev by downloading the deployed server's pipeline output into output/
+bootstrap-dev-data *args:
+    uv run cts1_bootstrap_dev_data {{args}}
