@@ -23,6 +23,7 @@ dependencies = [
     "xlsxwriter>=3.2.0",
     "pillow>=11.0.0",
     "satkit>=0.22.0",
+    "orjson>=3.11.9",
 ]
 
 [project.scripts]

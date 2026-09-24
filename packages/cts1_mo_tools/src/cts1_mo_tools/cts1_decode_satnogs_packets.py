@@ -11,13 +11,13 @@ SQLite format: a "packet" table with (at least) "ts_received", "payload",
 "rs_errs", and "session_dir" columns.
 """
 
-import json
 import sqlite3
 import struct
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, assert_never
 
+import orjson
 import polars as pl
 import tyro
 from loguru import logger
@@ -469,10 +469,10 @@ def decode_adcs_current_state_1(raw: bytes) -> dict[str, Any]:
         "adcs_control_mode": e_numbered(ADCS_CONTROL_MODE_MAP, control_mode),
         "adcs_run_mode": e_numbered(ADCS_RUN_MODE_MAP, run_mode),
         "adcs_asgp4_mode": e_numbered(ADCS_ASGP4_MODE_MAP, asgp4_mode),
-        "adcs_powered_list": json.dumps(enabled),
+        "adcs_powered_list": orjson.dumps(enabled).decode(),
         "adcs_sun_above_local_horizon": bit(23),
-        "adcs_errors": json.dumps(errors),
-        "adcs_flags": json.dumps(flags),
+        "adcs_errors": orjson.dumps(errors).decode(),
+        "adcs_flags": orjson.dumps(flags).decode(),
     }
 
 
