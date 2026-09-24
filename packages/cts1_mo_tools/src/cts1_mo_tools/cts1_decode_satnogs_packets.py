@@ -13,7 +13,7 @@ SQLite format: a "packet" table with (at least) "ts_received", "payload",
 
 import sqlite3
 import struct
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, assert_never
 
@@ -551,6 +551,19 @@ def verify_csp_packet_crc32c(packet: bytes) -> tuple[bool, int, int]:
 # -- Decoders -----------------------------------------------------------------
 
 
+def epoch_ms_to_utc_isoformat(epoch_ms: int) -> str | None:
+    """`epoch_ms` as a plain ISO 8601 UTC timestamp with millisecond
+    precision (e.g. `2023-11-14T22:13:20.000+00:00`), or None if it's
+    unset/invalid (not yet time-synced -- see `MAX_VALID_EPOCH_MS`).
+    """
+    if epoch_ms <= 0 or epoch_ms > MAX_VALID_EPOCH_MS:
+        return None
+    # Integer timedelta math, not `fromtimestamp(ms / 1000)`: avoids float
+    # rounding turning e.g. `.123` into `.122999`.
+    dt = datetime(1970, 1, 1, tzinfo=UTC) + timedelta(milliseconds=epoch_ms)
+    return dt.isoformat(timespec="milliseconds")
+
+
 def decode_beacon_basic_packet(
     payload: bytes, _full_payload: bytes | None = None
 ) -> dict[str, Any]:
@@ -574,16 +587,7 @@ def decode_beacon_basic_packet(
     sat_name = rf["satellite_name"].decode("ascii", errors="replace").rstrip("\x00")
     epoch_ms = rf["unix_epoch_time_ms"]
 
-    if epoch_ms <= 0 or epoch_ms > MAX_VALID_EPOCH_MS:
-        utc_time = None
-    else:
-        utc_time = (
-            datetime.fromtimestamp(
-                epoch_ms / 1000.0,
-                UTC,
-            ).isoformat()
-            + "Z"
-        )
+    utc_time = epoch_ms_to_utc_isoformat(epoch_ms)
 
     data = {
         "packet_type": e(PACKET_TYPE_MAP, rf["packet_type"]),
@@ -595,7 +599,6 @@ def decode_beacon_basic_packet(
             RF_SWITCH_CONTROL_MODE_MAP, rf["active_rf_switch_control_mode"]
         ),
         # Timing
-        "uptime_ms": rf["uptime_ms"],
         "uptime_sec": round(rf["uptime_ms"] / 1000, 3),
         "duration_since_last_uplink_ms": rf["duration_since_last_uplink_ms"],
         "unix_epoch_time_ms": epoch_ms,
@@ -701,16 +704,7 @@ def decode_beacon_extended_packet(
     sat_name = rf["satellite_name"].decode("ascii", errors="replace").rstrip("\x00")
     epoch_ms = rf["unix_epoch_time_ms"]
 
-    if epoch_ms <= 0 or epoch_ms > MAX_VALID_EPOCH_MS:
-        utc_time = None
-    else:
-        utc_time = (
-            datetime.fromtimestamp(
-                epoch_ms / 1000.0,
-                UTC,
-            ).isoformat()
-            + "Z"
-        )
+    utc_time = epoch_ms_to_utc_isoformat(epoch_ms)
 
     data = {
         "packet_type": e(PACKET_TYPE_MAP, rf["packet_type"]),
@@ -722,7 +716,6 @@ def decode_beacon_extended_packet(
             RF_SWITCH_CONTROL_MODE_MAP, rf["active_rf_switch_control_mode"]
         ),
         # Timing
-        "uptime_ms": rf["uptime_ms"],
         "uptime_sec": round(rf["uptime_ms"] / 1000, 3),
         "duration_since_last_uplink_ms": rf["duration_since_last_uplink_ms"],
         "unix_epoch_time_ms": epoch_ms,

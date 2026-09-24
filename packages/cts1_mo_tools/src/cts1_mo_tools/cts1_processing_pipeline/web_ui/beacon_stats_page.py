@@ -12,7 +12,7 @@ __all__ = ["build_beacon_stats_page"]
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path  # noqa: TC003 -- tyro needs this at runtime elsewhere
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from nicegui import ui
 
@@ -22,7 +22,11 @@ from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
 
 from . import data as beacon_data
 from .attitude_view import AttitudePlayer
-from .charts import BEACON_CHART_GROUPS, OTHER_CHART_GROUPS, chart_option
+from .charts import (
+    BEACON_CHART_GROUPS,
+    chart_option,
+    packet_counts_histogram_option,
+)
 from .layout import page_shell
 
 if TYPE_CHECKING:
@@ -32,6 +36,9 @@ if TYPE_CHECKING:
     from .charts import ChartSpec
 
 REFRESH_INTERVAL_SEC = 30.0
+
+# Bucket width for the "SatNOGS Stats" packet-count histogram.
+PACKET_COUNT_WINDOW = timedelta(hours=6)
 
 # label -> hours
 WINDOW_CHOICES: dict[str, float] = {
@@ -240,7 +247,7 @@ def _recent_beacons_table(path: Path, ui_state: dict[str, bool]) -> None:
         ui.table(columns=columns, rows=rows, row_key="received_at").classes("w-full")
 
 
-def _render_chart_group(title: str, specs: list[ChartSpec], df: pl.DataFrame) -> None:
+def _render_chart_group(title: str, options: list[dict[str, Any]]) -> None:
     """One collapsible chart group, with charts mounted lazily on first expand.
 
     An `ui.echart` is a real ECharts instance in the browser (its own canvas,
@@ -250,9 +257,6 @@ def _render_chart_group(title: str, specs: list[ChartSpec], df: pl.DataFrame) ->
     keeps the initial page (and every later re-render) down to whatever the
     user currently has expanded.
     """
-    options = [
-        option for spec in specs if (option := chart_option(spec, df)) is not None
-    ]
     if not options:
         return
 
@@ -280,13 +284,21 @@ def _render_chart_group(title: str, specs: list[ChartSpec], df: pl.DataFrame) ->
 
 def _chart_groups(path: Path, *, since: datetime | None) -> None:
     beacons = beacon_data.load_beacon_window(path, since=since)
-    all_packets = beacon_data.load_packet_window(path, since=since)
+    packet_counts = beacon_data.load_packet_counts_per_window(
+        path, since=since, every=PACKET_COUNT_WINDOW
+    )
 
     for title, specs in BEACON_CHART_GROUPS:
-        _render_chart_group(title, specs, beacons)
+        _render_chart_group(title, _chart_options(specs, beacons))
 
-    for title, specs in OTHER_CHART_GROUPS:
-        _render_chart_group(title, specs, all_packets)
+    histogram = packet_counts_histogram_option(
+        packet_counts, title="Packets Received per 6h Window, by Packet Type"
+    )
+    _render_chart_group("SatNOGS Stats", [histogram] if histogram else [])
+
+
+def _chart_options(specs: list[ChartSpec], df: pl.DataFrame) -> list[dict[str, Any]]:
+    return [option for spec in specs if (option := chart_option(spec, df)) is not None]
 
 
 def _window_label_for_hours(hours: float) -> str:

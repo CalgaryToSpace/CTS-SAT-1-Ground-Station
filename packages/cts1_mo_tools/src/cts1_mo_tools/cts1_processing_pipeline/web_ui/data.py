@@ -20,7 +20,7 @@ __all__ = [
     "load_attitude_window",
     "load_beacon_window",
     "load_bulk_file_downlink_packets",
-    "load_packet_window",
+    "load_packet_counts_per_window",
     "load_tcmd_response_packets",
 ]
 
@@ -34,7 +34,7 @@ from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from datetime import datetime
+    from datetime import datetime, timedelta
     from pathlib import Path
 
 DEFAULT_PARQUET_PATH = (
@@ -63,21 +63,42 @@ def _scan(path: Path) -> pl.LazyFrame | None:
     return pl.scan_parquet(path)
 
 
-def load_packet_window(
-    path: Path = DEFAULT_PARQUET_PATH, *, since: datetime | None = None
+def load_packet_counts_per_window(
+    path: Path = DEFAULT_PARQUET_PATH,
+    *,
+    since: datetime | None = None,
+    every: timedelta,
 ) -> pl.DataFrame:
-    """Every decoded packet (any type) received at/after `since`, oldest first.
+    """Decoded packet counts (any type) received at/after `since`, bucketed
+    into `every`-wide windows of `received_at` and split by `packet_type`.
 
-    `since=None` means no time filter (the whole file). The `received_at`
-    comparison is applied on the lazy frame so polars can push it down into
-    the parquet scan rather than filtering after loading every row.
+    One row per non-empty `(window_start, packet_type)` pair, oldest window
+    first. Windows are aligned to the Unix epoch (so 6h windows start at
+    00/06/12/18 UTC). The aggregation runs inside the lazy scan, so only the
+    two needed columns are ever read, and only the (tiny) counts table is
+    materialized.
     """
     lf = _scan(path)
     if lf is None:
-        return pl.DataFrame()
+        return pl.DataFrame(
+            schema={
+                "window_start": pl.Datetime("us", "UTC"),
+                "packet_type": pl.String,
+                "count": pl.UInt32,
+            }
+        )
+    lf = lf.select("received_at", "packet_type")
     if since is not None:
         lf = lf.filter(pl.col("received_at") >= since)
-    return lf.sort("received_at").collect()
+    return (
+        lf.group_by(
+            window_start=pl.col("received_at").dt.truncate(every),
+            packet_type=pl.col("packet_type"),
+        )
+        .agg(count=pl.len())
+        .sort("window_start", "packet_type")
+        .collect()
+    )
 
 
 def load_beacon_window(

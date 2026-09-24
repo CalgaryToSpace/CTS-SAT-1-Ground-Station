@@ -10,7 +10,12 @@ get a category y-axis instead of a numeric one, since they aren't really
 
 from __future__ import annotations
 
-__all__ = ["BEACON_CHART_GROUPS", "OTHER_CHART_GROUPS", "ChartSpec", "chart_option"]
+__all__ = [
+    "BEACON_CHART_GROUPS",
+    "ChartSpec",
+    "chart_option",
+    "packet_counts_histogram_option",
+]
 
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -299,21 +304,6 @@ BEACON_CHART_GROUPS: list[tuple[str, list[ChartSpec]]] = [
     ),
 ]
 
-# -- Non-beacon-specific fields, computed over every decoded packet ----------
-
-OTHER_CHART_GROUPS: list[tuple[str, list[ChartSpec]]] = [
-    (
-        "Link Quality (all packets)",
-        [
-            ChartSpec("RSSI", ["rssi_db"], unit="dB"),
-            ChartSpec(
-                "Reed-Solomon Corrected Errors", ["rs_corrected_error_count"], unit=""
-            ),
-            ChartSpec("Received Packet Length", ["data_length_bytes"], unit="bytes"),
-        ],
-    ),
-]
-
 
 def _numeric_series(df: pl.DataFrame, column: str) -> list[list[Any]]:
     sub = df.select("received_at", column).drop_nulls()
@@ -406,6 +396,52 @@ def chart_option(spec: ChartSpec, df: pl.DataFrame) -> dict[str, Any] | None:
         "legend": {"show": len(available) > 1, "top": 26},
         "xAxis": {"type": "time"},
         "yAxis": {"type": "value", "name": y_label, "scale": True},
+        "dataZoom": [{"type": "inside"}],
+        "series": series,
+    }
+
+
+def packet_counts_histogram_option(
+    counts: pl.DataFrame, *, title: str
+) -> dict[str, Any] | None:
+    """ECharts stacked-bar `option` of packet counts per time window, one
+    stacked series per `packet_type`, or None if there are no packets.
+
+    `counts` is `data.load_packet_counts_per_window`'s output. Windows where a
+    type has no packets are filled with 0 so every stack lines up.
+    """
+    if counts.height == 0:
+        return None
+
+    windows = counts["window_start"].unique().sort()
+    packet_types = counts["packet_type"].unique().sort().to_list()
+    lookup = {
+        (ts, pt): n
+        for ts, pt, n in counts.select(
+            "window_start", "packet_type", "count"
+        ).iter_rows()
+    }
+
+    series = [
+        {
+            "name": packet_type,
+            "type": "bar",
+            "stack": "packets",
+            "data": [
+                [ts.isoformat(), lookup.get((ts, packet_type), 0)] for ts in windows
+            ],
+            "color": _SERIES_COLORS[i % len(_SERIES_COLORS)],
+        }
+        for i, packet_type in enumerate(packet_types)
+    ]
+    return {
+        "animation": False,
+        "title": {"text": title, "textStyle": {"fontSize": 14}},
+        "grid": {"left": 60, "right": 20, "top": 64, "bottom": 30},
+        "tooltip": {"trigger": "axis", "axisPointer": {"type": "shadow"}},
+        "legend": {"show": True, "top": 26, "type": "scroll"},
+        "xAxis": {"type": "time"},
+        "yAxis": {"type": "value", "name": "packets", "minInterval": 1},
         "dataZoom": [{"type": "inside"}],
         "series": series,
     }

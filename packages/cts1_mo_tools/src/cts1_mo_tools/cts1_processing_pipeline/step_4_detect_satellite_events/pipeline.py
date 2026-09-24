@@ -6,7 +6,7 @@ satellite's own onboard clock) carries a handful of counters that only ever
 count up while the satellite keeps running, and reset to (near) zero the
 instant something happens:
 
-  - `uptime_ms`: the OBC's own uptime -- resets on an OBC reboot.
+  - `uptime_sec`: the OBC's own uptime -- resets on an OBC reboot.
   - `eps_uptime_sec`: the EPS's uptime -- resets on an EPS reboot/reset.
   - `duration_since_last_uplink_ms`: time since the last received uplink --
     resets whenever a new uplink command comes in.
@@ -96,7 +96,7 @@ class _EventSpec(NamedTuple):
 # The three counters that only ever count up until the event that resets
 # them -- see the module docstring.
 EVENT_SPECS: tuple[_EventSpec, ...] = (
-    _EventSpec("uptime_ms", "OBC Reboot", 1.0),
+    _EventSpec("uptime_sec", "OBC Reboot", 1000.0),
     _EventSpec("eps_uptime_sec", "EPS Reboot", 1000.0),
     _EventSpec("duration_since_last_uplink_ms", "Uplinked Commands", 1.0),
 )
