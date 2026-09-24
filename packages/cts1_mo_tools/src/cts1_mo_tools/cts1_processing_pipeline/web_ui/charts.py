@@ -18,10 +18,9 @@ __all__ = [
 ]
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-if TYPE_CHECKING:
-    import polars as pl
+import polars as pl
 
 # Palette shared across every multi-series chart on the page.
 _SERIES_COLORS = [
@@ -45,6 +44,13 @@ class ChartSpec:
     unit: str = ""
     categorical: bool = False
     labels: list[str] = field(default_factory=list[str])
+    # Plotted on a second y-axis on the right (subset of `columns`).
+    right_axis_columns: list[str] = field(default_factory=list[str])
+    # Values outside [valid_min, valid_max] are sentinel reports, not real
+    # readings -- they're dropped from the chart only (exports keep them),
+    # since one sentinel point flattens the rest of the graph.
+    valid_min: float | None = None
+    valid_max: float | None = None
 
     def series_label(self, column: str, index: int) -> str:
         if self.labels:
@@ -70,6 +76,7 @@ BEACON_CHART_GROUPS: list[tuple[str, list[ChartSpec]]] = [
                 ["total_tcmd_queued_count", "pending_queued_tcmd_count"],
                 unit="",
                 labels=["total queued", "pending"],
+                right_axis_columns=["pending_queued_tcmd_count"],
             ),
             ChartSpec("Time Sync Source", ["last_time_sync_source"], categorical=True),
         ],
@@ -107,6 +114,7 @@ BEACON_CHART_GROUPS: list[tuple[str, list[ChartSpec]]] = [
                 ["eps_battery_temperature_0_C", "eps_battery_temperature_1_C"],
                 unit="°C",
                 labels=["sensor 0", "sensor 1"],
+                valid_max=300.0,
             ),
             ChartSpec("EPS Uptime", ["eps_uptime_sec"], unit="s"),
             ChartSpec("EPS Fault Count", ["eps_total_fault_count"], unit=""),
@@ -215,6 +223,7 @@ BEACON_CHART_GROUPS: list[tuple[str, list[ChartSpec]]] = [
                 "MPI Last Temperature (extended)",
                 ["mpi_last_temperature_C"],
                 unit="°C",
+                valid_min=-90.0,
             ),
         ],
     ),
@@ -305,8 +314,18 @@ BEACON_CHART_GROUPS: list[tuple[str, list[ChartSpec]]] = [
 ]
 
 
-def _numeric_series(df: pl.DataFrame, column: str) -> list[list[Any]]:
+def _numeric_series(
+    df: pl.DataFrame,
+    column: str,
+    *,
+    valid_min: float | None = None,
+    valid_max: float | None = None,
+) -> list[list[Any]]:
     sub = df.select("received_at", column).drop_nulls()
+    if valid_min is not None:
+        sub = sub.filter(pl.col(column) >= valid_min)
+    if valid_max is not None:
+        sub = sub.filter(pl.col(column) <= valid_max)
     return [
         [ts.isoformat(), value]
         for ts, value in zip(sub["received_at"], sub[column], strict=True)
@@ -367,12 +386,15 @@ def chart_option(spec: ChartSpec, df: pl.DataFrame) -> dict[str, Any] | None:
     series: list[dict[str, Any]] = []
     any_data = False
     for i, column in enumerate(available):
-        data = _numeric_series(df, column)
+        data = _numeric_series(
+            df, column, valid_min=spec.valid_min, valid_max=spec.valid_max
+        )
         if data:
             any_data = True
         series.append(
             {
                 "name": spec.series_label(column, i),
+                "yAxisIndex": 1 if column in spec.right_axis_columns else 0,
                 "type": "line",
                 "showSymbol": True,
                 "symbolSize": 5,
@@ -387,15 +409,44 @@ def chart_option(spec: ChartSpec, df: pl.DataFrame) -> dict[str, Any] | None:
     if not any_data:
         return None
 
-    y_label = spec.unit
+    y_axes: list[dict[str, Any]] = [{"type": "value", "name": spec.unit, "scale": True}]
+    has_right_axis = any(c in spec.right_axis_columns for c in available)
+    if has_right_axis:
+        # With two axes, name each by its series so it's clear which is which.
+        labels = [spec.series_label(c, i) for i, c in enumerate(available)]
+        left_labels = [
+            label
+            for label, c in zip(labels, available, strict=True)
+            if c not in spec.right_axis_columns
+        ]
+        right_labels = [
+            label
+            for label, c in zip(labels, available, strict=True)
+            if c in spec.right_axis_columns
+        ]
+        y_axes[0]["name"] = spec.unit or ", ".join(left_labels)
+        y_axes.append(
+            {
+                "type": "value",
+                "name": spec.unit or ", ".join(right_labels),
+                "scale": True,
+                "position": "right",
+                "splitLine": {"show": False},
+            }
+        )
     return {
         "animation": False,
         "title": {"text": spec.title, "textStyle": {"fontSize": 14}},
-        "grid": {"left": 60, "right": 20, "top": 40, "bottom": 30},
+        "grid": {
+            "left": 60,
+            "right": 60 if has_right_axis else 20,
+            "top": 40,
+            "bottom": 30,
+        },
         "tooltip": {"trigger": "axis"},
         "legend": {"show": len(available) > 1, "top": 26},
         "xAxis": {"type": "time"},
-        "yAxis": {"type": "value", "name": y_label, "scale": True},
+        "yAxis": y_axes if has_right_axis else y_axes[0],
         "dataZoom": [{"type": "inside"}],
         "series": series,
     }
