@@ -321,6 +321,28 @@ class TestDecodeBeaconBasic:
             "12V_BOOM",
         ]
 
+    def test_eps_enabled_channels_list_all_stack_collapsed(self) -> None:
+        # VBATT_STACK, 5V_STACK, 3V3_STACK all on, plus 5V_MPI and 3V3_GNSS.
+        result = self._valid(
+            eps_enabled_channels_bitfield=(1 << 0)
+            | (1 << 1)
+            | (1 << 4)
+            | (1 << 5)
+            | (1 << 8)
+        )
+        assert json.loads(result["eps_enabled_channels_list"]) == [
+            "5V_MPI",
+            "3V3_GNSS",
+            "STACK_X3",
+        ]
+
+    def test_eps_enabled_channels_list_partial_stack_not_collapsed(self) -> None:
+        result = self._valid(eps_enabled_channels_bitfield=(1 << 0) | (1 << 5))
+        assert json.loads(result["eps_enabled_channels_list"]) == [
+            "VBATT_STACK",
+            "3V3_STACK",
+        ]
+
     def test_eps_enabled_channels_list_empty(self) -> None:
         result = self._valid(eps_enabled_channels_bitfield=0)
         assert json.loads(result["eps_enabled_channels_list"]) == []

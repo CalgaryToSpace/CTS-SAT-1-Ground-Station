@@ -284,6 +284,8 @@ EPS_CHANNEL_MAP = {
     15: "3V3_CH15_UNUSED",
     16: "28V6_CH16_UNUSED",
 }
+# Channels powering the main stack; normally always on together.
+EPS_STACK_CHANNELS = frozenset({"VBATT_STACK", "5V_STACK", "3V3_STACK"})
 STM32_RESET_CAUSE_MAP = {
     0: "UNKNOWN",
     1: "LOW_POWER_RESET",
@@ -460,12 +462,18 @@ def decode_eps_enabled_channels(bitfield: int) -> str:
 
     Set bits with no entry in EPS_CHANNEL_MAP are listed as "INVALID_CHANNEL(<n>)",
     after the fallback in `EPS_channel_to_str()`.
+
+    The stack channels are normally always on, so when all of them are enabled
+    they're replaced by a single "STACK_X3" entry at the end of the list.
     """
     enabled = [
         EPS_CHANNEL_MAP.get(bit_num, f"INVALID_CHANNEL({bit_num})")
         for bit_num in range(32)
         if (bitfield >> bit_num) & 1
     ]
+    if EPS_STACK_CHANNELS.issubset(enabled):
+        enabled = [name for name in enabled if name not in EPS_STACK_CHANNELS]
+        enabled.append("STACK_X3")
     return orjson.dumps(enabled).decode()
 
 
