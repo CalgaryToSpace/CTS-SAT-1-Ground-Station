@@ -404,8 +404,11 @@ class TestDecodeBeaconBasic:
     def test_utc_time_non_zero(self) -> None:
         # 1_700_000_000_000 ms → a recognisable ISO timestamp
         result = self._valid(unix_epoch_time_ms=1_700_000_000_000)
-        assert result["utc_time"] is not None
-        assert "2023" in result["utc_time"]
+        assert result["utc_time"] == "2023-11-14T22:13:20.000+00:00"
+
+    def test_utc_time_keeps_milliseconds(self) -> None:
+        result = self._valid(unix_epoch_time_ms=1_700_000_000_123)
+        assert result["utc_time"] == "2023-11-14T22:13:20.123+00:00"
 
     def test_utc_time_zero(self) -> None:
         result = self._valid(unix_epoch_time_ms=0)
