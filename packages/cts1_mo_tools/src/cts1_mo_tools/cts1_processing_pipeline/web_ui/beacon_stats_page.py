@@ -10,6 +10,7 @@ from __future__ import annotations
 
 __all__ = ["build_beacon_stats_page"]
 
+import contextlib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path  # noqa: TC003 -- tyro needs this at runtime elsewhere
 from typing import TYPE_CHECKING, Any
@@ -36,6 +37,10 @@ if TYPE_CHECKING:
     from .charts import ChartSpec
 
 REFRESH_INTERVAL_SEC = 30.0
+
+# How long a chart group's "Loading charts..." indicator waits for the
+# browser to finish mounting its charts before giving up and hiding anyway.
+CHART_MOUNT_TIMEOUT_SEC = 15.0
 
 # Bucket width for the "SatNOGS Stats" packet-count histogram.
 PACKET_COUNT_WINDOW = timedelta(hours=6)
@@ -247,6 +252,58 @@ def _recent_beacons_table(path: Path, ui_state: dict[str, bool]) -> None:
         ui.table(columns=columns, rows=rows, row_key="received_at").classes("w-full")
 
 
+def _open_fullscreen_chart(option: dict[str, Any]) -> None:
+    """Show `option` in a maximized dialog. The dialog (and its ECharts
+    instance) is built on click and deleted on close, so charts nobody
+    enlarges cost nothing extra.
+    """
+    with (
+        ui.dialog().props("maximized") as dialog,
+        ui.card().classes("w-full h-full no-wrap"),
+    ):
+        with ui.row().classes("w-full justify-end"):
+            ui.button(icon="close", on_click=dialog.close).props(
+                "flat round dense"
+            ).tooltip("Close")
+        ui.echart(option).classes("w-full grow")
+    dialog.on("hide", dialog.delete)
+    dialog.open()
+
+
+def _chart_with_fullscreen_button(option: dict[str, Any]) -> None:
+    with ui.element("div").classes("relative w-full"):
+        ui.echart(option).classes("h-72")
+        ui.button(
+            icon="fullscreen", on_click=lambda: _open_fullscreen_chart(option)
+        ).props("flat round dense size=sm").classes("absolute top-0 right-0").tooltip(
+            "Full screen"
+        )
+
+
+async def _wait_for_charts_mounted(grid: ui.element, count: int) -> None:
+    """Resolve once the browser has drawn `count` ECharts canvases inside
+    `grid` (or `CHART_MOUNT_TIMEOUT_SEC` passes). Most of a group's open time
+    is client-side -- loading the ECharts bundle and mounting each instance --
+    so the server finishing its part says nothing about when the charts
+    actually show up.
+    """
+    js = f"""new Promise((resolve) => {{
+        const start = performance.now();
+        const tick = () => {{
+            const el = getHtmlElement({grid.id});
+            if (!el || el.querySelectorAll("canvas").length >= {count}
+                || performance.now() - start > {CHART_MOUNT_TIMEOUT_SEC * 1000}) {{
+                resolve(true);
+            }} else {{
+                requestAnimationFrame(tick);
+            }}
+        }};
+        tick();
+    }})"""
+    with contextlib.suppress(TimeoutError):
+        await ui.run_javascript(js, timeout=CHART_MOUNT_TIMEOUT_SEC + 1)
+
+
 def _render_chart_group(title: str, options: list[dict[str, Any]]) -> None:
     """One collapsible chart group, with charts mounted lazily on first expand.
 
@@ -255,26 +312,32 @@ def _render_chart_group(title: str, options: list[dict[str, Any]]) -> None:
     collapsed (but still-present) panel, is what makes the page laggy. Only
     building a group's charts the first time its panel is actually opened
     keeps the initial page (and every later re-render) down to whatever the
-    user currently has expanded.
+    user currently has expanded. That first open can take a moment, so a
+    loading indicator stays up until the browser has actually drawn them.
     """
     if not options:
         return
 
     built = False
 
-    def _on_toggle(e: events.ValueChangeEventArguments) -> None:
+    async def _on_toggle(e: events.ValueChangeEventArguments) -> None:
         nonlocal built
         if not e.value or built:
             return
         built = True
-        with (
-            container,
-            ui.grid(columns="repeat(auto-fit, minmax(420px, 1fr))").classes(
+        with container:
+            with ui.row().classes("w-full items-center gap-2 p-2") as loading:
+                ui.spinner(size="md")
+                ui.label("Loading charts...").classes("text-grey")
+            with ui.grid(columns="repeat(auto-fit, minmax(420px, 1fr))").classes(
                 "w-full gap-4 p-2"
-            ),
-        ):
-            for option in options:
-                ui.echart(option).classes("h-72")
+            ) as grid:
+                for option in options:
+                    _chart_with_fullscreen_button(option)
+        try:
+            await _wait_for_charts_mounted(grid, len(options))
+        finally:
+            loading.delete()
 
     with ui.expansion(title, value=False, on_value_change=_on_toggle).classes(
         "w-full border rounded"
