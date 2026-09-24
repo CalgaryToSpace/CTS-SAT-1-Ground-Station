@@ -311,6 +311,52 @@ class TestDecodeBeaconBasic:
         result = self._valid(eps_enabled_channels_bitfield=0xDEADBEEF)
         assert result["eps_enabled_channels_bitfield"] == "0xDEADBEEF"
 
+    def test_eps_enabled_channels_list(self) -> None:
+        result = self._valid(
+            eps_enabled_channels_bitfield=(1 << 0) | (1 << 8) | (1 << 13)
+        )
+        assert json.loads(result["eps_enabled_channels_list"]) == [
+            "VBATT_STACK",
+            "3V3_GNSS",
+            "12V_BOOM",
+        ]
+
+    def test_eps_enabled_channels_list_all_stack_collapsed(self) -> None:
+        # VBATT_STACK, 5V_STACK, 3V3_STACK all on, plus 5V_MPI and 3V3_GNSS.
+        result = self._valid(
+            eps_enabled_channels_bitfield=(1 << 0)
+            | (1 << 1)
+            | (1 << 4)
+            | (1 << 5)
+            | (1 << 8)
+        )
+        assert json.loads(result["eps_enabled_channels_list"]) == [
+            "5V_MPI",
+            "3V3_GNSS",
+            "STACK_X3",
+        ]
+
+    def test_eps_enabled_channels_list_partial_stack_not_collapsed(self) -> None:
+        result = self._valid(eps_enabled_channels_bitfield=(1 << 0) | (1 << 5))
+        assert json.loads(result["eps_enabled_channels_list"]) == [
+            "VBATT_STACK",
+            "3V3_STACK",
+        ]
+
+    def test_eps_enabled_channels_list_empty(self) -> None:
+        result = self._valid(eps_enabled_channels_bitfield=0)
+        assert json.loads(result["eps_enabled_channels_list"]) == []
+
+    def test_eps_enabled_channels_list_invalid_bits(self) -> None:
+        result = self._valid(
+            eps_enabled_channels_bitfield=(1 << 16) | (1 << 17) | (1 << 31)
+        )
+        assert json.loads(result["eps_enabled_channels_list"]) == [
+            "28V6_CH16_UNUSED",
+            "INVALID_CHANNEL(17)",
+            "INVALID_CHANNEL(31)",
+        ]
+
     def test_is_fs_mounted_bool(self) -> None:
         assert self._valid(is_fs_mounted=1)["is_fs_mounted"] is True
         assert self._valid(is_fs_mounted=0)["is_fs_mounted"] is False
@@ -443,13 +489,13 @@ class TestDecodeAdcsCurrentState1:
         result = decode_adcs_current_state_1(
             _make_adcs_state_bytes(bit_indices_set=(12,))
         )
-        assert json.loads(result["adcs_enabled"]) == ["CUBECONTROL_SIGNAL"]
+        assert json.loads(result["adcs_powered_list"]) == ["CUBECONTROL_SIGNAL"]
 
     def test_enabled_json_list_multiple_preserves_order(self) -> None:
         result = decode_adcs_current_state_1(
             _make_adcs_state_bytes(bit_indices_set=(22, 12, 19))
         )
-        assert json.loads(result["adcs_enabled"]) == [
+        assert json.loads(result["adcs_powered_list"]) == [
             "CUBECONTROL_SIGNAL",
             "CUBESTAR",
             "MOTOR_DRIVER",
@@ -457,14 +503,14 @@ class TestDecodeAdcsCurrentState1:
 
     def test_enabled_json_list_empty_by_default(self) -> None:
         result = decode_adcs_current_state_1(_make_adcs_state_bytes())
-        assert json.loads(result["adcs_enabled"]) == []
+        assert json.loads(result["adcs_powered_list"]) == []
 
     def test_sun_above_local_horizon_is_separate_bool(self) -> None:
         result = decode_adcs_current_state_1(
             _make_adcs_state_bytes(bit_indices_set=(23,))
         )
         assert result["adcs_sun_above_local_horizon"] is True
-        assert json.loads(result["adcs_enabled"]) == []
+        assert json.loads(result["adcs_powered_list"]) == []
 
     def test_errors_json_list_single(self) -> None:
         result = decode_adcs_current_state_1(
@@ -499,7 +545,7 @@ class TestDecodeAdcsCurrentState1:
         result = decode_adcs_current_state_1(
             _make_adcs_state_bytes(bit_indices_set=(24, 33))
         )
-        assert json.loads(result["adcs_enabled"]) == []
+        assert json.loads(result["adcs_powered_list"]) == []
         assert json.loads(result["adcs_errors"]) == ["CUBESENSE1_COMMS_ERROR"]
         assert json.loads(result["adcs_flags"]) == ["CAM1_SRAM_OVERCURRENT"]
 
@@ -541,6 +587,13 @@ class TestDecodeBeaconExtended:
         result = self._valid(satellite_name=b"CTS1", uptime_ms=90_000)
         assert result["satellite_name"] == "CTS1"
         assert result["uptime_sec"] == 90.0
+
+    def test_eps_enabled_channels_list(self) -> None:
+        result = self._valid(eps_enabled_channels_bitfield=(1 << 4) | (1 << 12))
+        assert json.loads(result["eps_enabled_channels_list"]) == [
+            "5V_MPI",
+            "12V_MPI",
+        ]
 
     def test_end_version_number(self) -> None:
         result = self._valid(end_version_number=b" X2\x00")

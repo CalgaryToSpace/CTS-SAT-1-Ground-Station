@@ -11,13 +11,13 @@ SQLite format: a "packet" table with (at least) "ts_received", "payload",
 "rs_errs", and "session_dir" columns.
 """
 
-import json
 import sqlite3
 import struct
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, assert_never
 
+import orjson
 import polars as pl
 import tyro
 from loguru import logger
@@ -263,6 +263,29 @@ EPS_RESET_CAUSE_MAP = {
     3: "CONTROL_SYSTEM_RESET",
     4: "EMERGENCY_LOW_POWER",
 }
+# Bit index in `eps_enabled_channels_bitfield` -> channel name. Indices match
+# `EPS_CHANNEL_enum_t`, and names match `EPS_channel_to_str()` in the flight software.
+EPS_CHANNEL_MAP = {
+    0: "VBATT_STACK",
+    1: "5V_STACK",
+    2: "5V_CH2_UNUSED",
+    3: "5V_CH3_UNUSED",
+    4: "5V_MPI",
+    5: "3V3_STACK",
+    6: "3V3_CAMERA",
+    7: "3V3_UHF_ANTENNA_DEPLOY",
+    8: "3V3_GNSS",
+    9: "VBATT_CH9_UNUSED",
+    10: "VBATT_CH10_UNUSED",
+    11: "VBATT_CH11_UNUSED",
+    12: "12V_MPI",
+    13: "12V_BOOM",
+    14: "3V3_CH14_UNUSED",
+    15: "3V3_CH15_UNUSED",
+    16: "28V6_CH16_UNUSED",
+}
+# Channels powering the main stack; normally always on together.
+EPS_STACK_CHANNELS = frozenset({"VBATT_STACK", "5V_STACK", "3V3_STACK"})
 STM32_RESET_CAUSE_MAP = {
     0: "UNKNOWN",
     1: "LOW_POWER_RESET",
@@ -434,6 +457,26 @@ def e_numbered(mapping: dict[int, str], value: int) -> str:
     return f"{value} - {e(mapping, value)}"
 
 
+def decode_eps_enabled_channels(bitfield: int) -> str:
+    """Decode the 32-bit EPS enabled channels bitfield to a JSON list of names.
+
+    Set bits with no entry in EPS_CHANNEL_MAP are listed as "INVALID_CHANNEL(<n>)",
+    after the fallback in `EPS_channel_to_str()`.
+
+    The stack channels are normally always on, so when all of them are enabled
+    they're replaced by a single "STACK_X3" entry at the end of the list.
+    """
+    enabled = [
+        EPS_CHANNEL_MAP.get(bit_num, f"INVALID_CHANNEL({bit_num})")
+        for bit_num in range(32)
+        if (bitfield >> bit_num) & 1
+    ]
+    if EPS_STACK_CHANNELS.issubset(enabled):
+        enabled = [name for name in enabled if name not in EPS_STACK_CHANNELS]
+        enabled.append("STACK_X3")
+    return orjson.dumps(enabled).decode()
+
+
 def decode_adcs_current_state_1(raw: bytes) -> dict[str, Any]:
     """Decode the 6-byte ADCS Current State telemetry frame (ID 132, frame 1).
 
@@ -469,10 +512,10 @@ def decode_adcs_current_state_1(raw: bytes) -> dict[str, Any]:
         "adcs_control_mode": e_numbered(ADCS_CONTROL_MODE_MAP, control_mode),
         "adcs_run_mode": e_numbered(ADCS_RUN_MODE_MAP, run_mode),
         "adcs_asgp4_mode": e_numbered(ADCS_ASGP4_MODE_MAP, asgp4_mode),
-        "adcs_enabled": json.dumps(enabled),
+        "adcs_powered_list": orjson.dumps(enabled).decode(),
         "adcs_sun_above_local_horizon": bit(23),
-        "adcs_errors": json.dumps(errors),
-        "adcs_flags": json.dumps(flags),
+        "adcs_errors": orjson.dumps(errors).decode(),
+        "adcs_flags": orjson.dumps(flags).decode(),
     }
 
 
@@ -582,6 +625,9 @@ def decode_beacon_basic_packet(
         ),
         "eps_total_fault_count": rf["eps_total_fault_count"],
         "eps_enabled_channels_bitfield": f"0x{rf['eps_enabled_channels_bitfield']:08X}",
+        "eps_enabled_channels_list": decode_eps_enabled_channels(
+            rf["eps_enabled_channels_bitfield"]
+        ),
         "eps_total_pcu_power_input_W": round(
             rf["eps_total_pcu_power_input_cW"] / 100.0, 2
         ),
@@ -713,6 +759,9 @@ def decode_beacon_extended_packet(
         ),
         "eps_total_fault_count": rf["eps_total_fault_count"],
         "eps_enabled_channels_bitfield": f"0x{rf['eps_enabled_channels_bitfield']:08X}",
+        "eps_enabled_channels_list": decode_eps_enabled_channels(
+            rf["eps_enabled_channels_bitfield"]
+        ),
         "eps_total_pcu_power_input_W": round(
             rf["eps_total_pcu_power_input_cW"] / 100.0, 2
         ),
