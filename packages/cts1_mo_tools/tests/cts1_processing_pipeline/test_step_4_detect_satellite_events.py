@@ -35,7 +35,7 @@ def _beacon(  # noqa: PLR0913
             unix_epoch_time_ms if unix_epoch_time_ms is not None else _epoch_ms(seconds)
         ),
         "packet_type": packet_type,
-        "uptime_ms": uptime_ms,
+        "uptime_sec": uptime_ms / 1000,
         "eps_uptime_sec": eps_uptime_sec,
         "duration_since_last_uplink_ms": duration_since_last_uplink_ms,
         "reboot_reason": reboot_reason,
@@ -62,7 +62,7 @@ def test_no_beacons_returns_no_events() -> None:
             {
                 "unix_epoch_time_ms": _epoch_ms(0),
                 "packet_type": "LOG_MESSAGE",
-                "uptime_ms": None,
+                "uptime_sec": None,
                 "eps_uptime_sec": None,
                 "duration_since_last_uplink_ms": None,
                 "reboot_reason": None,

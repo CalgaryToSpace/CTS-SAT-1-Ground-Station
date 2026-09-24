@@ -595,7 +595,6 @@ def decode_beacon_basic_packet(
             RF_SWITCH_CONTROL_MODE_MAP, rf["active_rf_switch_control_mode"]
         ),
         # Timing
-        "uptime_ms": rf["uptime_ms"],
         "uptime_sec": round(rf["uptime_ms"] / 1000, 3),
         "duration_since_last_uplink_ms": rf["duration_since_last_uplink_ms"],
         "unix_epoch_time_ms": epoch_ms,
@@ -722,7 +721,6 @@ def decode_beacon_extended_packet(
             RF_SWITCH_CONTROL_MODE_MAP, rf["active_rf_switch_control_mode"]
         ),
         # Timing
-        "uptime_ms": rf["uptime_ms"],
         "uptime_sec": round(rf["uptime_ms"] / 1000, 3),
         "duration_since_last_uplink_ms": rf["duration_since_last_uplink_ms"],
         "unix_epoch_time_ms": epoch_ms,

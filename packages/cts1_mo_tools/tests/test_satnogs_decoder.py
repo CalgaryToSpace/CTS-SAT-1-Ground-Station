@@ -287,7 +287,6 @@ class TestDecodeBeaconBasic:
 
     def test_uptime_conversion(self) -> None:
         result = self._valid(uptime_ms=90_000)
-        assert result["uptime_ms"] == 90_000
         assert result["uptime_sec"] == 90.0
 
     def test_battery_voltage_conversion(self) -> None:
