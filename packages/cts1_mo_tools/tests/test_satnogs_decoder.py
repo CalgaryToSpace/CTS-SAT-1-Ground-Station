@@ -443,13 +443,13 @@ class TestDecodeAdcsCurrentState1:
         result = decode_adcs_current_state_1(
             _make_adcs_state_bytes(bit_indices_set=(12,))
         )
-        assert json.loads(result["adcs_enabled"]) == ["CUBECONTROL_SIGNAL"]
+        assert json.loads(result["adcs_powered_list"]) == ["CUBECONTROL_SIGNAL"]
 
     def test_enabled_json_list_multiple_preserves_order(self) -> None:
         result = decode_adcs_current_state_1(
             _make_adcs_state_bytes(bit_indices_set=(22, 12, 19))
         )
-        assert json.loads(result["adcs_enabled"]) == [
+        assert json.loads(result["adcs_powered_list"]) == [
             "CUBECONTROL_SIGNAL",
             "CUBESTAR",
             "MOTOR_DRIVER",
@@ -457,14 +457,14 @@ class TestDecodeAdcsCurrentState1:
 
     def test_enabled_json_list_empty_by_default(self) -> None:
         result = decode_adcs_current_state_1(_make_adcs_state_bytes())
-        assert json.loads(result["adcs_enabled"]) == []
+        assert json.loads(result["adcs_powered_list"]) == []
 
     def test_sun_above_local_horizon_is_separate_bool(self) -> None:
         result = decode_adcs_current_state_1(
             _make_adcs_state_bytes(bit_indices_set=(23,))
         )
         assert result["adcs_sun_above_local_horizon"] is True
-        assert json.loads(result["adcs_enabled"]) == []
+        assert json.loads(result["adcs_powered_list"]) == []
 
     def test_errors_json_list_single(self) -> None:
         result = decode_adcs_current_state_1(
@@ -499,7 +499,7 @@ class TestDecodeAdcsCurrentState1:
         result = decode_adcs_current_state_1(
             _make_adcs_state_bytes(bit_indices_set=(24, 33))
         )
-        assert json.loads(result["adcs_enabled"]) == []
+        assert json.loads(result["adcs_powered_list"]) == []
         assert json.loads(result["adcs_errors"]) == ["CUBESENSE1_COMMS_ERROR"]
         assert json.loads(result["adcs_flags"]) == ["CAM1_SRAM_OVERCURRENT"]
 

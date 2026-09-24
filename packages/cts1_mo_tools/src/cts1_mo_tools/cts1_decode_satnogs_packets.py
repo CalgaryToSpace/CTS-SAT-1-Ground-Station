@@ -469,7 +469,7 @@ def decode_adcs_current_state_1(raw: bytes) -> dict[str, Any]:
         "adcs_control_mode": e_numbered(ADCS_CONTROL_MODE_MAP, control_mode),
         "adcs_run_mode": e_numbered(ADCS_RUN_MODE_MAP, run_mode),
         "adcs_asgp4_mode": e_numbered(ADCS_ASGP4_MODE_MAP, asgp4_mode),
-        "adcs_enabled": json.dumps(enabled),
+        "adcs_powered_list": json.dumps(enabled),
         "adcs_sun_above_local_horizon": bit(23),
         "adcs_errors": json.dumps(errors),
         "adcs_flags": json.dumps(flags),
