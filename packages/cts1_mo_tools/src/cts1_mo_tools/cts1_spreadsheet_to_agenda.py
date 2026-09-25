@@ -466,7 +466,7 @@ def build_summary_comment(rows: list[dict[str, Any]]) -> str:
 
 def spreadsheet_file_to_agenda_file(
     input_file: Path,
-    output_file: Path = Path("agenda_output.txt"),
+    output_file: Path | None = None,
     seed: int | None = None,
     *,
     readable: bool = False,
@@ -478,8 +478,8 @@ def spreadsheet_file_to_agenda_file(
     ----------
     input_file : Path
         The path to the spreadsheet file.
-    output_file : Path, default=Path("agenda_output.txt")
-        The path to the output file.
+    output_file : Path, default=Path(f"packages/cts1_mo_tools/src/cts1_mo_tools/cts1_agenda_files/{input_file.stem}.txt")
+        The path to the output file. Default: cts1_agenda_files/{input_file.stem}.txt
     seed : int | None, default=None
         The random seed to use. If None, a random seed will be used.
     readable : bool, default=False
@@ -491,6 +491,12 @@ def spreadsheet_file_to_agenda_file(
     """
     if seed is not None:
         random.seed(seed)
+
+    if output_file is None:
+        output_file = (
+            Path("packages/cts1_mo_tools/src/cts1_mo_tools/cts1_agenda_files")
+            / f"{input_file.stem}.txt"
+        )
 
     mission_date, mission_start, rows = load_sheet(input_file)
 
