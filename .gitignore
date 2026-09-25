@@ -1,9 +1,9 @@
 # Agenda file directory
-cts1_mo_tools/cts1_agenda_files/
+packages/cts1_mo_tools/src/cts1_mo_tools/cts1_agenda_files/
 
 # Exclude templates
-!cts1_mo_tools/cts1_agenda_files/agenda_spreadsheet_template_example.csv
-!cts1_mo_tools/cts1_agenda_files/agenda_spreadsheet_template_example.xlsx
+!packages/cts1_mo_tools/src/cts1_mo_tools/cts1_agenda_files/agenda_spreadsheet_template_example.csv
+!packages/cts1_mo_tools/src/cts1_mo_tools/cts1_agenda_files/agenda_spreadsheet_template_example.xlsx
 
 # Data web app UI
 .nicegui
