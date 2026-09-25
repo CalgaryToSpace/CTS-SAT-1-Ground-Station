@@ -4,8 +4,8 @@ A NiceGUI dashboard over `everything_decoded.parquet` (step 3's output):
 recent beacon(s) at a glance, plus line/scatter charts for every field in
 the basic and extended beacon packets, grouped by subsystem -- see
 `beacon_stats_page`, `packet_browser_page`, `satellite_events_page`,
-`file_reassembler_page`, `pipeline_status_page`, and `export_page` for the
-individual pages.
+`file_reassembler_page`, `overpasses_page`, `pipeline_status_page`, and
+`export_page` for the individual pages.
 
 Usage (uv):
     uv run cts1_data_web_ui
@@ -36,6 +36,7 @@ from .beacon_stats_page import build_beacon_stats_page
 from .export_page import build_export_page
 from .export_raw import register_raw_export_route
 from .file_reassembler_page import build_file_reassembler_page
+from .overpasses_page import build_overpasses_page
 from .packet_browser_page import build_packet_browser_page
 from .pipeline_status_page import build_pipeline_status_page
 from .preview_image_route import register_preview_image_route
@@ -95,6 +96,7 @@ NAV_LINKS = (
     ("Browse Packets", "/browse-packets"),
     ("Satellite Events", "/satellite-events"),
     ("File Reassembler", "/file-reassembler"),
+    ("Overpasses", "/overpasses"),
     ("Pipeline Status", "/pipeline-status"),
     ("Export Data", "/export"),
 )
@@ -115,7 +117,7 @@ class Args:
     """Port to serve the dashboard on."""
 
 
-def _build_pages(args: Args) -> None:
+def _build_pages(args: Args) -> None:  # noqa: C901
     def _nav() -> None:
         # Remembered per-browser (see STORAGE_SECRET) so a toggle sticks
         # across page navigations and later visits; defaults to light for a
@@ -161,6 +163,11 @@ def _build_pages(args: Args) -> None:
     def file_reassembler_page() -> None:
         _nav()
         build_file_reassembler_page(args.data_dir)
+
+    @ui.page("/overpasses")
+    def overpasses_page() -> None:
+        _nav()
+        build_overpasses_page()
 
     @ui.page("/pipeline-status")
     def pipeline_status_page() -> None:
