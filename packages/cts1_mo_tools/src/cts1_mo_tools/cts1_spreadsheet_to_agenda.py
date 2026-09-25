@@ -478,7 +478,8 @@ def spreadsheet_file_to_agenda_file(
     ----------
     input_file : Path
         The path to the spreadsheet file.
-    output_file : Path, default=Path(f"packages/cts1_mo_tools/src/cts1_mo_tools/cts1_agenda_files/{input_file.stem}.txt")
+    output_file : Path,
+    default=Path(f"packages/cts1_mo_tools/src/cts1_mo_tools/cts1_agenda_files/{input_file.stem}.txt")
         The path to the output file. Default: cts1_agenda_files/{input_file.stem}.txt
     seed : int | None, default=None
         The random seed to use. If None, a random seed will be used.
