@@ -20,14 +20,13 @@ __all__ = [
     "fetch_satnogs_tle",
 ]
 
+import math
 import threading
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
-import numpy as np
-import numpy.typing as npt
 import requests
 import satkit as sk
 
@@ -156,57 +155,38 @@ def fetch_satnogs_tle(norad_id: str) -> SatnogsTle:
     return tle
 
 
-def _enu_rotation(station: GroundStation) -> npt.NDArray[np.float64]:
-    """Rotation matrix from ITRF (ECEF) to the station's local East-North-Up."""
-    lat = np.radians(station.latitude_deg)
-    lon = np.radians(station.longitude_deg)
-    return np.array(
-        [
-            [-np.sin(lon), np.cos(lon), 0.0],
-            [-np.sin(lat) * np.cos(lon), -np.sin(lat) * np.sin(lon), np.cos(lat)],
-            [np.cos(lat) * np.cos(lon), np.cos(lat) * np.sin(lon), np.sin(lat)],
-        ]
-    )
-
-
 class _LookAngleCalculator:
     """Azimuth/elevation of a TLE'd satellite from one ground station."""
 
     def __init__(self, tle: SatnogsTle, station: GroundStation) -> None:
         self._tle: Any = sk.TLE.from_lines([tle.name, tle.line1, tle.line2])
-        station_coord = sk.itrfcoord(
+        self._station = sk.itrfcoord(
             latitude_deg=station.latitude_deg,
             longitude_deg=station.longitude_deg,
             altitude=station.altitude_m,
         )
-        self._station_itrf = np.asarray(station_coord.vector, dtype=np.float64)
-        self._enu_rotation = _enu_rotation(station)
 
-    def look_angles(
-        self, times: list[datetime]
-    ) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.float64]]:
-        """(azimuth_deg, elevation_deg) arrays, one entry per time in `times`."""
+    def look_angles(self, times: list[datetime]) -> tuple[list[float], list[float]]:
+        """(azimuth_deg, elevation_deg) lists, one entry per time in `times`."""
         sk_times = [sk.time.from_datetime(t) for t in times]
         pos_teme, _vel = sk.sgp4(self._tle, sk_times)  # pyright: ignore[reportUnknownMemberType]
-        pos_teme = np.asarray(pos_teme, dtype=np.float64).reshape(-1, 3)
         teme_to_itrf: Any = sk.frametransform.qteme2itrf(sk_times)
         if isinstance(teme_to_itrf, sk.quaternion):  # A lone time gets a lone one.
             teme_to_itrf = [teme_to_itrf]
-        pos_itrf = np.array(
-            [q * p for q, p in zip(teme_to_itrf, pos_teme, strict=True)],
-            dtype=np.float64,
-        )
-        enu = (pos_itrf - self._station_itrf) @ self._enu_rotation.T
-        east, north, up = enu[:, 0], enu[:, 1], enu[:, 2]
-        elevation = np.degrees(np.arctan2(up, np.hypot(east, north)))
-        azimuth = np.degrees(np.arctan2(east, north)) % 360.0
-        return azimuth, elevation
+
+        azimuths: list[float] = []
+        elevations: list[float] = []
+        for q, p in zip(teme_to_itrf, pos_teme.reshape(-1, 3), strict=True):
+            east, north, up = sk.itrfcoord(q * p).to_enu(self._station)
+            elevations.append(math.degrees(math.atan2(up, math.hypot(east, north))))
+            azimuths.append(math.degrees(math.atan2(east, north)) % 360.0)
+        return azimuths, elevations
 
     def elevation_at(self, t: datetime) -> float:
-        return float(self.look_angles([t])[1][0])
+        return self.look_angles([t])[1][0]
 
     def azimuth_at(self, t: datetime) -> float:
-        return float(self.look_angles([t])[0][0])
+        return self.look_angles([t])[0][0]
 
 
 def _refine_crossing(
@@ -252,7 +232,7 @@ def compute_overpasses(
         start - pad + timedelta(seconds=i * _COARSE_STEP_SEC) for i in range(n_steps)
     ]
     _azimuth, elevation = calc.look_angles(times)
-    is_up = elevation >= min_elevation_deg
+    is_up = [e >= min_elevation_deg for e in elevation]
 
     overpasses: list[Overpass] = []
     aos: datetime | None = None
@@ -274,12 +254,12 @@ def _build_overpass(
     times = [aos + timedelta(seconds=i * _FINE_STEP_SEC) for i in range(n_steps)]
     times.append(los)
     _azimuth, elevation = calc.look_angles(times)
-    peak = int(np.argmax(elevation))
+    peak = max(range(len(elevation)), key=elevation.__getitem__)
     return Overpass(
         aos=aos,
         los=los,
         max_elevation_at=times[peak],
-        max_elevation_deg=float(elevation[peak]),
+        max_elevation_deg=elevation[peak],
         aos_azimuth_deg=calc.azimuth_at(aos),
         los_azimuth_deg=calc.azimuth_at(los),
     )
