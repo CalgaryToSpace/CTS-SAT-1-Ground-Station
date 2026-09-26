@@ -36,9 +36,15 @@ web UI as two containers sharing that directory.
 * Logic: find the first beacon where an onboard counter that only ever counts up (`uptime_sec`, `eps_uptime_sec`, `duration_since_last_uplink_ms`) is lower than the previous beacon's -- that beacon is the first one received after an OBC reboot / EPS reboot / uplinked-commands event, respectively. The event's own UTC time is estimated as that beacon's `received_at` minus the counter's value.
 * Output: `satellite_events_from_beacons.parquet` -- one row per detected event (unpivoted across the three event types), with `event_type`, `detected_at`, `estimated_event_at`, `time_since_event_when_detected_ms`, `obc_reboot_reason`, and `eps_reboot_reason`.
 
+### Step 5: Reassemble telecommand responses
+
+* Read the `everything_decoded.parquet` table from step 3, filtered to `TCMD_RESPONSE` rows. Independent of step 4 (both only depend on step 3).
+* Logic: a response too long for one downlink frame is split across several packets sharing one `tcmd_ts_sent`, numbered `tcmd_response_seq_num` 1..`tcmd_response_max_seq_num`. Group packets by `tcmd_ts_sent` (plus the response code/duration/part count every part shares), order by sequence number, and join their `tcmd_response_text` back together. Any never-received part is filled with a full frame's worth (186) of `?` characters. Single-packet responses pass through as groups of one.
+* Output: `reassembled_tcmd_responses.parquet` -- one row per telecommand response, with `tcmd_ts_sent`/`tcmd_sent_at`, `part_count`, `received_part_count`, `missing_seq_nums`, `is_complete`, `packet_ids`, and the reassembled `tcmd_response_text`.
+
 ### Daemon
 
-* Runs steps 1-4 continuously instead of one-off: an initial backfill of `--start` (default: 24h), then every `--interval` minutes (default: 15), requeries step 1 for observations starting in the trailing `interval + 30` minutes and reruns steps 2 through 4.
+* Runs steps 1-5 continuously instead of one-off: an initial backfill of `--start` (default: 24h), then every `--interval` minutes (default: 15), requeries step 1 for observations starting in the trailing `interval + 30` minutes and reruns steps 2 through 5.
 * The 30-minute overlap on every requery catches a SatNOGS observation that was still uploading/being vetted during the previous poll; it doesn't waste decode time since step 1 already skips any observation/decoder pair already recorded in `decoder_runs`.
 * Runs until interrupted (Ctrl+C).
 

@@ -49,6 +49,9 @@ from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
 from cts1_mo_tools.cts1_processing_pipeline.step_4_detect_satellite_events import (
     pipeline as step_4_pipeline,
 )
+from cts1_mo_tools.cts1_processing_pipeline.step_5_reassemble_tcmd_responses import (
+    pipeline as step_5_pipeline,
+)
 
 from . import pipeline_status
 
@@ -159,6 +162,18 @@ TABLE_SPECS: tuple[TableSpec, ...] = (
         ),
         filename=step_4_pipeline.OUTPUT_FILENAME,
         time_column="detected_at",
+        has_packet_type=False,
+    ),
+    TableSpec(
+        key="reassembled_tcmd_responses",
+        step="Step 5 -- Reassemble Telecommand Responses",
+        description=(
+            "TCMD_RESPONSE packets joined back together into one row per "
+            "telecommand response, with never-received parts filled with "
+            "'?' characters."
+        ),
+        filename=step_5_pipeline.OUTPUT_FILENAME,
+        time_column="first_received_at",
         has_packet_type=False,
     ),
 )

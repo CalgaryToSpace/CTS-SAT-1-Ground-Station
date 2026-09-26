@@ -1,10 +1,10 @@
-"""Daemon: run steps 1-4 continuously.
+"""Daemon: run steps 1-5 continuously.
 
 First does one backfill of `start` (a duration like "24 hours" or an ISO
 8601 date/datetime -- same syntax as step 1's own `--start`), running steps
-1 through 4 once. Then, every `interval` minutes, requeries step 1 for
+1 through 5 once. Then, every `interval` minutes, requeries step 1 for
 observations starting in the trailing `interval + 30` minutes and reruns
-steps 2 through 4 again -- the 30-minute overlap is there so a SatNOGS
+steps 2 through 5 again -- the 30-minute overlap is there so a SatNOGS
 observation still uploading/being vetted during one poll gets picked up on
 the next one, rather than falling into the gap between two non-overlapping
 windows.
@@ -43,6 +43,7 @@ from .step_1_download_and_demodulate import pipeline as step_1_pipeline
 from .step_2_deduplicate_packets import pipeline as step_2_pipeline
 from .step_3_decode_packets import pipeline as step_3_pipeline
 from .step_4_detect_satellite_events import pipeline as step_4_pipeline
+from .step_5_reassemble_tcmd_responses import pipeline as step_5_pipeline
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -50,12 +51,13 @@ if TYPE_CHECKING:
 # What each step is announced as, both in the log ("Starting step 2/4:
 # deduplicate packets.") and in the web UI's status indicator. One table so
 # the two can't drift apart, and so the step count in those messages stays
-# right if a step 5 ever shows up.
+# right as steps are added.
 STEP_NAMES = {
     1: "download and demodulate",
     2: "deduplicate packets",
     3: "decode packets",
     4: "detect satellite events",
+    5: "reassemble telecommand responses",
 }
 
 # The overlap added to `interval` for every requery after the initial
@@ -81,7 +83,7 @@ def run_all_steps(  # noqa: PLR0913
     reporter: StatusReporter,
     run_label: str,
 ) -> None:
-    """Run steps 1-4 once, publishing which step is in flight as it goes.
+    """Run steps 1-5 once, publishing which step is in flight as it goes.
 
     `run_label` names this run in the status detail (and so in the web UI's
     indicator) -- e.g. the backfill vs. a scheduled requery vs. one a
@@ -113,6 +115,10 @@ def run_all_steps(  # noqa: PLR0913
     step_3_pipeline.run(data_dir=data_dir)
     announce(4)
     step_4_pipeline.run(data_dir=data_dir)
+    # Steps 4 and 5 are independent (both only read step 3's output); they
+    # just run one after the other here to keep the daemon single-threaded.
+    announce(5)
+    step_5_pipeline.run(data_dir=data_dir)
 
     logger.info(f"Finished all {len(STEP_NAMES)} steps -- {run_label}.")
 
@@ -163,7 +169,7 @@ def run(  # noqa: PLR0913
     force_rerun: bool = False,
     tools: tuple[str, ...] | None = None,
 ) -> None:
-    """Run steps 1-4 forever: one backfill of `start`, then a requery of
+    """Run steps 1-5 forever: one backfill of `start`, then a requery of
     the trailing `interval + 30` minutes every `interval` minutes.
 
     Args:

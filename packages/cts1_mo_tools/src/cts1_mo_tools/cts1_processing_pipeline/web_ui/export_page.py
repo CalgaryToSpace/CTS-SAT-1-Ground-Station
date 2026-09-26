@@ -23,7 +23,7 @@ from .layout import page_shell
 
 # A flowchart of every table the pipeline produces and the step that
 # produces it -- kept in sync with `export_tables.TABLE_SPECS` by hand
-# (there are only 4 steps/6 tables total, and the step boundaries rarely
+# (there are only 5 steps/7 tables total, and the step boundaries rarely
 # change), rather than generated from it, since the diagram also needs to
 # show the SatNOGS API as the ultimate source, which isn't a table at all.
 PIPELINE_FLOWCHART = """
@@ -39,6 +39,8 @@ flowchart LR
     step3 --> everything_decoded[("everything_decoded")]
     everything_decoded --> step4["Step 4\\nDetect Satellite Events"]
     step4 --> satellite_events[("satellite_events_from_beacons")]
+    everything_decoded --> step5["Step 5\\nReassemble TCMD Responses"]
+    step5 --> reassembled_tcmd_responses[("reassembled_tcmd_responses")]
 """
 
 RANGE_INPUT_MASK = "####-##-## ##:##:##"
