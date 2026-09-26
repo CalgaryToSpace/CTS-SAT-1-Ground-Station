@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import openpyxl
 import polars as pl
@@ -478,9 +479,9 @@ def spreadsheet_file_to_agenda_file(
     ----------
     input_file : Path
         The path to the spreadsheet file.
-    output_file : Path,
-    default=Path(f"packages/cts1_mo_tools/src/cts1_mo_tools/cts1_agenda_files/{input_file.stem}.txt")
-        The path to the output file. Default: cts1_agenda_files/{input_file.stem}.txt
+    output_file : Path | None, default=None
+        The path to the output file. If None, a default path with the Start UTC time
+        located in cts1_agenda_files will be used.
     seed : int | None, default=None
         The random seed to use. If None, a random seed will be used.
     readable : bool, default=False
@@ -493,13 +494,15 @@ def spreadsheet_file_to_agenda_file(
     if seed is not None:
         random.seed(seed)
 
+    mission_date, mission_start, rows = load_sheet(input_file)
+
+    # Default output file path if not provided, using Start UTC time.
     if output_file is None:
         output_file = (
             Path("packages/cts1_mo_tools/src/cts1_mo_tools/cts1_agenda_files")
-            / f"{input_file.stem}.txt"
+            / f"""{mission_start.astimezone(ZoneInfo('America/Edmonton'))
+                 .strftime('%Y-%m-%dT%H%ML_agenda.txt')}"""
         )
-
-    mission_date, mission_start, rows = load_sheet(input_file)
 
     agenda = build_agenda(mission_date, mission_start, rows)
 
