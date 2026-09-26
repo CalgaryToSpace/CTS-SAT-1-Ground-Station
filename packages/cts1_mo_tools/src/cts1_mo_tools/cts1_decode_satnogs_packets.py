@@ -11,8 +11,10 @@ SQLite format: a "packet" table with (at least) "ts_received", "payload",
 "rs_errs", and "session_dir" columns.
 """
 
+import math
 import sqlite3
 import struct
+import zlib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, assert_never
@@ -228,6 +230,121 @@ BULK_DOWNLINK_MAX_DATA = AX100_DOWNLINK_MAX_BYTES_SIZE - 1 - 4  # 195
 #   uint8_t data[199]
 LOG_MESSAGE_MAX_DATA = AX100_DOWNLINK_MAX_BYTES_SIZE - 1  # 199
 
+# GNSS_bestxyzb_downlink_packet_t layout (after the CSP header):
+#   uint8_t  packet_type        1
+#   uint16_t downlink_seq_num   2
+#   uint16_t ring_position      2
+#   uint8_t  bestxyzb_data[GNSS_SAMPLE_SIZE]  (raw NovAtel OEM7 BESTXYZB log)
+GNSS_DOWNLINK_HEADER_FMT = "<B H H"
+GNSS_DOWNLINK_HEADER_SIZE = struct.calcsize(GNSS_DOWNLINK_HEADER_FMT)
+
+# NovAtel OEM7 binary message header ("Binary Message Header" in the OEM7
+# Commands and Logs Reference Manual). All fields are little-endian.
+NOVATEL_SYNC_BYTES = b"\xaa\x44\x12"
+NOVATEL_HEADER_FMT = (
+    "<"
+    "3s"  # sync (0xAA 0x44 0x12)
+    "B"  # header_length (normally 28)
+    "H"  # message_id (241 for BESTXYZ)
+    "B"  # message_type (bits 0-4: source; bits 5-6: format; bit 7: response)
+    "B"  # port_address
+    "H"  # message_length (body only; excludes header and CRC)
+    "H"  # sequence (counts down from N-1 to 0 for related logs)
+    "B"  # idle_time (divide by 2 for percent)
+    "B"  # time_status (GPS Reference Time Status enum)
+    "H"  # gps_week
+    "I"  # gps_week_ms (milliseconds from the start of the GPS week)
+    "I"  # receiver_status (bitfield)
+    "H"  # reserved
+    "H"  # receiver_sw_version (build number)
+)
+NOVATEL_HEADER_SIZE = struct.calcsize(NOVATEL_HEADER_FMT)  # 28 bytes
+NOVATEL_CRC_SIZE = 4
+NOVATEL_BESTXYZ_MESSAGE_ID = 241
+
+# BESTXYZ log body (message ID 241). Offsets relative to the end of the header.
+# Note: the manual lists the "P-sol status" offset as "H+3", which is a typo -
+# it's a 4-byte enum at H+0 (the next field, "pos type", is at H+4).
+BESTXYZ_BODY_FMT = (
+    "<"
+    "I"  # H+0   p_sol_status (Solution Status enum)
+    "I"  # H+4   pos_type (Position or Velocity Type enum)
+    "d"  # H+8   p_x_m (ECEF)
+    "d"  # H+16  p_y_m (ECEF)
+    "d"  # H+24  p_z_m (ECEF)
+    "f"  # H+32  p_x_stddev_m
+    "f"  # H+36  p_y_stddev_m
+    "f"  # H+40  p_z_stddev_m
+    "I"  # H+44  v_sol_status (Solution Status enum)
+    "I"  # H+48  vel_type (Position or Velocity Type enum)
+    "d"  # H+52  v_x_m_per_s (ECEF)
+    "d"  # H+60  v_y_m_per_s (ECEF)
+    "d"  # H+68  v_z_m_per_s (ECEF)
+    "f"  # H+76  v_x_stddev_m_per_s
+    "f"  # H+80  v_y_stddev_m_per_s
+    "f"  # H+84  v_z_stddev_m_per_s
+    "4s"  # H+88  stn_id (base station ID)
+    "f"  # H+92  v_latency_sec
+    "f"  # H+96  diff_age_sec
+    "f"  # H+100 sol_age_sec
+    "B"  # H+104 num_svs (tracked)
+    "B"  # H+105 num_soln_svs (used in solution)
+    "B"  # H+106 num_gg_l1 (with L1/E1/B1 signals used in solution)
+    "B"  # H+107 num_soln_multi_svs (with multi-frequency signals used in solution)
+    "B"  # H+108 reserved
+    "B"  # H+109 ext_sol_stat (Extended Solution Status bitfield)
+    "B"  # H+110 galileo_beidou_sig_mask
+    "B"  # H+111 gps_glonass_sig_mask
+)
+BESTXYZ_BODY_SIZE = struct.calcsize(BESTXYZ_BODY_FMT)  # 112 bytes
+
+BESTXYZ_BODY_FIELD_NAMES = [
+    "p_sol_status",
+    "pos_type",
+    "p_x_m",
+    "p_y_m",
+    "p_z_m",
+    "p_x_stddev_m",
+    "p_y_stddev_m",
+    "p_z_stddev_m",
+    "v_sol_status",
+    "vel_type",
+    "v_x_m_per_s",
+    "v_y_m_per_s",
+    "v_z_m_per_s",
+    "v_x_stddev_m_per_s",
+    "v_y_stddev_m_per_s",
+    "v_z_stddev_m_per_s",
+    "stn_id",
+    "v_latency_sec",
+    "diff_age_sec",
+    "sol_age_sec",
+    "num_svs",
+    "num_soln_svs",
+    "num_gg_l1",
+    "num_soln_multi_svs",
+    "reserved",
+    "ext_sol_stat",
+    "galileo_beidou_sig_mask",
+    "gps_glonass_sig_mask",
+]
+
+# GPS time -> UTC. GPS time is ahead of UTC by the accumulated leap seconds
+# (18 s since 2017-01-01; no further leap seconds have been scheduled since).
+GPS_EPOCH = datetime(1980, 1, 6, tzinfo=UTC)
+GPS_UTC_LEAP_SECONDS = 18
+
+# WGS84 ellipsoid, for converting the ECEF position to latitude/longitude/height.
+WGS84_A_M = 6_378_137.0
+WGS84_F = 1 / 298.257223563
+WGS84_E2 = WGS84_F * (2 - WGS84_F)
+
+# Heights above the WGS84 ellipsoid outside this range can't be CTS-SAT-1 (LEO,
+# ~500 km). With no valid fix, the receiver reports a placeholder position
+# (seen in flight as a fixed point ~107,800 km up), sometimes even with a
+# SINGLE position type; this keeps it from passing as a real lat/lon.
+GNSS_PLAUSIBLE_HEIGHT_RANGE_KM = (0.0, 2_000.0)
+
 # -- Enum maps ----------------------------------------------------------------
 
 PACKET_TYPE_MAP = {
@@ -236,6 +353,7 @@ PACKET_TYPE_MAP = {
     0x04: "TCMD_RESPONSE",
     0x10: "BULK_FILE_DOWNLINK",
     0x20: "BEACON_EXTENDED",
+    0x30: "GNSS_BESTXYZB_SAMPLE",
 }
 PACKET_TYPE_MAP_INV = {v: k for k, v in PACKET_TYPE_MAP.items()}
 RF_SWITCH_CONTROL_MODE_MAP = {
@@ -313,6 +431,152 @@ MPI_STOP_REASON_MAP = {
     4: "SELF_CHECK_DONE",
 }
 GNSS_RX_MODE_MAP = {0: "COMMAND_MODE", 1: "FIREHOSE_MODE", 2: "DISABLED"}
+
+# NovAtel OEM7 enums/bitfields, from the OEM7 Commands and Logs Reference Manual.
+# "GPS Reference Time Status" (binary header `time_status` field).
+GNSS_TIME_STATUS_MAP = {
+    20: "UNKNOWN",
+    60: "APPROXIMATE",
+    80: "COARSEADJUSTING",
+    100: "COARSE",
+    120: "COARSESTEERING",
+    130: "FREEWHEELING",
+    140: "FINEADJUSTING",
+    160: "FINE",
+    170: "FINEBACKUPSTEERING",
+    180: "FINESTEERING",
+    200: "SATTIME",
+}
+# "Solution Status" (BESTPOS table; used by BESTXYZ `P-sol status`/`V-sol status`).
+GNSS_SOLUTION_STATUS_MAP = {
+    0: "SOL_COMPUTED",
+    1: "INSUFFICIENT_OBS",
+    2: "NO_CONVERGENCE",
+    3: "SINGULARITY",
+    4: "COV_TRACE",
+    5: "TEST_DIST",
+    6: "COLD_START",
+    7: "V_H_LIMIT",
+    8: "VARIANCE",
+    9: "RESIDUALS",
+    13: "INTEGRITY_WARNING",
+    18: "PENDING",
+    19: "INVALID_FIX",
+    20: "UNAUTHORIZED",
+    22: "INVALID_RATE",
+}
+# "Position or Velocity Type" (BESTPOS table; used by `pos type`/`vel type`).
+GNSS_POSITION_VELOCITY_TYPE_MAP = {
+    0: "NONE",
+    1: "FIXEDPOS",
+    2: "FIXEDHEIGHT",
+    8: "DOPPLER_VELOCITY",
+    16: "SINGLE",
+    17: "PSRDIFF",
+    18: "WAAS",
+    19: "PROPAGATED",
+    32: "L1_FLOAT",
+    34: "NARROW_FLOAT",
+    48: "L1_INT",
+    49: "WIDE_INT",
+    50: "NARROW_INT",
+    52: "INS_SBAS",
+    53: "INS_PSRSP",
+    54: "INS_PSRDIFF",
+    55: "INS_RTKFLOAT",
+    56: "INS_RTKFIXED",
+    67: "EXT_CONSTRAINED",
+    68: "PPP_CONVERGING",
+    69: "PPP",
+    70: "OPERATIONAL",
+    71: "WARNING",
+    72: "OUT_OF_BOUNDS",
+    73: "INS_PPP_CONVERGING",
+    74: "INS_PPP",
+    77: "PPP_BASIC_CONVERGING",
+    78: "PPP_BASIC",
+    79: "INS_PPP_BASIC_CONVERGING",
+    80: "INS_PPP_BASIC",
+}
+GNSS_POSITION_VELOCITY_TYPE_MAP_INV = {
+    v: k for k, v in GNSS_POSITION_VELOCITY_TYPE_MAP.items()
+}
+# "Receiver Status" (RXSTATUS table; binary header `receiver_status` field).
+# Names describe the bit=1 meaning. Bits 25-26 are the status word's version
+# number (not a flag), so they're omitted and never listed.
+GNSS_RECEIVER_STATUS_BITS: list[tuple[int, str]] = [
+    (0, "ERROR"),
+    (1, "TEMPERATURE_WARNING"),
+    (2, "VOLTAGE_SUPPLY_WARNING"),
+    (3, "ANTENNA_NOT_POWERED"),
+    (4, "LNA_FAILURE"),
+    (5, "ANTENNA_OPEN_CIRCUIT"),
+    (6, "ANTENNA_SHORT_CIRCUIT"),
+    (7, "CPU_OVERLOAD"),
+    (8, "COM_BUFFER_OVERRUN"),
+    (9, "SPOOFING_DETECTED"),
+    (10, "RESERVED_BIT_10"),
+    (11, "LINK_OVERRUN"),
+    (12, "INPUT_OVERRUN"),
+    (13, "AUX_TRANSMIT_OVERRUN"),
+    (14, "ANTENNA_GAIN_OUT_OF_RANGE"),
+    (15, "JAMMER_DETECTED"),
+    (16, "INS_RESET"),
+    (17, "IMU_COMMS_FAILURE"),
+    (18, "ALMANAC_OR_UTC_INVALID"),
+    (19, "POSITION_SOLUTION_INVALID"),
+    (20, "POSITION_FIXED"),
+    (21, "CLOCK_STEERING_DISABLED"),
+    (22, "CLOCK_MODEL_INVALID"),
+    (23, "EXTERNAL_OSCILLATOR_LOCKED"),
+    (24, "SOFTWARE_RESOURCE_WARNING"),
+    (27, "HDR_TRACKING"),
+    (28, "DIGITAL_FILTERING_ENABLED"),
+    (29, "AUX3_EVENT"),
+    (30, "AUX2_EVENT"),
+    (31, "AUX1_EVENT"),
+]
+GNSS_RECEIVER_STATUS_VERSION_SHIFT = 25
+GNSS_RECEIVER_STATUS_VERSION_MASK = 0x3
+# "Extended Solution Status" (BESTPOS table). Bits 1-3 are the pseudorange
+# iono correction enum (below); the rest are single-bit flags.
+GNSS_EXT_SOL_STAT_BITS: list[tuple[int, str]] = [
+    (0, "RTK_VERIFIED_OR_GLIDE"),
+    (4, "RTK_ASSIST_ACTIVE"),
+    (5, "ANTENNA_INFO_MISSING"),
+    (6, "RESERVED_BIT_6"),
+    (7, "TERRAIN_COMPENSATION_USED"),
+]
+GNSS_IONO_CORRECTION_MAP = {
+    0: "UNKNOWN_OR_DEFAULT_KLOBUCHAR",
+    1: "KLOBUCHAR_BROADCAST",
+    2: "SBAS_BROADCAST",
+    3: "MULTI_FREQUENCY_COMPUTED",
+    4: "PSRDIFF_CORRECTION",
+    5: "NOVATEL_BLENDED_IONO",
+}
+# "Galileo and BeiDou Signal-Used Mask" (BESTPOS table).
+GNSS_GALILEO_BEIDOU_SIGNAL_BITS: list[tuple[int, str]] = [
+    (0, "GALILEO_E1"),
+    (1, "GALILEO_E5A"),
+    (2, "GALILEO_E5B"),
+    (3, "GALILEO_ALTBOC"),
+    (4, "BEIDOU_B1"),
+    (5, "BEIDOU_B2"),
+    (6, "BEIDOU_B3"),
+    (7, "GALILEO_E6"),
+]
+# "GPS and GLONASS Signal-Used Mask" (BESTPOS table). Bits 3 and 7 are reserved.
+GNSS_GPS_GLONASS_SIGNAL_BITS: list[tuple[int, str]] = [
+    (0, "GPS_L1"),
+    (1, "GPS_L2"),
+    (2, "GPS_L5"),
+    (3, "RESERVED_BIT_3"),
+    (4, "GLONASS_L1"),
+    (5, "GLONASS_L2"),
+    (6, "GLONASS_L3"),
+    (7, "RESERVED_BIT_7"),
+]
 
 # ADCS Current State (Telemetry ID 132, frame 1) enum maps.
 ADCS_ESTIM_MODE_MAP = {
@@ -1001,6 +1265,261 @@ def decode_bulk_file_downlink_packet(
     }
 
 
+def novatel_crc32(data: bytes) -> int:
+    """NovAtel's 32-bit CRC (`CalculateBlockCRC32` in the OEM7 manual).
+
+    Same reflected polynomial (0xEDB88320) as zlib's CRC-32, but with an
+    initial value of 0 and no final XOR. Expressed via zlib by pre-seeding it
+    so that its internal register starts at 0, then undoing its final XOR.
+    """
+    return zlib.crc32(data, 0xFFFFFFFF) ^ 0xFFFFFFFF
+
+
+def _bits_to_list(value: int, bits: list[tuple[int, str]]) -> list[str]:
+    return [name for bit_num, name in bits if (value >> bit_num) & 1]
+
+
+def _bits_to_json_list(value: int, bits: list[tuple[int, str]]) -> str:
+    return orjson.dumps(_bits_to_list(value, bits)).decode()
+
+
+def gps_time_to_utc_isoformat(
+    gps_week: int, gps_week_ms: int, *, minus_sec: float = 0.0
+) -> str:
+    """GPS week + milliseconds-of-week (minus `minus_sec`) as an ISO 8601 UTC
+    timestamp, with millisecond precision.
+    """
+    dt = GPS_EPOCH + timedelta(
+        weeks=gps_week,
+        milliseconds=gps_week_ms - round(minus_sec * 1000),
+        seconds=-GPS_UTC_LEAP_SECONDS,
+    )
+    return dt.isoformat(timespec="milliseconds")
+
+
+def ecef_to_geodetic(x_m: float, y_m: float, z_m: float) -> tuple[float, float, float]:
+    """Convert WGS84 ECEF coordinates to (latitude_deg, longitude_deg, height_m).
+
+    Height is above the WGS84 ellipsoid. Uses the standard fixed-point
+    iteration on latitude, which converges to sub-mm within a few iterations
+    for any point near the Earth (including LEO).
+    """
+    lon = math.atan2(y_m, x_m)
+    p = math.hypot(x_m, y_m)
+    lat = math.atan2(z_m, p * (1 - WGS84_E2))
+    height = 0.0
+    for _ in range(10):
+        sin_lat = math.sin(lat)
+        n = WGS84_A_M / math.sqrt(1 - WGS84_E2 * sin_lat * sin_lat)
+        # Stable at all latitudes (unlike `p / cos(lat) - n`, which fails at poles).
+        height = p * math.cos(lat) + z_m * sin_lat - WGS84_A_M**2 / n
+        lat = math.atan2(z_m, p * (1 - WGS84_E2 * n / (n + height)))
+    return math.degrees(lat), math.degrees(lon), height
+
+
+def decode_bestxyzb(raw: bytes) -> dict[str, Any]:
+    """Decode a raw NovAtel OEM7 BESTXYZB binary log (header + body [+ CRC]).
+
+    See "BESTXYZ" and "Binary Message Header" in the OEM7 Commands and Logs
+    Reference Manual. All returned keys are prefixed with "gnss_". Rarely-useful
+    fields are packed into the `gnss_misc_json` column rather than getting their own.
+
+    `gnss_crc_valid` is None if the 4-byte trailing CRC wasn't included.
+    """
+    if len(raw) < NOVATEL_HEADER_SIZE:
+        msg = (
+            f"Too short for a NovAtel binary header: {len(raw)} bytes "
+            f"(need {NOVATEL_HEADER_SIZE})"
+        )
+        raise ValueError(msg)
+
+    (
+        sync,
+        header_length,
+        message_id,
+        message_type,
+        port_address,
+        message_length,
+        sequence,
+        idle_time,
+        time_status,
+        gps_week,
+        gps_week_ms,
+        receiver_status,
+        _reserved,
+        receiver_sw_version,
+    ) = struct.unpack_from(NOVATEL_HEADER_FMT, raw, 0)
+
+    if sync != NOVATEL_SYNC_BYTES:
+        expected = NOVATEL_SYNC_BYTES.hex()
+        msg = f"Bad NovAtel sync bytes: {sync.hex()} (expected {expected})"
+        raise ValueError(msg)
+    if message_id != NOVATEL_BESTXYZ_MESSAGE_ID:
+        msg = f"Not a BESTXYZ log: message ID {message_id}"
+        raise ValueError(msg)
+    if header_length < NOVATEL_HEADER_SIZE:
+        msg = f"NovAtel header_length too small: {header_length}"
+        raise ValueError(msg)
+
+    # Honour the header's own length field, in case a future header is longer.
+    body_end = header_length + BESTXYZ_BODY_SIZE
+    if len(raw) < body_end:
+        msg = f"Too short for BESTXYZB: {len(raw)} bytes (need {body_end})"
+        raise ValueError(msg)
+
+    body_vals = struct.unpack_from(BESTXYZ_BODY_FMT, raw, header_length)
+    b: dict[str, Any] = dict(zip(BESTXYZ_BODY_FIELD_NAMES, body_vals, strict=True))
+
+    crc_valid: bool | None = None
+    if len(raw) >= body_end + NOVATEL_CRC_SIZE:
+        received_crc = int.from_bytes(
+            raw[body_end : body_end + NOVATEL_CRC_SIZE], "little"
+        )
+        crc_valid = novatel_crc32(raw[:body_end]) == received_crc
+
+    # The header time is when the log was generated. The reported position may
+    # be an older solution (e.g. the last good fix, held after losing lock), so
+    # back-date by the solution age to get when the position was actually solved.
+    solution_utc_time = (
+        gps_time_to_utc_isoformat(gps_week, gps_week_ms, minus_sec=b["sol_age_sec"])
+        if gps_week > 0 and GNSS_TIME_STATUS_MAP.get(time_status) != "UNKNOWN"
+        else None
+    )
+
+    # Derive geodetic coordinates for any real fix, including less-reliable ones
+    # (e.g. a SINGLE fix held with INSUFFICIENT_OBS), but not the placeholder
+    # position reported without one (see `GNSS_PLAUSIBLE_HEIGHT_RANGE_KM`).
+    lat_deg = lon_deg = height_km = None
+    if b["pos_type"] != GNSS_POSITION_VELOCITY_TYPE_MAP_INV["NONE"]:
+        lat, lon, height_m = ecef_to_geodetic(b["p_x_m"], b["p_y_m"], b["p_z_m"])
+        min_km, max_km = GNSS_PLAUSIBLE_HEIGHT_RANGE_KM
+        if min_km <= height_m / 1000 <= max_km:
+            lat_deg, lon_deg, height_km = (
+                round(lat, 6),
+                round(lon, 6),
+                round(height_m / 1000, 3),
+            )
+
+    ext_sol_stat = b["ext_sol_stat"]
+
+    # Fields that are constant, always zero, or redundant with another column in
+    # practice. Packed into one JSON column to keep the table narrow.
+    misc = {
+        "message_id": message_id,
+        "message_type": f"0x{message_type:02X}",
+        "port_address": port_address,
+        "message_length": message_length,
+        "sequence": sequence,
+        "receiver_status_bitfield": f"0x{receiver_status:08X}",
+        "receiver_status_version": (
+            (receiver_status >> GNSS_RECEIVER_STATUS_VERSION_SHIFT)
+            & GNSS_RECEIVER_STATUS_VERSION_MASK
+        ),
+        "receiver_sw_version": receiver_sw_version,
+        "velocity_latency_sec": round(b["v_latency_sec"], 3),
+        "base_station_id": b["stn_id"]
+        .split(b"\x00")[0]
+        .decode("ascii", errors="replace"),
+        "differential_age_sec": round(b["diff_age_sec"], 3),
+        "num_svs_l1_in_solution": b["num_gg_l1"],
+        "extended_solution_status": f"0x{ext_sol_stat:02X}",
+        "extended_solution_flags": _bits_to_list(ext_sol_stat, GNSS_EXT_SOL_STAT_BITS),
+    }
+
+    return {
+        # Header
+        "gnss_crc_valid": crc_valid,
+        "gnss_idle_time_percent": idle_time / 2,
+        "gnss_time_status": e(GNSS_TIME_STATUS_MAP, time_status),
+        "gnss_gps_week": gps_week,
+        "gnss_gps_week_ms": gps_week_ms,
+        "gnss_solution_utc_time": solution_utc_time,
+        "gnss_receiver_status_flags": _bits_to_json_list(
+            receiver_status, GNSS_RECEIVER_STATUS_BITS
+        ),
+        # Position, in ECEF coordinates
+        "gnss_position_solution_status": e(GNSS_SOLUTION_STATUS_MAP, b["p_sol_status"]),
+        "gnss_position_type": e(GNSS_POSITION_VELOCITY_TYPE_MAP, b["pos_type"]),
+        "gnss_position_x_m": round(b["p_x_m"], 3),
+        "gnss_position_y_m": round(b["p_y_m"], 3),
+        "gnss_position_z_m": round(b["p_z_m"], 3),
+        "gnss_position_x_stddev_m": round(b["p_x_stddev_m"], 3),
+        "gnss_position_y_stddev_m": round(b["p_y_stddev_m"], 3),
+        "gnss_position_z_stddev_m": round(b["p_z_stddev_m"], 3),
+        # Position (derived: WGS84 geodetic)
+        "gnss_latitude_deg": lat_deg,
+        "gnss_longitude_deg": lon_deg,
+        "gnss_height_above_ellipsoid_km": height_km,
+        # Velocity, in ECEF coordinates
+        "gnss_velocity_solution_status": e(GNSS_SOLUTION_STATUS_MAP, b["v_sol_status"]),
+        "gnss_velocity_type": e(GNSS_POSITION_VELOCITY_TYPE_MAP, b["vel_type"]),
+        "gnss_velocity_x_m_per_s": round(b["v_x_m_per_s"], 4),
+        "gnss_velocity_y_m_per_s": round(b["v_y_m_per_s"], 4),
+        "gnss_velocity_z_m_per_s": round(b["v_z_m_per_s"], 4),
+        "gnss_velocity_x_stddev_m_per_s": round(b["v_x_stddev_m_per_s"], 4),
+        "gnss_velocity_y_stddev_m_per_s": round(b["v_y_stddev_m_per_s"], 4),
+        "gnss_velocity_z_stddev_m_per_s": round(b["v_z_stddev_m_per_s"], 4),
+        # Derived: magnitude of the ECEF velocity (relative to the rotating Earth).
+        "gnss_ecef_speed_m_per_s": round(
+            math.sqrt(
+                b["v_x_m_per_s"] ** 2 + b["v_y_m_per_s"] ** 2 + b["v_z_m_per_s"] ** 2
+            ),
+            4,
+        ),
+        # Solution details
+        "gnss_solution_age_sec": round(b["sol_age_sec"], 3),
+        "gnss_num_svs_tracked": b["num_svs"],
+        "gnss_num_svs_in_solution": b["num_soln_svs"],
+        "gnss_num_svs_multi_freq_in_solution": b["num_soln_multi_svs"],
+        "gnss_pseudorange_iono_correction": e(
+            GNSS_IONO_CORRECTION_MAP, (ext_sol_stat >> 1) & 0x7
+        ),
+        "gnss_galileo_beidou_signals_used": _bits_to_json_list(
+            b["galileo_beidou_sig_mask"], GNSS_GALILEO_BEIDOU_SIGNAL_BITS
+        ),
+        "gnss_gps_glonass_signals_used": _bits_to_json_list(
+            b["gps_glonass_sig_mask"], GNSS_GPS_GLONASS_SIGNAL_BITS
+        ),
+        "gnss_misc_json": orjson.dumps(misc).decode(),
+    }
+
+
+def decode_gnss_bestxyzb_sample_packet(
+    payload: bytes, _full_payload: bytes | None = None
+) -> dict[str, Any]:
+    """Decode a GNSS_bestxyzb_downlink_packet_t payload (CSP header already stripped).
+
+    Layout:
+        uint8_t  packet_type        (1 byte, always 0x30)
+        uint16_t downlink_seq_num   (2 bytes)
+        uint16_t ring_position      (2 bytes)
+        uint8_t  bestxyzb_data[GNSS_SAMPLE_SIZE]  (raw log; see `decode_bestxyzb`)
+    """
+    if len(payload) < GNSS_DOWNLINK_HEADER_SIZE:
+        msg = (
+            f"Too short for GNSS_BESTXYZB_SAMPLE: {len(payload)} bytes "
+            f"(need at least {GNSS_DOWNLINK_HEADER_SIZE})"
+        )
+        raise ValueError(msg)
+
+    packet_type, downlink_seq_num, ring_position = struct.unpack_from(
+        GNSS_DOWNLINK_HEADER_FMT, payload, 0
+    )
+
+    if packet_type != PACKET_TYPE_MAP_INV["GNSS_BESTXYZB_SAMPLE"]:
+        msg = (
+            f"Unexpected packet_type byte for GNSS_BESTXYZB_SAMPLE: {packet_type:#04x}"
+        )
+        raise ValueError(msg)
+
+    return {
+        "packet_type": "GNSS_BESTXYZB_SAMPLE",
+        "gnss_downlink_seq_num": downlink_seq_num,
+        "gnss_ring_position": ring_position,
+        **decode_bestxyzb(payload[GNSS_DOWNLINK_HEADER_SIZE:]),
+    }
+
+
 # Map packet_type byte → decoder function (payload = post-CSP bytes).
 _PACKET_DECODERS = {
     0x01: decode_beacon_basic_packet,
@@ -1008,6 +1527,7 @@ _PACKET_DECODERS = {
     0x04: decode_tcmd_response_packet,
     0x10: decode_bulk_file_downlink_packet,
     0x20: decode_beacon_extended_packet,
+    0x30: decode_gnss_bestxyzb_sample_packet,
 }
 
 

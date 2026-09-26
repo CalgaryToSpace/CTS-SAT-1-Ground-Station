@@ -1,4 +1,5 @@
 import json
+import math
 import struct
 from typing import Any
 
@@ -10,6 +11,8 @@ from cts1_mo_tools.cts1_decode_satnogs_packets import (
     BEACON_EXTENDED_TOTAL_STRUCT_SIZE,
     BEACON_FIXED_SIZE,
     BEACON_TOTAL_STRUCT_SIZE,
+    BESTXYZ_BODY_FMT,
+    BESTXYZ_BODY_SIZE,
     BULK_DOWNLINK_HEADER_FMT,
     BULK_DOWNLINK_HEADER_SIZE,
     CSP_HEADER_SIZE,
@@ -17,6 +20,9 @@ from cts1_mo_tools.cts1_decode_satnogs_packets import (
     EXTENDED_FMT,
     FIXED_FMT,
     FRIENDLY_MESSAGE_SIZE,
+    GNSS_DOWNLINK_HEADER_FMT,
+    NOVATEL_HEADER_FMT,
+    NOVATEL_HEADER_SIZE,
     PACKET_TYPE_MAP,
     PACKET_TYPE_MAP_INV,
     TCMD_RESPONSE_HEADER_FMT,
@@ -26,10 +32,13 @@ from cts1_mo_tools.cts1_decode_satnogs_packets import (
     decode_beacon_basic_packet,
     decode_beacon_extended_packet,
     decode_bulk_file_downlink_packet,
+    decode_gnss_bestxyzb_sample_packet,
     decode_log_message_packet,
     decode_packet_safe,
     decode_tcmd_response_packet,
     e,
+    ecef_to_geodetic,
+    novatel_crc32,
 )
 
 # ---------------------------------------------------------------------------
@@ -949,6 +958,7 @@ class TestPacketTypeMaps:
             "TCMD_RESPONSE",
             "BULK_FILE_DOWNLINK",
             "BEACON_EXTENDED",
+            "GNSS_BESTXYZB_SAMPLE",
         ):
             assert name in PACKET_TYPE_MAP_INV
 
@@ -976,6 +986,12 @@ class TestSizeConstants:
 
     def test_csp_header_size(self) -> None:
         assert CSP_HEADER_SIZE == 4
+
+    def test_novatel_header_size(self) -> None:
+        assert NOVATEL_HEADER_SIZE == 28
+
+    def test_bestxyz_body_size(self) -> None:
+        assert BESTXYZ_BODY_SIZE == 112
 
 
 # ---------------------------------------------------------------------------
@@ -1010,3 +1026,318 @@ class TestConvertObcAdcBatteryVoltageToPercent:
     @pytest.mark.parametrize("voltage_volts", [0.0, -1.5])
     def test_non_positive_reading_is_none(self, voltage_volts: float) -> None:
         assert convert_obc_adc_battery_voltage_to_percent(voltage_volts) is None
+
+
+# ---------------------------------------------------------------------------
+# Tests for decode_gnss_bestxyzb_sample_packet
+# ---------------------------------------------------------------------------
+
+
+def _novatel_crc32_reference(data: bytes) -> int:
+    """Direct port of `CalculateBlockCRC32` from the NovAtel OEM7 manual."""
+    crc = 0
+    for byte in data:
+        value = (crc ^ byte) & 0xFF
+        for _ in range(8):
+            value = (value >> 1) ^ 0xEDB88320 if value & 1 else value >> 1
+        crc = ((crc >> 8) & 0x00FFFFFF) ^ value
+    return crc
+
+
+def _make_bestxyzb(  # noqa: PLR0913
+    *,
+    message_id: int = 241,
+    time_status: int = 180,  # FINESTEERING
+    gps_week: int = 2400,
+    gps_week_ms: int = 345_600_000,
+    receiver_status: int = 0,
+    p_sol_status: int = 0,  # SOL_COMPUTED
+    pos_type: int = 16,  # SINGLE
+    position_m: tuple[float, float, float] = (1_000_000.0, -4_000_000.0, 5_500_000.0),
+    velocity_m_per_s: tuple[float, float, float] = (3.0, 4.0, 0.0),
+    ext_sol_stat: int = 0x06,  # Iono: multi-frequency computed.
+    galileo_beidou_sig_mask: int = 0x00,
+    gps_glonass_sig_mask: int = 0x11,  # GPS L1 + GLONASS L1.
+    sol_age_sec: float = 0.0,
+    include_crc: bool = True,
+) -> bytes:
+    body = struct.pack(
+        BESTXYZ_BODY_FMT,
+        p_sol_status,
+        pos_type,
+        *position_m,
+        1.5,
+        2.5,
+        3.5,
+        0,  # v_sol_status: SOL_COMPUTED
+        8,  # vel_type: DOPPLER_VELOCITY
+        *velocity_m_per_s,
+        0.25,
+        0.5,
+        0.75,
+        b"0\x00\x00\x00",
+        0.15,
+        0.0,
+        sol_age_sec,
+        12,
+        9,
+        9,
+        0,
+        0,
+        ext_sol_stat,
+        galileo_beidou_sig_mask,
+        gps_glonass_sig_mask,
+    )
+    header = struct.pack(
+        NOVATEL_HEADER_FMT,
+        b"\xaa\x44\x12",
+        NOVATEL_HEADER_SIZE,
+        message_id,
+        0x00,
+        0x20,
+        len(body),
+        0,
+        100,  # idle_time -> 50%
+        time_status,
+        gps_week,
+        gps_week_ms,
+        receiver_status,
+        0,
+        16_809,
+    )
+    raw = header + body
+    if include_crc:
+        raw += struct.pack("<I", _novatel_crc32_reference(raw))
+    return raw
+
+
+def _make_gnss_payload(
+    *,
+    downlink_seq_num: int = 513,
+    ring_position: int = 7,
+    bestxyzb: bytes | None = None,
+) -> bytes:
+    if bestxyzb is None:
+        bestxyzb = _make_bestxyzb()
+    return (
+        struct.pack(GNSS_DOWNLINK_HEADER_FMT, 0x30, downlink_seq_num, ring_position)
+        + bestxyzb
+    )
+
+
+class TestNovatelCrc32:
+    @pytest.mark.parametrize("data", [b"", b"\x00", b"123456789", bytes(range(256))])
+    def test_matches_reference_implementation(self, data: bytes) -> None:
+        assert novatel_crc32(data) == _novatel_crc32_reference(data)
+
+
+class TestEcefToGeodetic:
+    def test_equator_prime_meridian(self) -> None:
+        lat, lon, height = ecef_to_geodetic(6_378_137.0, 0.0, 0.0)
+        assert abs(lat - 0.0) < 1e-9
+        assert abs(lon - 0.0) < 1e-9
+        assert abs(height - 0.0) < 1e-6
+
+    def test_north_pole_leo(self) -> None:
+        lat, _lon, height = ecef_to_geodetic(0.0, 0.0, 6_356_752.314245 + 500_000.0)
+        assert abs(lat - 90.0) < 1e-9
+        assert abs(height - 500_000.0) < 1e-3
+
+
+class TestDecodeGnssBestxyzbSample:
+    def test_decodes_packet_fields(self) -> None:
+        result = decode_gnss_bestxyzb_sample_packet(_make_gnss_payload())
+        assert result["packet_type"] == "GNSS_BESTXYZB_SAMPLE"
+        assert result["gnss_downlink_seq_num"] == 513
+        assert result["gnss_ring_position"] == 7
+
+    def test_all_keys_prefixed(self) -> None:
+        result = decode_gnss_bestxyzb_sample_packet(_make_gnss_payload())
+        assert all(k.startswith("gnss_") for k in result if k != "packet_type")
+
+    def test_header_fields(self) -> None:
+        result = decode_gnss_bestxyzb_sample_packet(_make_gnss_payload())
+        assert result["gnss_crc_valid"] is True
+        assert json.loads(result["gnss_misc_json"])["message_id"] == 241
+        assert result["gnss_idle_time_percent"] == 50.0
+        assert result["gnss_time_status"] == "FINESTEERING"
+        assert result["gnss_gps_week"] == 2400
+        assert result["gnss_gps_week_ms"] == 345_600_000
+        assert json.loads(result["gnss_misc_json"])["receiver_sw_version"] == 16_809
+
+    def test_solution_utc_time(self) -> None:
+        # GPS week 2400 starts 2026-01-04T00:00:00 GPS; +4 days, -18 leap seconds.
+        result = decode_gnss_bestxyzb_sample_packet(_make_gnss_payload())
+        assert result["gnss_solution_utc_time"] == "2026-01-07T23:59:42.000+00:00"
+
+    def test_solution_utc_time_subtracts_solution_age(self) -> None:
+        bestxyzb = _make_bestxyzb(sol_age_sec=90.5)
+        result = decode_gnss_bestxyzb_sample_packet(
+            _make_gnss_payload(bestxyzb=bestxyzb)
+        )
+        assert result["gnss_solution_age_sec"] == 90.5
+        assert result["gnss_solution_utc_time"] == "2026-01-07T23:58:11.500+00:00"
+
+    def test_solution_utc_time_none_when_time_unknown(self) -> None:
+        payload = _make_gnss_payload(bestxyzb=_make_bestxyzb(time_status=20))
+        result = decode_gnss_bestxyzb_sample_packet(payload)
+        assert result["gnss_time_status"] == "UNKNOWN"
+        assert result["gnss_solution_utc_time"] is None
+
+    def test_position_velocity(self) -> None:
+        result = decode_gnss_bestxyzb_sample_packet(_make_gnss_payload())
+        assert result["gnss_position_solution_status"] == "SOL_COMPUTED"
+        assert result["gnss_position_type"] == "SINGLE"
+        assert result["gnss_position_x_m"] == 1_000_000.0
+        assert result["gnss_position_y_m"] == -4_000_000.0
+        assert result["gnss_position_z_m"] == 5_500_000.0
+        assert result["gnss_position_z_stddev_m"] == 3.5
+        assert result["gnss_velocity_type"] == "DOPPLER_VELOCITY"
+        assert result["gnss_velocity_x_m_per_s"] == 3.0
+        assert result["gnss_velocity_z_stddev_m_per_s"] == 0.75
+        assert result["gnss_ecef_speed_m_per_s"] == 5.0
+        assert json.loads(result["gnss_misc_json"])["base_station_id"] == "0"
+        assert result["gnss_num_svs_tracked"] == 12
+        assert result["gnss_num_svs_in_solution"] == 9
+
+    def test_geodetic_derived(self) -> None:
+        # 500 km above Calgary, converted to ECEF with the WGS84 forward formula.
+        lat, lon, height_m = math.radians(51.05), math.radians(-114.07), 500_000.0
+        e2 = 0.0066943799901413165
+        n = 6_378_137.0 / math.sqrt(1 - e2 * math.sin(lat) ** 2)
+        position_m = (
+            (n + height_m) * math.cos(lat) * math.cos(lon),
+            (n + height_m) * math.cos(lat) * math.sin(lon),
+            (n * (1 - e2) + height_m) * math.sin(lat),
+        )
+        bestxyzb = _make_bestxyzb(position_m=position_m)
+        result = decode_gnss_bestxyzb_sample_packet(
+            _make_gnss_payload(bestxyzb=bestxyzb)
+        )
+        assert abs(result["gnss_latitude_deg"] - 51.05) < 1e-6
+        assert abs(result["gnss_longitude_deg"] + 114.07) < 1e-6
+        assert abs(result["gnss_height_above_ellipsoid_km"] - 500.0) < 1e-3
+
+    def test_zero_position_has_no_geodetic(self) -> None:
+        bestxyzb = _make_bestxyzb(
+            pos_type=0, p_sol_status=1, position_m=(0.0, 0.0, 0.0)
+        )
+        result = decode_gnss_bestxyzb_sample_packet(
+            _make_gnss_payload(bestxyzb=bestxyzb)
+        )
+        assert result["gnss_position_solution_status"] == "INSUFFICIENT_OBS"
+        assert result["gnss_position_type"] == "NONE"
+        assert result["gnss_latitude_deg"] is None
+        assert result["gnss_height_above_ellipsoid_km"] is None
+
+    def test_bitfields(self) -> None:
+        bestxyzb = _make_bestxyzb(
+            receiver_status=(1 << 19) | (1 << 5) | (0b01 << 25),
+            ext_sol_stat=0x06 | 0x20,
+            galileo_beidou_sig_mask=0x11,
+        )
+        result = decode_gnss_bestxyzb_sample_packet(
+            _make_gnss_payload(bestxyzb=bestxyzb)
+        )
+        misc = json.loads(result["gnss_misc_json"])
+        assert misc["receiver_status_bitfield"] == "0x02080020"
+        assert json.loads(result["gnss_receiver_status_flags"]) == [
+            "ANTENNA_OPEN_CIRCUIT",
+            "POSITION_SOLUTION_INVALID",
+        ]
+        assert misc["receiver_status_version"] == 1
+        assert result["gnss_pseudorange_iono_correction"] == "MULTI_FREQUENCY_COMPUTED"
+        assert misc["extended_solution_flags"] == ["ANTENNA_INFO_MISSING"]
+        assert json.loads(result["gnss_galileo_beidou_signals_used"]) == [
+            "GALILEO_E1",
+            "BEIDOU_B1",
+        ]
+        assert json.loads(result["gnss_gps_glonass_signals_used"]) == [
+            "GPS_L1",
+            "GLONASS_L1",
+        ]
+
+    def test_geodetic_for_less_reliable_single_fix(self) -> None:
+        # A held SINGLE fix with INSUFFICIENT_OBS is still a real position.
+        bestxyzb = _make_bestxyzb(p_sol_status=1, pos_type=16, sol_age_sec=30.0)
+        result = decode_gnss_bestxyzb_sample_packet(
+            _make_gnss_payload(bestxyzb=bestxyzb)
+        )
+        assert result["gnss_position_solution_status"] == "INSUFFICIENT_OBS"
+        assert result["gnss_latitude_deg"] is not None
+        assert result["gnss_longitude_deg"] is not None
+        assert result["gnss_height_above_ellipsoid_km"] is not None
+
+    def test_no_geodetic_for_placeholder_position(self) -> None:
+        # Flight data: with no valid fix, the receiver reports a placeholder
+        # position ~107,800 km up, even with a SINGLE position type. It must
+        # not show up as a real latitude/longitude.
+        bestxyzb = _make_bestxyzb(
+            p_sol_status=3,
+            pos_type=16,
+            position_m=(9_776_259.66, 7_266_699.807, 113_507_980.881),
+        )
+        result = decode_gnss_bestxyzb_sample_packet(
+            _make_gnss_payload(bestxyzb=bestxyzb)
+        )
+        assert result["gnss_position_solution_status"] == "SINGULARITY"
+        assert result["gnss_position_z_m"] == 113_507_980.881
+        assert result["gnss_latitude_deg"] is None
+        assert result["gnss_longitude_deg"] is None
+        assert result["gnss_height_above_ellipsoid_km"] is None
+
+    def test_misc_json_keys(self) -> None:
+        result = decode_gnss_bestxyzb_sample_packet(_make_gnss_payload())
+        misc = json.loads(result["gnss_misc_json"])
+        assert set(misc) == {
+            "message_id",
+            "message_type",
+            "port_address",
+            "message_length",
+            "sequence",
+            "receiver_status_bitfield",
+            "receiver_status_version",
+            "receiver_sw_version",
+            "velocity_latency_sec",
+            "base_station_id",
+            "differential_age_sec",
+            "num_svs_l1_in_solution",
+            "extended_solution_status",
+            "extended_solution_flags",
+        }
+        # None of the packed fields also appear as their own column.
+        assert not any(f"gnss_{k}" in result for k in misc)
+
+    def test_without_crc(self) -> None:
+        payload = _make_gnss_payload(bestxyzb=_make_bestxyzb(include_crc=False))
+        result = decode_gnss_bestxyzb_sample_packet(payload)
+        assert result["gnss_crc_valid"] is None
+        assert result["gnss_position_x_m"] == 1_000_000.0
+
+    def test_bad_crc(self) -> None:
+        bestxyzb = bytearray(_make_bestxyzb())
+        bestxyzb[-1] ^= 0xFF
+        result = decode_gnss_bestxyzb_sample_packet(
+            _make_gnss_payload(bestxyzb=bytes(bestxyzb))
+        )
+        assert result["gnss_crc_valid"] is False
+
+    def test_bad_sync_raises(self) -> None:
+        bestxyzb = b"\x00" + _make_bestxyzb()[1:]
+        with pytest.raises(ValueError, match="sync"):
+            decode_gnss_bestxyzb_sample_packet(_make_gnss_payload(bestxyzb=bestxyzb))
+
+    def test_wrong_message_id_raises(self) -> None:
+        bestxyzb = _make_bestxyzb(message_id=42)
+        with pytest.raises(ValueError, match="message ID 42"):
+            decode_gnss_bestxyzb_sample_packet(_make_gnss_payload(bestxyzb=bestxyzb))
+
+    def test_truncated_raises(self) -> None:
+        with pytest.raises(ValueError, match="Too short"):
+            decode_gnss_bestxyzb_sample_packet(_make_gnss_payload()[:100])
+
+    def test_via_decode_packet_safe(self) -> None:
+        result = decode_packet_safe((DUMMY_CSP + _make_gnss_payload()).hex())
+        assert result is not None
+        assert result["packet_type"] == "GNSS_BESTXYZB_SAMPLE"
+        assert result["gnss_position_type"] == "SINGLE"
