@@ -11,6 +11,7 @@ from __future__ import annotations
 
 __all__ = ["build_satellite_events_page"]
 
+from datetime import UTC, datetime
 from pathlib import Path  # noqa: TC003 -- tyro needs this at runtime elsewhere
 from typing import TYPE_CHECKING
 
@@ -45,6 +46,17 @@ def _duration_str(total_ms: int) -> str:
     return f"{total_sec // 3600}h {(total_sec % 3600) // 60}m"
 
 
+def _time_since_str(value: datetime) -> str:
+    total_sec = int((datetime.now(UTC) - value).total_seconds())
+    if total_sec < 60:  # noqa: PLR2004
+        return f"{total_sec}s ago"
+    if total_sec < 3600:  # noqa: PLR2004
+        return f"{total_sec // 60}m ago"
+    if total_sec < 86400:  # noqa: PLR2004
+        return f"{total_sec // 3600}h {(total_sec % 3600) // 60}m ago"
+    return f"{total_sec // 86400}d {(total_sec % 86400) // 3600}h ago"
+
+
 def _events_table(events: pl.DataFrame) -> None:
     with ui.card().classes("w-full"):
         ui.label("Satellite Events").classes("text-lg font-bold")
@@ -74,9 +86,14 @@ def _events_table(events: pl.DataFrame) -> None:
                 "field": "estimated_event_at",
             },
             {
-                "name": "time_since_event",
+                "name": "time_since_event_estimated",
+                "label": "Time Since Event (Estimated)",
+                "field": "time_since_event_estimated",
+            },
+            {
+                "name": "event_to_beacon_dt",
                 "label": "Event to Beacon ΔT",
-                "field": "time_since_event",
+                "field": "event_to_beacon_dt",
             },
             {
                 "name": "obc_reboot_reason",
@@ -99,7 +116,8 @@ def _events_table(events: pl.DataFrame) -> None:
                 "event_type": r["event_type"],
                 "detected_at": f"{r['detected_at']:%Y-%m-%d %H:%M:%S}",
                 "estimated_event_at": f"{r['estimated_event_at']:%Y-%m-%d %H:%M:%S}",
-                "time_since_event": _duration_str(
+                "time_since_event_estimated": _time_since_str(r["estimated_event_at"]),
+                "event_to_beacon_dt": _duration_str(
                     r["time_since_event_when_detected_ms"]
                 ),
                 "obc_reboot_reason": r["obc_reboot_reason"] or "",
