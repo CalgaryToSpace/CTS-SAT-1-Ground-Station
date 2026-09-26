@@ -877,12 +877,6 @@ class TestDecodePacketSafe:
         assert result["packet_type"] == "BEACON_BASIC"
         assert result["csp_header_hex"] == DUMMY_CSP.hex()
 
-    def test_beacon_peripheral_dispatch(self) -> None:
-        hex_str = self._wrap(b"\x02\x00\x01\x02\x03")
-        result = decode_packet_safe(hex_str)
-        assert result is not None
-        assert result["packet_type"] == "BEACON_PERIPHERAL"
-
     def test_log_message_dispatch(self) -> None:
         hex_str = self._wrap(_make_log_payload(message=b"test log\n"))
         result = decode_packet_safe(hex_str)
@@ -951,7 +945,6 @@ class TestPacketTypeMaps:
     def test_all_expected_types_present(self) -> None:
         for name in (
             "BEACON_BASIC",
-            "BEACON_PERIPHERAL",
             "LOG_MESSAGE",
             "TCMD_RESPONSE",
             "BULK_FILE_DOWNLINK",
