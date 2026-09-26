@@ -2,8 +2,9 @@
 `everything_decoded.parquet`, packet-type/time-range/message-substring
 filters and sorting applied server-side, a details panel for whichever row
 was clicked (every field, each copyable), plus CSV/Excel exports of the
-filtered set -- see `packet_browser` for the actual querying/paging/export
-logic.
+filtered set. A toggle switches TCMD_RESPONSE rows between one row per raw
+packet and one row per reassembled (possibly multi-packet) response -- see
+`packet_browser` for the actual querying/paging/export logic.
 """
 
 # pyright: standard
@@ -55,6 +56,7 @@ GENERAL_MESSAGE_WIDTH_PX = 760
 # than crowding out the decoded fields.
 METADATA_COLUMNS = (
     "packet_id",
+    "packet_ids",  # the reassembled-TCMD view's stand-in for packet_id
     "data_length_bytes",
     "csp_crc_valid",
     "csp_crc_source",
@@ -167,6 +169,7 @@ class _FilterState:
     end: str | None = None
     message_substring: str = ""
     case_sensitive: bool = False
+    reassemble_tcmd_responses: bool = True
     page_size: int = PAGE_SIZE_OPTIONS[1]
     offset: int = 0
     sort: packet_browser.PacketSort = field(default_factory=packet_browser.PacketSort)
@@ -179,11 +182,16 @@ class _FilterState:
             end=_parse_range_input(self.end),
             message_substring=self.message_substring or None,
             case_sensitive=self.case_sensitive,
+            reassemble_tcmd_responses=self.reassemble_tcmd_responses,
         )
 
 
 def _filters_section(
-    state: _FilterState, packet_types: list[str], *, on_search: Callable[[], None]
+    state: _FilterState,
+    packet_types: list[str],
+    *,
+    reassembly_available: bool,
+    on_search: Callable[[], None],
 ) -> None:
     with ui.card().classes("w-full"):
         ui.label("Filters").classes("text-lg font-bold")
@@ -233,6 +241,21 @@ def _filters_section(
                 value=state.case_sensitive,
                 on_change=lambda e: setattr(state, "case_sensitive", bool(e.value)),
             )
+            reassemble_switch = ui.switch(
+                "Reassemble TCMD responses",
+                value=state.reassemble_tcmd_responses,
+                on_change=lambda e: _set_and_search(
+                    "reassemble_tcmd_responses", bool(e.value)
+                ),
+            ).tooltip(
+                "On: one row per telecommand response, its packets joined "
+                "back together (missing parts shown as '?'). Off: one row "
+                "per raw TCMD_RESPONSE packet."
+                if reassembly_available
+                else "Step 5 hasn't produced reassembled_tcmd_responses yet "
+                "-- showing raw TCMD_RESPONSE packets."
+            )
+            reassemble_switch.set_enabled(reassembly_available)
             ui.select(
                 PAGE_SIZE_OPTIONS,
                 label="Rows/page",
@@ -282,7 +305,10 @@ def _notify_export(*, row_count: int, truncated: bool) -> None:
 def build_packet_browser_page(data_dir: Path) -> None:  # noqa: C901, PLR0915
     parquet_path = data_dir / step_3_pipeline.OUTPUT_FILENAME
     packet_types = packet_browser.packet_type_options(parquet_path)
-    state = _FilterState()
+    reassembly_available = packet_browser.reassembled_tcmd_responses_available(
+        parquet_path
+    )
+    state = _FilterState(reassemble_tcmd_responses=reassembly_available)
     # The grid currently on screen (replaced on every refresh), and the row
     # the details panel is showing -- kept across page turns/searches, since
     # it's a snapshot of that one row rather than a view into the grid.
@@ -530,10 +556,17 @@ def build_packet_browser_page(data_dir: Path) -> None:  # noqa: C901, PLR0915
             "Every decoded packet, every column -- filtering and sorting "
             "happen server-side, so this stays responsive no matter how much "
             "history has piled up. Drag to select text in any cell to copy "
-            "it, or click a row to see (and copy) all of its fields."
+            "it, or click a row to see (and copy) all of its fields. With "
+            '"Reassemble TCMD responses" on, multi-packet telecommand '
+            "responses show as one row each."
         ).classes("text-caption text-grey")
 
-        _filters_section(state, packet_types, on_search=_search)
+        _filters_section(
+            state,
+            packet_types,
+            reassembly_available=reassembly_available,
+            on_search=_search,
+        )
 
         ui.input(
             'Find columns (e.g. "temp volt")',

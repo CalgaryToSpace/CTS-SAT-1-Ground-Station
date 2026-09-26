@@ -13,6 +13,7 @@ Usage (uv):
     uv run cts1_processing_pipeline step_2
     uv run cts1_processing_pipeline step_3
     uv run cts1_processing_pipeline step_4
+    uv run cts1_processing_pipeline step_5
     uv run cts1_processing_pipeline daemon
     uv run cts1_processing_pipeline daemon --start "3 days" --interval 5
 """
@@ -40,6 +41,9 @@ from .step_1_download_and_demodulate import pipeline as step_1_download_and_demo
 from .step_2_deduplicate_packets import pipeline as step_2_deduplicate_packets
 from .step_3_decode_packets import pipeline as step_3_decode_packets
 from .step_4_detect_satellite_events import pipeline as step_4_detect_satellite_events
+from .step_5_reassemble_tcmd_responses import (
+    pipeline as step_5_reassemble_tcmd_responses,
+)
 
 DEFAULT_DATA_DIR = step_1_download_and_demodulate.DEFAULT_DATA_DIR
 
@@ -98,9 +102,15 @@ class Step4Args:
 
 
 @dataclass(frozen=True, slots=True)
+class Step5Args:
+    """Step 5: reassemble multi-packet telecommand responses from
+    everything_decoded into reassembled_tcmd_responses."""
+
+
+@dataclass(frozen=True, slots=True)
 class DaemonArgs:
-    """Daemon: run steps 1-4 continuously -- an initial backfill of
-    `--start`, then a periodic requery + full steps 1-4 rerun every
+    """Daemon: run steps 1-5 continuously -- an initial backfill of
+    `--start`, then a periodic requery + full steps 1-5 rerun every
     `--interval` minutes."""
 
     norad_id: Annotated[str, tyro.conf.Positional] = "69015"
@@ -115,7 +125,7 @@ class DaemonArgs:
     """Minutes between requeries. Each requery re-pulls observations
     starting in the trailing (interval + 30) minutes -- the 30-minute
     overlap catches a SatNOGS observation still uploading/being vetted
-    during the previous poll -- then reruns steps 2 and 3."""
+    during the previous poll -- then reruns steps 2 through 5."""
 
     limit: int | None = None
     """Cap the number of observations decoded per step-1 run (for testing)."""
@@ -141,6 +151,7 @@ Command = (
     | Annotated[Step2Args, tyro.conf.subcommand(name="step_2", prefix_name=False)]
     | Annotated[Step3Args, tyro.conf.subcommand(name="step_3", prefix_name=False)]
     | Annotated[Step4Args, tyro.conf.subcommand(name="step_4", prefix_name=False)]
+    | Annotated[Step5Args, tyro.conf.subcommand(name="step_5", prefix_name=False)]
     | Annotated[DaemonArgs, tyro.conf.subcommand(name="daemon", prefix_name=False)]
 )
 
@@ -197,6 +208,8 @@ def main() -> None:
             step_3_decode_packets.run(data_dir=args.data_dir)
         elif isinstance(args.command, Step4Args):
             step_4_detect_satellite_events.run(data_dir=args.data_dir)
+        elif isinstance(args.command, Step5Args):
+            step_5_reassemble_tcmd_responses.run(data_dir=args.data_dir)
         elif isinstance(args.command, DaemonArgs):  # pyright: ignore[reportUnnecessaryIsInstance]
             daemon.run(
                 norad_id=args.command.norad_id,

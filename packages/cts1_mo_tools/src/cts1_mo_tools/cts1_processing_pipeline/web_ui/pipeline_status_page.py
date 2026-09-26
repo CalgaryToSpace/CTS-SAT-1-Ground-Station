@@ -185,6 +185,7 @@ def _counts_section(
             _stat_tile("Distinct packets", f"{counts.total_distinct_packets:,}")
             _stat_tile("Decoded packets", f"{counts.total_decoded_packets:,}")
             _stat_tile("Satellite events", f"{counts.total_satellite_events:,}")
+            _stat_tile("TCMD responses", f"{counts.total_tcmd_responses:,}")
         if counts.decode_backlog:
             with ui.row().classes("items-center gap-2 mt-2"):
                 ui.icon("warning", color="warning")
@@ -231,6 +232,15 @@ def _counts_section(
                     counts.latest_satellite_events_at,
                     source=(
                         "Step 4 · satellite_events_from_beacons.parquet · "
+                        "file last-written time (rewritten whole on every "
+                        "run, so no per-row timestamp)"
+                    ),
+                )
+                _freshness_row(
+                    "Latest TCMD response reassembly run (step 5)",
+                    counts.latest_tcmd_responses_at,
+                    source=(
+                        "Step 5 · reassembled_tcmd_responses.parquet · "
                         "file last-written time (rewritten whole on every "
                         "run, so no per-row timestamp)"
                     ),
