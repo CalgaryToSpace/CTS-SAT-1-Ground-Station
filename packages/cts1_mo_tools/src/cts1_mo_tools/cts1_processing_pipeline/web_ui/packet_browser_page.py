@@ -46,6 +46,28 @@ ALWAYS_VISIBLE_COLUMNS = ("received_at", "packet_type")
 # full value.
 MAX_COLUMN_WIDTH_PX = 420
 
+# Except general_message itself, which is the column people actually read --
+# given a ~100-character starting width instead of the cap above.
+GENERAL_MESSAGE_WIDTH_PX = 760
+
+# Step 1/2 decoding/deduplication bookkeeping -- rarely what anyone is
+# looking for, so shoved to the far right of the grid (in this order) rather
+# than crowding out the decoded fields.
+METADATA_COLUMNS = (
+    "packet_id",
+    "data_length_bytes",
+    "csp_crc_valid",
+    "csp_crc_source",
+    "received_at_source",
+    "rssi_db",
+    "rs_corrected_error_count",
+    "rs_correctable",
+    "packet_count",
+    "decoders",
+    "observation_ids",
+    "sources",
+)
+
 # `navigator.clipboard` only exists in a secure context (HTTPS or
 # localhost) -- fall back to the old hidden-textarea trick so copy still
 # works when the dashboard is reached over plain HTTP on the LAN.
@@ -72,6 +94,13 @@ _COPY_JS = """
 # no native datetime type, and this keeps its formatting consistent with
 # the rest of the dashboard's `%Y-%m-%d %H:%M:%S` timestamps.
 _GRID_PASSTHROUGH_DTYPES = (pl.Boolean, pl.String)
+
+
+def _grid_column_order(columns: list[str]) -> list[str]:
+    """`columns` with every `METADATA_COLUMNS` entry moved to the end."""
+    return [c for c in columns if c not in METADATA_COLUMNS] + [
+        c for c in METADATA_COLUMNS if c in columns
+    ]
 
 
 def _grid_ready(df: pl.DataFrame) -> list[dict[str, object]]:
@@ -325,8 +354,19 @@ def build_packet_browser_page(data_dir: Path) -> None:  # noqa: C901, PLR0915
                     if col == state.sort.column
                     else None
                 ),
+                **(
+                    {
+                        "width": GENERAL_MESSAGE_WIDTH_PX,
+                        # Still drag-resizable, just within these bounds.
+                        "minWidth": 50,
+                        "maxWidth": 3 * GENERAL_MESSAGE_WIDTH_PX,
+                        "suppressAutoSize": True,
+                    }
+                    if col == "general_message"
+                    else {}
+                ),
             }
-            for col in page.columns
+            for col in _grid_column_order(page.columns)
         ]
         grid = (
             ui.aggrid(
