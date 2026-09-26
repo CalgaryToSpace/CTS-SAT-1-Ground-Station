@@ -500,8 +500,11 @@ def spreadsheet_file_to_agenda_file(
     if output_file is None:
         output_file = (
             Path("packages/cts1_mo_tools/src/cts1_mo_tools/cts1_agenda_files")
-            / f"""{mission_start.astimezone(ZoneInfo('America/Edmonton'))
-                 .strftime('%Y-%m-%dT%H%ML_agenda.txt')}"""
+            / f"""{
+                mission_start.astimezone(ZoneInfo("America/Edmonton")).strftime(
+                    "%Y-%m-%dT%H%ML_agenda.txt"
+                )
+            }"""
         )
 
     agenda = build_agenda(mission_date, mission_start, rows)
