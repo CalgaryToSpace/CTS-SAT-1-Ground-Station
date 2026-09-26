@@ -2,7 +2,7 @@
 page: row counts and freshness timestamps at every stage (step 1's raw
 SatNOGS observations/packets/decoder runs, step 2's deduplicated distinct
 packets, step 3's fully decoded packets, step 4's detected satellite
-events), plus a per-decoder-tool scoreboard.
+events, step 5's reassembled telecommand responses), plus a per-decoder-tool scoreboard.
 
 Pure data layer: no NiceGUI/rendering concerns live here, just polars -- see
 `data.py` for the analogous loader over step 3's final
@@ -19,6 +19,7 @@ __all__ = [
     "RAW_OBSERVATIONS_FILENAME",
     "RAW_PACKETS_FILENAME",
     "SATELLITE_EVENTS_FILENAME",
+    "TCMD_RESPONSES_FILENAME",
     "DecoderToolStats",
     "PacketCompletenessSummary",
     "PipelineCounts",
@@ -49,6 +50,9 @@ from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
 from cts1_mo_tools.cts1_processing_pipeline.step_4_detect_satellite_events import (
     pipeline as step_4_pipeline,
 )
+from cts1_mo_tools.cts1_processing_pipeline.step_5_reassemble_tcmd_responses import (
+    pipeline as step_5_pipeline,
+)
 
 if TYPE_CHECKING:
     from datetime import timedelta
@@ -64,6 +68,7 @@ DECODER_RUNS_FILENAME = f"{step_1_db.DECODER_RUNS_TABLE}.parquet"
 DISTINCT_PACKETS_FILENAME = step_2_pipeline.OUTPUT_FILENAME
 DECODED_PACKETS_FILENAME = step_3_pipeline.OUTPUT_FILENAME
 SATELLITE_EVENTS_FILENAME = step_4_pipeline.OUTPUT_FILENAME
+TCMD_RESPONSES_FILENAME = step_5_pipeline.OUTPUT_FILENAME
 
 
 def _scan(path: Path) -> pl.LazyFrame | None:
@@ -120,12 +125,14 @@ class PipelineCounts:
     total_distinct_packets: int
     total_decoded_packets: int
     total_satellite_events: int
+    total_tcmd_responses: int
     latest_observation_end: datetime | None
     latest_packet_received_at: datetime | None
     latest_packet_ingested_at: datetime | None
     latest_decoder_run_at: datetime | None
     latest_decoded_at: datetime | None
     latest_satellite_events_at: datetime | None
+    latest_tcmd_responses_at: datetime | None
 
     @property
     def decode_backlog(self) -> int:
@@ -145,6 +152,8 @@ def pipeline_counts(data_dir: Path = DEFAULT_DATA_DIR) -> PipelineCounts:
     decoded_packets_lf = _scan(decoded_packets_path)
     satellite_events_path = data_dir / SATELLITE_EVENTS_FILENAME
     satellite_events_lf = _scan(satellite_events_path)
+    tcmd_responses_path = data_dir / TCMD_RESPONSES_FILENAME
+    tcmd_responses_lf = _scan(tcmd_responses_path)
 
     return PipelineCounts(
         total_observations=_row_count(raw_observations_lf),
@@ -152,12 +161,14 @@ def pipeline_counts(data_dir: Path = DEFAULT_DATA_DIR) -> PipelineCounts:
         total_distinct_packets=_row_count(distinct_packets_lf),
         total_decoded_packets=_row_count(decoded_packets_lf),
         total_satellite_events=_row_count(satellite_events_lf),
+        total_tcmd_responses=_row_count(tcmd_responses_lf),
         latest_observation_end=_max_datetime(raw_observations_lf, "end"),
         latest_packet_received_at=_max_datetime(raw_packets_lf, "received_at"),
         latest_packet_ingested_at=_max_datetime(raw_packets_lf, "ingested_at"),
         latest_decoder_run_at=_max_datetime(decoder_runs_lf, "run_at"),
         latest_decoded_at=_file_mtime(decoded_packets_path),
         latest_satellite_events_at=_file_mtime(satellite_events_path),
+        latest_tcmd_responses_at=_file_mtime(tcmd_responses_path),
     )
 
 
