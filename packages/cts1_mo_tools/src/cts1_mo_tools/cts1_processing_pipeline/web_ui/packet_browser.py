@@ -7,6 +7,13 @@ the lazy scan before `.collect()`, and a page is a `.slice()` on that same
 lazy frame -- so browsing a file with a lot of history only ever
 materializes the one page (plus one column-pruned null-count pass) actually
 needed for the current filter, never the whole table.
+
+With `PacketBrowserFilters.reassemble_tcmd_responses` set, every raw
+`TCMD_RESPONSE` packet is swapped out for step 5's reassembled responses
+(`reassembled_tcmd_responses.parquet`, one row per response, however many
+packets it spanned) -- see `_reassembled_tcmd_rows` for how those rows are
+fit into `everything_decoded`'s columns, so every filter/sort/export below
+works on either view unchanged.
 """
 
 from __future__ import annotations
@@ -23,6 +30,7 @@ __all__ = [
     "export_filtered_excel",
     "load_page",
     "packet_type_options",
+    "reassembled_tcmd_responses_available",
 ]
 
 import io
@@ -33,6 +41,9 @@ import polars as pl
 import xlsxwriter  # pyright: ignore[reportMissingTypeStubs]
 
 from cts1_mo_tools.cts1_processing_pipeline.common import drop_timezones_for_excel
+from cts1_mo_tools.cts1_processing_pipeline.step_5_reassemble_tcmd_responses import (
+    pipeline as step_5_pipeline,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -56,6 +67,9 @@ class PacketBrowserFilters:
     end: datetime | None = None
     message_substring: str | None = None
     case_sensitive: bool = False
+    # Show one row per (possibly multi-packet) telecommand response instead
+    # of one row per raw TCMD_RESPONSE packet -- see the module docstring.
+    reassemble_tcmd_responses: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +107,101 @@ def _scan(path: Path) -> pl.LazyFrame | None:
     if not path.exists():
         return None
     return pl.scan_parquet(path)
+
+
+def _reassembled_tcmd_path(decoded_path: Path) -> Path:
+    """Step 5's output, which lives next to step 3's `everything_decoded`."""
+    return decoded_path.parent / step_5_pipeline.OUTPUT_FILENAME
+
+
+def reassembled_tcmd_responses_available(decoded_path: Path) -> bool:
+    """Whether step 5 has produced anything to show in the reassembled view."""
+    return _reassembled_tcmd_path(decoded_path).exists()
+
+
+# Step 5's per-response columns that have no per-packet counterpart in
+# `everything_decoded` -- slotted in among the existing tcmd_* header
+# columns so they sit together in the grid.
+_REASSEMBLY_ONLY_COLUMNS = (
+    "tcmd_part_count",
+    "tcmd_received_part_count",
+    "tcmd_missing_seq_nums",
+    "tcmd_is_complete",
+    "tcmd_last_received_at",
+    "packet_ids",
+)
+
+
+def _reassembled_tcmd_rows(path: Path) -> pl.LazyFrame | None:
+    """Step 5's reassembled responses, reshaped to line up with
+    `everything_decoded`'s columns: `received_at` is when the response's
+    first packet arrived, and `general_message`/`tcmd_response_text` hold
+    the whole joined-together text. Every per-packet column (CRC, RSSI,
+    decoders, ...) is left null, since a row may now span several packets --
+    `packet_ids` lists them instead.
+    """
+    lf = _scan(path)
+    if lf is None:
+        return None
+    return lf.select(
+        received_at=pl.col("first_received_at"),
+        packet_type=pl.lit("TCMD_RESPONSE"),
+        general_message=pl.col("tcmd_response_text"),
+        tcmd_ts_sent=pl.col("tcmd_ts_sent"),
+        tcmd_response_code=pl.col("tcmd_response_code"),
+        tcmd_duration_ms=pl.col("tcmd_duration_ms"),
+        tcmd_part_count=pl.col("part_count"),
+        tcmd_received_part_count=pl.col("received_part_count"),
+        tcmd_missing_seq_nums=pl.col("missing_seq_nums"),
+        tcmd_is_complete=pl.col("is_complete"),
+        tcmd_last_received_at=pl.col("last_received_at"),
+        packet_ids=pl.col("packet_ids"),
+        tcmd_response_text=pl.col("tcmd_response_text"),
+    )
+
+
+def _with_reassembled_tcmd(decoded: pl.LazyFrame, path: Path) -> pl.LazyFrame:
+    """`decoded` with its raw TCMD_RESPONSE packets replaced by step 5's
+    reassembled responses. Falls back to `decoded` as-is if step 5 hasn't
+    run yet, rather than silently hiding every telecommand response.
+    """
+    reassembled = _reassembled_tcmd_rows(_reassembled_tcmd_path(path))
+    if reassembled is None:
+        return decoded
+
+    base_columns = decoded.collect_schema().names()
+    # The per-packet sequence numbers mean nothing once the packets are
+    # joined -- `tcmd_part_count` etc. replace them.
+    dropped = {"tcmd_response_seq_num", "tcmd_response_max_seq_num"}
+    # The new columns take the dropped ones' place, among the tcmd_* header
+    # columns (step 3 keeps tcmd_response_text far to the right).
+    insert_at = next(
+        (i for i, c in enumerate(base_columns) if c in dropped), len(base_columns)
+    )
+    kept_before = [c for c in base_columns[:insert_at] if c not in dropped]
+    kept_after = [c for c in base_columns[insert_at:] if c not in dropped]
+    ordered = [*kept_before, *_REASSEMBLY_ONLY_COLUMNS, *kept_after]
+
+    combined = pl.concat(
+        [
+            decoded.filter(pl.col("packet_type") != "TCMD_RESPONSE").drop(
+                dropped, strict=False
+            ),
+            reassembled,
+        ],
+        how="diagonal_relaxed",
+    )
+    return combined.select(ordered)
+
+
+def _source(path: Path, filters: PacketBrowserFilters) -> pl.LazyFrame | None:
+    """The table the page browses: `everything_decoded` as-is, or with its
+    TCMD_RESPONSE packets reassembled, per `filters`.
+    """
+    lf = _scan(path)
+    if lf is None or not filters.reassemble_tcmd_responses:
+        return lf
+    return _with_reassembled_tcmd(lf, path)
 
 
 def _apply_filters(lf: pl.LazyFrame, filters: PacketBrowserFilters) -> pl.LazyFrame:
@@ -159,7 +268,7 @@ def load_page(
     change) falls back to the default order rather than erroring.
     """
     sort = sort or PacketSort()
-    lf = _scan(path)
+    lf = _source(path, filters)
     if lf is None:
         return PacketPage(rows=pl.DataFrame(), total_rows=0, columns=[])
 
@@ -194,7 +303,7 @@ def _filtered_export_df(
     the grid itself shows, just without pagination. Shared by every export
     format; returns (df, truncated).
     """
-    lf = _scan(path)
+    lf = _source(path, filters)
     if lf is None:
         return pl.DataFrame(), False
 
