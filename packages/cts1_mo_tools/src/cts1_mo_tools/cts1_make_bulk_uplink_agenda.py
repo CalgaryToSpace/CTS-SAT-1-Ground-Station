@@ -33,7 +33,7 @@ def _determine_max_optimal_chunk_size(  # noqa: PLR0913
     len_of_other_args: int,
     overall_max_command_length: int = MAX_TELECOMMAND_LENGTH,
     # Defaults lengths:
-    cts1_prefix_len: int = 4,
+    cts1_prefix_len: int = len("CTS1+"),
     tssent_tsexec_len: int = len("@tssent=1783064603123@tsexec=1783152000000"),
     parens_and_exclamation_len: int = 3,
 ) -> int:
