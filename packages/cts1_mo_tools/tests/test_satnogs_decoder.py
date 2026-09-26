@@ -1058,6 +1058,7 @@ def _make_bestxyzb(  # noqa: PLR0913
     ext_sol_stat: int = 0x06,  # Iono: multi-frequency computed.
     galileo_beidou_sig_mask: int = 0x00,
     gps_glonass_sig_mask: int = 0x11,  # GPS L1 + GLONASS L1.
+    sol_age_sec: float = 0.0,
     include_crc: bool = True,
 ) -> bytes:
     body = struct.pack(
@@ -1077,7 +1078,7 @@ def _make_bestxyzb(  # noqa: PLR0913
         b"0\x00\x00\x00",
         0.15,
         0.0,
-        0.0,
+        sol_age_sec,
         12,
         9,
         9,
@@ -1164,16 +1165,24 @@ class TestDecodeGnssBestxyzbSample:
         assert result["gnss_gps_week_ms"] == 345_600_000
         assert json.loads(result["gnss_misc_json"])["receiver_sw_version"] == 16_809
 
-    def test_utc_time(self) -> None:
+    def test_solution_utc_time(self) -> None:
         # GPS week 2400 starts 2026-01-04T00:00:00 GPS; +4 days, -18 leap seconds.
         result = decode_gnss_bestxyzb_sample_packet(_make_gnss_payload())
-        assert result["gnss_utc_time"] == "2026-01-07T23:59:42.000+00:00"
+        assert result["gnss_solution_utc_time"] == "2026-01-07T23:59:42.000+00:00"
 
-    def test_utc_time_none_when_time_unknown(self) -> None:
+    def test_solution_utc_time_subtracts_solution_age(self) -> None:
+        bestxyzb = _make_bestxyzb(sol_age_sec=90.5)
+        result = decode_gnss_bestxyzb_sample_packet(
+            _make_gnss_payload(bestxyzb=bestxyzb)
+        )
+        assert result["gnss_solution_age_sec"] == 90.5
+        assert result["gnss_solution_utc_time"] == "2026-01-07T23:58:11.500+00:00"
+
+    def test_solution_utc_time_none_when_time_unknown(self) -> None:
         payload = _make_gnss_payload(bestxyzb=_make_bestxyzb(time_status=20))
         result = decode_gnss_bestxyzb_sample_packet(payload)
         assert result["gnss_time_status"] == "UNKNOWN"
-        assert result["gnss_utc_time"] is None
+        assert result["gnss_solution_utc_time"] is None
 
     def test_position_velocity(self) -> None:
         result = decode_gnss_bestxyzb_sample_packet(_make_gnss_payload())
@@ -1248,11 +1257,25 @@ class TestDecodeGnssBestxyzbSample:
             "GLONASS_L1",
         ]
 
-    def test_no_geodetic_unless_solution_computed(self) -> None:
-        # Flight data: SINGULARITY fixes report a placeholder position far from
-        # Earth, which must not show up as a real latitude/longitude.
+    def test_geodetic_for_less_reliable_single_fix(self) -> None:
+        # A held SINGLE fix with INSUFFICIENT_OBS is still a real position.
+        bestxyzb = _make_bestxyzb(p_sol_status=1, pos_type=16, sol_age_sec=30.0)
+        result = decode_gnss_bestxyzb_sample_packet(
+            _make_gnss_payload(bestxyzb=bestxyzb)
+        )
+        assert result["gnss_position_solution_status"] == "INSUFFICIENT_OBS"
+        assert result["gnss_latitude_deg"] is not None
+        assert result["gnss_longitude_deg"] is not None
+        assert result["gnss_height_above_ellipsoid_km"] is not None
+
+    def test_no_geodetic_for_placeholder_position(self) -> None:
+        # Flight data: with no valid fix, the receiver reports a placeholder
+        # position ~107,800 km up, even with a SINGLE position type. It must
+        # not show up as a real latitude/longitude.
         bestxyzb = _make_bestxyzb(
-            p_sol_status=3, position_m=(9_776_259.66, 7_266_699.807, 113_507_980.881)
+            p_sol_status=3,
+            pos_type=16,
+            position_m=(9_776_259.66, 7_266_699.807, 113_507_980.881),
         )
         result = decode_gnss_bestxyzb_sample_packet(
             _make_gnss_payload(bestxyzb=bestxyzb)

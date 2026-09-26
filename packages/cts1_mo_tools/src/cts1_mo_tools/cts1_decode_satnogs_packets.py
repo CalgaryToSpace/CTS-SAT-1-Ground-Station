@@ -339,6 +339,12 @@ WGS84_A_M = 6_378_137.0
 WGS84_F = 1 / 298.257223563
 WGS84_E2 = WGS84_F * (2 - WGS84_F)
 
+# Heights above the WGS84 ellipsoid outside this range can't be CTS-SAT-1 (LEO,
+# ~500 km). With no valid fix, the receiver reports a placeholder position
+# (seen in flight as a fixed point ~107,800 km up), sometimes even with a
+# SINGLE position type; this keeps it from passing as a real lat/lon.
+GNSS_PLAUSIBLE_HEIGHT_RANGE_KM = (0.0, 2_000.0)
+
 # -- Enum maps ----------------------------------------------------------------
 
 PACKET_TYPE_MAP = {
@@ -459,7 +465,6 @@ GNSS_SOLUTION_STATUS_MAP = {
     20: "UNAUTHORIZED",
     22: "INVALID_RATE",
 }
-GNSS_SOLUTION_STATUS_MAP_INV = {v: k for k, v in GNSS_SOLUTION_STATUS_MAP.items()}
 # "Position or Velocity Type" (BESTPOS table; used by `pos type`/`vel type`).
 GNSS_POSITION_VELOCITY_TYPE_MAP = {
     0: "NONE",
@@ -492,6 +497,9 @@ GNSS_POSITION_VELOCITY_TYPE_MAP = {
     78: "PPP_BASIC",
     79: "INS_PPP_BASIC_CONVERGING",
     80: "INS_PPP_BASIC",
+}
+GNSS_POSITION_VELOCITY_TYPE_MAP_INV = {
+    v: k for k, v in GNSS_POSITION_VELOCITY_TYPE_MAP.items()
 }
 # "Receiver Status" (RXSTATUS table; binary header `receiver_status` field).
 # Names describe the bit=1 meaning. Bits 25-26 are the status word's version
@@ -1275,10 +1283,16 @@ def _bits_to_json_list(value: int, bits: list[tuple[int, str]]) -> str:
     return orjson.dumps(_bits_to_list(value, bits)).decode()
 
 
-def gps_time_to_utc_isoformat(gps_week: int, gps_week_ms: int) -> str:
-    """GPS week + milliseconds-of-week as an ISO 8601 UTC timestamp."""
+def gps_time_to_utc_isoformat(
+    gps_week: int, gps_week_ms: int, *, minus_sec: float = 0.0
+) -> str:
+    """GPS week + milliseconds-of-week (minus `minus_sec`) as an ISO 8601 UTC
+    timestamp, with millisecond precision.
+    """
     dt = GPS_EPOCH + timedelta(
-        weeks=gps_week, milliseconds=gps_week_ms, seconds=-GPS_UTC_LEAP_SECONDS
+        weeks=gps_week,
+        milliseconds=gps_week_ms - round(minus_sec * 1000),
+        seconds=-GPS_UTC_LEAP_SECONDS,
     )
     return dt.isoformat(timespec="milliseconds")
 
@@ -1363,23 +1377,28 @@ def decode_bestxyzb(raw: bytes) -> dict[str, Any]:
         )
         crc_valid = novatel_crc32(raw[:body_end]) == received_crc
 
-    utc_time = (
-        gps_time_to_utc_isoformat(gps_week, gps_week_ms)
+    # The header time is when the log was generated. The reported position may
+    # be an older solution (e.g. the last good fix, held after losing lock), so
+    # back-date by the solution age to get when the position was actually solved.
+    solution_utc_time = (
+        gps_time_to_utc_isoformat(gps_week, gps_week_ms, minus_sec=b["sol_age_sec"])
         if gps_week > 0 and GNSS_TIME_STATUS_MAP.get(time_status) != "UNKNOWN"
         else None
     )
 
-    # When there's no valid fix, the receiver still reports a placeholder
-    # position (seen in flight as a fixed point ~107,800 km up). Only derive
-    # geodetic coordinates from a computed solution, so it can't pass as real.
+    # Derive geodetic coordinates for any real fix, including less-reliable ones
+    # (e.g. a SINGLE fix held with INSUFFICIENT_OBS), but not the placeholder
+    # position reported without one (see `GNSS_PLAUSIBLE_HEIGHT_RANGE_KM`).
     lat_deg = lon_deg = height_km = None
-    if b["p_sol_status"] == GNSS_SOLUTION_STATUS_MAP_INV["SOL_COMPUTED"]:
+    if b["pos_type"] != GNSS_POSITION_VELOCITY_TYPE_MAP_INV["NONE"]:
         lat, lon, height_m = ecef_to_geodetic(b["p_x_m"], b["p_y_m"], b["p_z_m"])
-        lat_deg, lon_deg, height_km = (
-            round(lat, 6),
-            round(lon, 6),
-            round(height_m / 1000, 3),
-        )
+        min_km, max_km = GNSS_PLAUSIBLE_HEIGHT_RANGE_KM
+        if min_km <= height_m / 1000 <= max_km:
+            lat_deg, lon_deg, height_km = (
+                round(lat, 6),
+                round(lon, 6),
+                round(height_m / 1000, 3),
+            )
 
     ext_sol_stat = b["ext_sol_stat"]
 
@@ -1414,7 +1433,7 @@ def decode_bestxyzb(raw: bytes) -> dict[str, Any]:
         "gnss_time_status": e(GNSS_TIME_STATUS_MAP, time_status),
         "gnss_gps_week": gps_week,
         "gnss_gps_week_ms": gps_week_ms,
-        "gnss_utc_time": utc_time,
+        "gnss_solution_utc_time": solution_utc_time,
         "gnss_receiver_status_flags": _bits_to_json_list(
             receiver_status, GNSS_RECEIVER_STATUS_BITS
         ),
