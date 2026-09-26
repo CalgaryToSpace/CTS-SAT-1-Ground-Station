@@ -232,7 +232,6 @@ LOG_MESSAGE_MAX_DATA = AX100_DOWNLINK_MAX_BYTES_SIZE - 1  # 199
 
 PACKET_TYPE_MAP = {
     0x01: "BEACON_BASIC",
-    0x02: "BEACON_PERIPHERAL",
     0x03: "LOG_MESSAGE",
     0x04: "TCMD_RESPONSE",
     0x10: "BULK_FILE_DOWNLINK",
@@ -1005,7 +1004,6 @@ def decode_bulk_file_downlink_packet(
 # Map packet_type byte → decoder function (payload = post-CSP bytes).
 _PACKET_DECODERS = {
     0x01: decode_beacon_basic_packet,
-    # Not implemented - 0x02
     0x03: decode_log_message_packet,
     0x04: decode_tcmd_response_packet,
     0x10: decode_bulk_file_downlink_packet,
