@@ -459,6 +459,7 @@ GNSS_SOLUTION_STATUS_MAP = {
     20: "UNAUTHORIZED",
     22: "INVALID_RATE",
 }
+GNSS_SOLUTION_STATUS_MAP_INV = {v: k for k, v in GNSS_SOLUTION_STATUS_MAP.items()}
 # "Position or Velocity Type" (BESTPOS table; used by `pos type`/`vel type`).
 GNSS_POSITION_VELOCITY_TYPE_MAP = {
     0: "NONE",
@@ -1266,10 +1267,12 @@ def novatel_crc32(data: bytes) -> int:
     return zlib.crc32(data, 0xFFFFFFFF) ^ 0xFFFFFFFF
 
 
+def _bits_to_list(value: int, bits: list[tuple[int, str]]) -> list[str]:
+    return [name for bit_num, name in bits if (value >> bit_num) & 1]
+
+
 def _bits_to_json_list(value: int, bits: list[tuple[int, str]]) -> str:
-    return orjson.dumps(
-        [name for bit_num, name in bits if (value >> bit_num) & 1]
-    ).decode()
+    return orjson.dumps(_bits_to_list(value, bits)).decode()
 
 
 def gps_time_to_utc_isoformat(gps_week: int, gps_week_ms: int) -> str:
@@ -1304,7 +1307,8 @@ def decode_bestxyzb(raw: bytes) -> dict[str, Any]:
     """Decode a raw NovAtel OEM7 BESTXYZB binary log (header + body [+ CRC]).
 
     See "BESTXYZ" and "Binary Message Header" in the OEM7 Commands and Logs
-    Reference Manual. All returned keys are prefixed with "gnss_".
+    Reference Manual. All returned keys are prefixed with "gnss_". Rarely-useful
+    fields are packed into the `gnss_misc_json` column rather than getting their own.
 
     `gnss_crc_valid` is None if the 4-byte trailing CRC wasn't included.
     """
@@ -1365,8 +1369,11 @@ def decode_bestxyzb(raw: bytes) -> dict[str, Any]:
         else None
     )
 
+    # When there's no valid fix, the receiver still reports a placeholder
+    # position (seen in flight as a fixed point ~107,800 km up). Only derive
+    # geodetic coordinates from a computed solution, so it can't pass as real.
     lat_deg = lon_deg = height_km = None
-    if (b["p_x_m"], b["p_y_m"], b["p_z_m"]) != (0.0, 0.0, 0.0):
+    if b["p_sol_status"] == GNSS_SOLUTION_STATUS_MAP_INV["SOL_COMPUTED"]:
         lat, lon, height_m = ecef_to_geodetic(b["p_x_m"], b["p_y_m"], b["p_z_m"])
         lat_deg, lon_deg, height_km = (
             round(lat, 6),
@@ -1376,28 +1383,41 @@ def decode_bestxyzb(raw: bytes) -> dict[str, Any]:
 
     ext_sol_stat = b["ext_sol_stat"]
 
+    # Fields that are constant, always zero, or redundant with another column in
+    # practice. Packed into one JSON column to keep the table narrow.
+    misc = {
+        "message_id": message_id,
+        "message_type": f"0x{message_type:02X}",
+        "port_address": port_address,
+        "message_length": message_length,
+        "sequence": sequence,
+        "receiver_status_bitfield": f"0x{receiver_status:08X}",
+        "receiver_status_version": (
+            (receiver_status >> GNSS_RECEIVER_STATUS_VERSION_SHIFT)
+            & GNSS_RECEIVER_STATUS_VERSION_MASK
+        ),
+        "receiver_sw_version": receiver_sw_version,
+        "velocity_latency_sec": round(b["v_latency_sec"], 3),
+        "base_station_id": b["stn_id"]
+        .split(b"\x00")[0]
+        .decode("ascii", errors="replace"),
+        "differential_age_sec": round(b["diff_age_sec"], 3),
+        "num_svs_l1_in_solution": b["num_gg_l1"],
+        "extended_solution_status": f"0x{ext_sol_stat:02X}",
+        "extended_solution_flags": _bits_to_list(ext_sol_stat, GNSS_EXT_SOL_STAT_BITS),
+    }
+
     return {
         # Header
         "gnss_crc_valid": crc_valid,
-        "gnss_message_id": message_id,
-        "gnss_message_type": f"0x{message_type:02X}",
-        "gnss_port_address": port_address,
-        "gnss_message_length": message_length,
-        "gnss_sequence": sequence,
         "gnss_idle_time_percent": idle_time / 2,
         "gnss_time_status": e(GNSS_TIME_STATUS_MAP, time_status),
         "gnss_gps_week": gps_week,
         "gnss_gps_week_ms": gps_week_ms,
         "gnss_utc_time": utc_time,
-        "gnss_receiver_status_bitfield": f"0x{receiver_status:08X}",
         "gnss_receiver_status_flags": _bits_to_json_list(
             receiver_status, GNSS_RECEIVER_STATUS_BITS
         ),
-        "gnss_receiver_status_version": (
-            (receiver_status >> GNSS_RECEIVER_STATUS_VERSION_SHIFT)
-            & GNSS_RECEIVER_STATUS_VERSION_MASK
-        ),
-        "gnss_receiver_sw_version": receiver_sw_version,
         # Position, in ECEF coordinates
         "gnss_position_solution_status": e(GNSS_SOLUTION_STATUS_MAP, b["p_sol_status"]),
         "gnss_position_type": e(GNSS_POSITION_VELOCITY_TYPE_MAP, b["pos_type"]),
@@ -1427,23 +1447,13 @@ def decode_bestxyzb(raw: bytes) -> dict[str, Any]:
             ),
             4,
         ),
-        "gnss_velocity_latency_sec": round(b["v_latency_sec"], 3),
         # Solution details
-        "gnss_base_station_id": b["stn_id"]
-        .split(b"\x00")[0]
-        .decode("ascii", errors="replace"),
-        "gnss_differential_age_sec": round(b["diff_age_sec"], 3),
         "gnss_solution_age_sec": round(b["sol_age_sec"], 3),
         "gnss_num_svs_tracked": b["num_svs"],
         "gnss_num_svs_in_solution": b["num_soln_svs"],
-        "gnss_num_svs_l1_in_solution": b["num_gg_l1"],
         "gnss_num_svs_multi_freq_in_solution": b["num_soln_multi_svs"],
-        "gnss_extended_solution_status": f"0x{ext_sol_stat:02X}",
         "gnss_pseudorange_iono_correction": e(
             GNSS_IONO_CORRECTION_MAP, (ext_sol_stat >> 1) & 0x7
-        ),
-        "gnss_extended_solution_flags": _bits_to_json_list(
-            ext_sol_stat, GNSS_EXT_SOL_STAT_BITS
         ),
         "gnss_galileo_beidou_signals_used": _bits_to_json_list(
             b["galileo_beidou_sig_mask"], GNSS_GALILEO_BEIDOU_SIGNAL_BITS
@@ -1451,6 +1461,7 @@ def decode_bestxyzb(raw: bytes) -> dict[str, Any]:
         "gnss_gps_glonass_signals_used": _bits_to_json_list(
             b["gps_glonass_sig_mask"], GNSS_GPS_GLONASS_SIGNAL_BITS
         ),
+        "gnss_misc_json": orjson.dumps(misc).decode(),
     }
 
 

@@ -1157,12 +1157,12 @@ class TestDecodeGnssBestxyzbSample:
     def test_header_fields(self) -> None:
         result = decode_gnss_bestxyzb_sample_packet(_make_gnss_payload())
         assert result["gnss_crc_valid"] is True
-        assert result["gnss_message_id"] == 241
+        assert json.loads(result["gnss_misc_json"])["message_id"] == 241
         assert result["gnss_idle_time_percent"] == 50.0
         assert result["gnss_time_status"] == "FINESTEERING"
         assert result["gnss_gps_week"] == 2400
         assert result["gnss_gps_week_ms"] == 345_600_000
-        assert result["gnss_receiver_sw_version"] == 16_809
+        assert json.loads(result["gnss_misc_json"])["receiver_sw_version"] == 16_809
 
     def test_utc_time(self) -> None:
         # GPS week 2400 starts 2026-01-04T00:00:00 GPS; +4 days, -18 leap seconds.
@@ -1187,7 +1187,7 @@ class TestDecodeGnssBestxyzbSample:
         assert result["gnss_velocity_x_m_per_s"] == 3.0
         assert result["gnss_velocity_z_stddev_m_per_s"] == 0.75
         assert result["gnss_ecef_speed_m_per_s"] == 5.0
-        assert result["gnss_base_station_id"] == "0"
+        assert json.loads(result["gnss_misc_json"])["base_station_id"] == "0"
         assert result["gnss_num_svs_tracked"] == 12
         assert result["gnss_num_svs_in_solution"] == 9
 
@@ -1230,16 +1230,15 @@ class TestDecodeGnssBestxyzbSample:
         result = decode_gnss_bestxyzb_sample_packet(
             _make_gnss_payload(bestxyzb=bestxyzb)
         )
-        assert result["gnss_receiver_status_bitfield"] == "0x02080020"
+        misc = json.loads(result["gnss_misc_json"])
+        assert misc["receiver_status_bitfield"] == "0x02080020"
         assert json.loads(result["gnss_receiver_status_flags"]) == [
             "ANTENNA_OPEN_CIRCUIT",
             "POSITION_SOLUTION_INVALID",
         ]
-        assert result["gnss_receiver_status_version"] == 1
+        assert misc["receiver_status_version"] == 1
         assert result["gnss_pseudorange_iono_correction"] == "MULTI_FREQUENCY_COMPUTED"
-        assert json.loads(result["gnss_extended_solution_flags"]) == [
-            "ANTENNA_INFO_MISSING"
-        ]
+        assert misc["extended_solution_flags"] == ["ANTENNA_INFO_MISSING"]
         assert json.loads(result["gnss_galileo_beidou_signals_used"]) == [
             "GALILEO_E1",
             "BEIDOU_B1",
@@ -1248,6 +1247,43 @@ class TestDecodeGnssBestxyzbSample:
             "GPS_L1",
             "GLONASS_L1",
         ]
+
+    def test_no_geodetic_unless_solution_computed(self) -> None:
+        # Flight data: SINGULARITY fixes report a placeholder position far from
+        # Earth, which must not show up as a real latitude/longitude.
+        bestxyzb = _make_bestxyzb(
+            p_sol_status=3, position_m=(9_776_259.66, 7_266_699.807, 113_507_980.881)
+        )
+        result = decode_gnss_bestxyzb_sample_packet(
+            _make_gnss_payload(bestxyzb=bestxyzb)
+        )
+        assert result["gnss_position_solution_status"] == "SINGULARITY"
+        assert result["gnss_position_z_m"] == 113_507_980.881
+        assert result["gnss_latitude_deg"] is None
+        assert result["gnss_longitude_deg"] is None
+        assert result["gnss_height_above_ellipsoid_km"] is None
+
+    def test_misc_json_keys(self) -> None:
+        result = decode_gnss_bestxyzb_sample_packet(_make_gnss_payload())
+        misc = json.loads(result["gnss_misc_json"])
+        assert set(misc) == {
+            "message_id",
+            "message_type",
+            "port_address",
+            "message_length",
+            "sequence",
+            "receiver_status_bitfield",
+            "receiver_status_version",
+            "receiver_sw_version",
+            "velocity_latency_sec",
+            "base_station_id",
+            "differential_age_sec",
+            "num_svs_l1_in_solution",
+            "extended_solution_status",
+            "extended_solution_flags",
+        }
+        # None of the packed fields also appear as their own column.
+        assert not any(f"gnss_{k}" in result for k in misc)
 
     def test_without_crc(self) -> None:
         payload = _make_gnss_payload(bestxyzb=_make_bestxyzb(include_crc=False))
