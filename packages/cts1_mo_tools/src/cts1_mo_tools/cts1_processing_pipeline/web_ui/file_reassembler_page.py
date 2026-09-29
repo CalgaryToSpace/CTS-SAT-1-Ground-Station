@@ -16,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import polars as pl
 from nicegui import ui
 
 from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
@@ -27,6 +28,7 @@ from .file_reassembly import (
     COVERAGE_PACKETS_PER_ROW,
     COVERAGE_ROW_WIDTH_BYTES,
     DEFAULT_CONFLICT_POLICY,
+    MAX_REASSEMBLY_SPAN_BYTES,
     SHA256_HEX_LEN,
     BulkHeaderCandidate,
     ByteSegment,
@@ -792,6 +794,43 @@ def _image_section(
             )
 
 
+def _oversized_chunks_table(chunks: pl.DataFrame) -> None:
+    """The packets whose `bulk_file_offset` pushes the implied file past
+    `MAX_REASSEMBLY_SPAN_BYTES` -- the ones that made reassembly refuse the
+    selection, so the operator can see when they arrived and narrow the
+    time range(s) to exclude them.
+    """
+    oversized = chunks.filter(
+        pl.col("bulk_file_offset") + pl.col("bulk_data_len") > MAX_REASSEMBLY_SPAN_BYTES
+    ).sort("received_at")
+    ui.label(
+        f"{oversized.height:,} of {chunks.height:,} packet(s) in the selected "
+        "range(s) claim an offset past the cap. Narrow the time range(s) to "
+        "exclude them:"
+    ).classes("text-caption text-grey")
+    columns = [
+        {"name": "received_at", "label": "Received at", "field": "received_at"},
+        {"name": "offset", "label": "bulk_file_offset", "field": "offset"},
+        {"name": "offset_hex", "label": "Offset (hex)", "field": "offset_hex"},
+        {"name": "data_len", "label": "bulk_data_len", "field": "data_len"},
+    ]
+    rows = [
+        {
+            "id": i,
+            "received_at": f"{received_at:%Y-%m-%d %H:%M:%S}",
+            "offset": f"{offset:,}",
+            "offset_hex": f"{offset:#010x}",
+            "data_len": data_len,
+        }
+        for i, (received_at, offset, data_len) in enumerate(
+            oversized.select(
+                "received_at", "bulk_file_offset", "bulk_data_len"
+            ).iter_rows()
+        )
+    ]
+    ui.table(columns=columns, rows=rows, row_key="id").classes("w-full font-mono")
+
+
 def _reassembler_results(
     path: Path,
     ranges: list[tuple[datetime, datetime]],
@@ -829,7 +868,12 @@ def _reassembler_results(
             )
             return
 
-        result = reassemble_bulk_chunks(chunks, policy=policy)
+        try:
+            result = reassemble_bulk_chunks(chunks, policy=policy)
+        except ValueError as e:
+            ui.label(str(e)).classes("text-negative")
+            _oversized_chunks_table(chunks)
+            return
         ui.label(
             f"{result.total_chunks:,} packet(s), {result.unique_offsets:,} "
             f"distinct offset(s), spanning {result.span_bytes:,} bytes."
