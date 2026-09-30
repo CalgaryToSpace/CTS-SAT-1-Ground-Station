@@ -1,6 +1,9 @@
-# Output and input file directories
-input/
-output/
+# Agenda file directory
+packages/cts1_mo_tools/src/cts1_mo_tools/cts1_agenda_files/
+
+# Exclude templates
+!packages/cts1_mo_tools/src/cts1_mo_tools/cts1_agenda_files/agenda_spreadsheet_template_example.csv
+!packages/cts1_mo_tools/src/cts1_mo_tools/cts1_agenda_files/agenda_spreadsheet_template_example.xlsx
 
 # Data web app UI
 .nicegui
