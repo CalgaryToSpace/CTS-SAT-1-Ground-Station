@@ -1,3 +1,6 @@
+# Data pipeline storage directory
+output/
+
 # Agenda file directory
 packages/cts1_mo_tools/src/cts1_mo_tools/cts1_agenda_files/
 
