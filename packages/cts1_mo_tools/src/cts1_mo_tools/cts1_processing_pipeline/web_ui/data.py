@@ -15,13 +15,14 @@ __all__ = [
     "ATTITUDE_MODE_COLUMNS",
     "BEACON_PACKET_TYPES",
     "DEFAULT_PARQUET_PATH",
+    "DEFAULT_REASSEMBLED_TCMD_PATH",
     "latest_beacons",
     "latest_local_max_pending_tcmd_count",
     "load_attitude_window",
     "load_beacon_window",
     "load_bulk_file_downlink_packets",
     "load_packet_counts_per_window",
-    "load_tcmd_response_packets",
+    "load_reassembled_tcmd_responses",
 ]
 
 from typing import TYPE_CHECKING
@@ -31,6 +32,9 @@ import polars as pl
 from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
     pipeline as step_3_pipeline,
 )
+from cts1_mo_tools.cts1_processing_pipeline.step_5_reassemble_tcmd_responses import (
+    pipeline as step_5_pipeline,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -39,6 +43,9 @@ if TYPE_CHECKING:
 
 DEFAULT_PARQUET_PATH = (
     step_3_pipeline.DEFAULT_DATA_DIR / step_3_pipeline.OUTPUT_FILENAME
+)
+DEFAULT_REASSEMBLED_TCMD_PATH = (
+    step_5_pipeline.DEFAULT_DATA_DIR / step_5_pipeline.OUTPUT_FILENAME
 )
 
 BEACON_PACKET_TYPES = ("BEACON_BASIC", "BEACON_EXTENDED")
@@ -145,19 +152,19 @@ def load_attitude_window(
 
 
 def _filter_to_ranges(
-    lf: pl.LazyFrame, ranges: Sequence[tuple[datetime, datetime]]
+    lf: pl.LazyFrame,
+    ranges: Sequence[tuple[datetime, datetime]],
+    *,
+    column: str = "received_at",
 ) -> pl.LazyFrame:
-    """Restrict `lf` to rows whose `received_at` falls in any of `ranges`
-    (each an inclusive [start, end] window). An empty `ranges` means no time
-    filter at all -- every row.
+    """Restrict `lf` to rows whose `column` falls in any of `ranges` (each an
+    inclusive [start, end] window). An empty `ranges` means no time filter at
+    all -- every row.
     """
     if not ranges:
         return lf
     in_any_range = pl.any_horizontal(
-        [
-            pl.col("received_at").is_between(start, end, closed="both")
-            for start, end in ranges
-        ]
+        [pl.col(column).is_between(start, end, closed="both") for start, end in ranges]
     )
     return lf.filter(in_any_range)
 
@@ -187,20 +194,25 @@ def load_bulk_file_downlink_packets(
     return lf.sort("bulk_file_offset", "received_at").collect()
 
 
-def load_tcmd_response_packets(
-    path: Path = DEFAULT_PARQUET_PATH,
+def load_reassembled_tcmd_responses(
+    path: Path = DEFAULT_REASSEMBLED_TCMD_PATH,
     *,
     ranges: Sequence[tuple[datetime, datetime]] = (),
-) -> pl.DataFrame:
-    """`TCMD_RESPONSE` packets restricted to the union of `ranges`, oldest
-    first -- see `load_bulk_file_downlink_packets` for the `ranges` contract.
+) -> pl.DataFrame | None:
+    """Step 5's reassembled telecommand responses (one row per response,
+    multi-packet ones already joined back together) whose
+    `first_received_at` falls in the union of `ranges`, oldest first -- see
+    `load_bulk_file_downlink_packets` for the `ranges` contract.
+
+    Returns None (rather than an empty frame) if step 5 hasn't produced its
+    output yet, so the caller can say so instead of implying there were
+    simply no responses.
     """
     lf = _scan(path)
     if lf is None:
-        return pl.DataFrame()
-    lf = lf.filter(pl.col("packet_type") == "TCMD_RESPONSE")
-    lf = _filter_to_ranges(lf, ranges)
-    return lf.sort("received_at").collect()
+        return None
+    lf = _filter_to_ranges(lf, ranges, column="first_received_at")
+    return lf.sort("first_received_at").collect()
 
 
 def latest_beacons(

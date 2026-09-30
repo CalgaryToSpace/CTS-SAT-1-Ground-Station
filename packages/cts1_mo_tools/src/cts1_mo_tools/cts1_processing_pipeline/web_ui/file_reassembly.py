@@ -36,22 +36,17 @@ this module does is:
 
   - `find_header_candidates()`: a bulk downlink is nominally preceded by a
     `TCMD_RESPONSE` whose text is a JSON file descriptor (name, size,
-    sha256), but that header can just as easily arrive late, be interleaved
-    with the data packets, or be missing outright -- and even when present,
-    `TCMD_RESPONSE`'s payload is a hard-capped 186 bytes, so a descriptor
-    naming a long file path routinely runs out of room before its `sha256`
-    is fully written. A long response spans multiple downlinked frames
-    (`tcmd_response_seq_num` 1..`tcmd_response_max_seq_num`, sharing one
-    `tcmd_ts_sent`), but only the *first* frame (`seq_num == 1`) is ever
-    parsed here -- the header fields this module cares about are always
-    written before the size cap bites, so later frames only ever add bytes
-    past what's already been captured (e.g. a `sha256` continuation), and
-    including them just produced duplicate-looking candidates for the same
-    real header. This is a best-effort scan for whatever recognizable
-    fields (`file`, `file_size`, `sha256`, ...) show up in that first
-    frame's text, tolerant of the JSON being incomplete/truncated --
-    surfaced to the user as candidates to cross-check against, not as
-    ground truth.
+    sha256, ...), but that header can just as easily arrive late, be
+    interleaved with the data packets, or be missing outright. A descriptor
+    is usually longer than one `TCMD_RESPONSE` frame's 186 bytes, so it's
+    read from step 5's reassembled responses (every frame of one response
+    already joined back together) rather than from raw packets. A response
+    with a frame that never arrived has that frame filled with `?`s by step
+    5, so parsing stays tolerant of broken JSON: a fully-parseable response
+    gives up every property it has, and a broken one gives up whatever
+    recognizable `"key": value` pairs survived around the gap. Either way,
+    the result is surfaced to the user as candidates to cross-check
+    against, not as ground truth.
 
   - `render_coverage_png()`: a byte-per-pixel bitmap of which bytes are
     good vs. missing vs. conflicting, one pixel per byte and displayed 1:1
@@ -64,6 +59,7 @@ this module does is:
 from __future__ import annotations
 
 __all__ = [
+    "ADCS_SD_FILE_BLOB_ACTION",
     "CONFLICT_ISLAND_MAX_BYTES",
     "COVERAGE_PACKETS_PER_ROW",
     "COVERAGE_ROW_WIDTH_BYTES",
@@ -90,6 +86,7 @@ __all__ = [
 import hashlib
 import heapq
 import io
+import json
 import re
 from collections import defaultdict
 from dataclasses import dataclass, replace
@@ -97,9 +94,8 @@ from enum import StrEnum
 from functools import cache
 from itertools import pairwise
 from math import ceil
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
-import polars as pl
 from PIL import Image, ImageDraw, ImageFont
 
 from cts1_mo_tools.cts1_decode_satnogs_packets import BULK_DOWNLINK_MAX_DATA
@@ -107,6 +103,8 @@ from cts1_mo_tools.cts1_picam_to_jpg import parse_picam_ascii_to_jpg_bytes
 
 if TYPE_CHECKING:
     from datetime import datetime
+
+    import polars as pl
 
 
 # A corrupted/garbage `bulk_file_offset` (a raw uint32 straight off the
@@ -859,103 +857,149 @@ def render_coverage_png(
 
 # -- Header candidates --------------------------------------------------------
 
-# Deliberately not a JSON parser: TCMD_RESPONSE's payload is a hard-capped
-# 186 bytes (see cts1_decode_satnogs_packets.TCMD_RESPONSE_MAX_DATA), so a
-# descriptor naming a long file path routinely gets cut off mid-value (most
-# often mid-sha256) with no closing brace at all. Each field is pulled out
-# independently so a truncated one just comes back missing/short rather than
-# failing the whole parse.
-_ACTION_RE = re.compile(r'"action"\s*:\s*"([^"]*)"')
-_FILE_RE = re.compile(r'"file"\s*:\s*"([^"]*)"')
-_FILE_SIZE_RE = re.compile(r'"file_size"\s*:\s*(\d+)')
-_SHA256_RE = re.compile(r'"sha256"\s*:\s*"([0-9a-fA-F]*)')
-_CRC16_RE = re.compile(r'"crc16"\s*:\s*"([^"]*)"')
-_OFFSET_RE = re.compile(r'"offset"\s*:\s*(\d+)')
-_LENGTH_RE = re.compile(r'"length"\s*:\s*(\d+)')
+# Deliberately not *only* a JSON parser: a response with a frame that never
+# arrived has that frame's bytes replaced by `?`s in step 5's output (see
+# `step_5_reassemble_tcmd_responses`), which can land anywhere -- mid-value,
+# mid-key, or over the closing brace. So each `"key": value` pair is pulled
+# out independently, and a broken one just comes back missing rather than
+# failing the whole parse. Only string/number/bool/null values are matched,
+# which is all a file descriptor carries.
+_JSON_PAIR_RE = re.compile(
+    r'"([A-Za-z0-9_]+)"\s*:\s*'
+    r'("(?:[^"\\]|\\.)*"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null)'
+)
+# A `sha256` cut off before its closing quote (by a missing frame) is still
+# worth a prefix match, so it gets its own unterminated-string pattern.
+_SHA256_PREFIX_RE = re.compile(r'"sha256"\s*:\s*"([0-9a-fA-F]+)')
+
+# The response to this action carries a `datetime` property: the ADCS's own
+# last-modified timestamp for the file (UTC), which the older
+# `adcs_get_latest_sd_file_blob` response didn't include.
+ADCS_SD_FILE_BLOB_ACTION = "adcs_get_latest_sd_file_blob"
+
+
+def _parse_properties(text: str) -> tuple[dict[str, Any], bool]:
+    """Every property in one `TCMD_RESPONSE` body, and whether the body
+    parsed as a whole JSON object (as opposed to being salvaged pair by pair
+    from broken JSON).
+    """
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        pass
+    else:
+        if isinstance(parsed, dict):
+            return cast("dict[str, Any]", parsed), True
+
+    properties: dict[str, Any] = {}
+    for m in _JSON_PAIR_RE.finditer(text):
+        key, raw_value = m.groups()
+        try:
+            properties.setdefault(key, json.loads(raw_value))
+        except ValueError:
+            continue
+    if "sha256" not in properties and (m := _SHA256_PREFIX_RE.search(text)):
+        properties["sha256"] = m.group(1)
+    return properties, False
+
+
+def _str_or_none(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _int_or_none(value: object) -> int | None:
+    # `bool` is an `int` subclass, but `"file_size": true` is not a size.
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
 @dataclass(slots=True, frozen=True)
 class BulkHeaderCandidate:
-    """Whatever file-descriptor fields could be pulled out of one
-    `TCMD_RESPONSE`'s text. Every field but `received_at` may be `None` --
-    either the field wasn't present, or (for `sha256`) it was cut off with
-    zero characters recovered.
+    """One reassembled `TCMD_RESPONSE` that looks like a bulk-download file
+    descriptor, with its well-known fields pulled out.
+
+    Every well-known field may be `None` -- either the property wasn't
+    present, or it was lost to a missing frame (`sha256` may also come back
+    as a < 64-hex-char prefix of the real hash in that case). `properties`
+    holds *every* property that could be parsed, well-known or not, and
+    `raw_text` the response exactly as step 5 reassembled it, so nothing the
+    satellite sent is hidden behind the fields this module happens to know
+    about.
     """
 
-    received_at: datetime
+    received_at: datetime  # when the response's first frame arrived
+    tcmd_sent_at: datetime | None  # when the telecommand was sent, if known
     action: str | None
     file: str | None
     file_size: int | None
-    sha256: str | None  # may be < 64 hex chars if the response was truncated
+    sha256: str | None
     crc16: str | None
     offset: int | None
     length: int | None
+    # The `datetime` property of an `SD_FILE_BLOB_V2_ACTION` response -- the
+    # file's last-modified time according to the ADCS, in UTC, as sent.
+    adcs_modified_timestamp_utc: str | None
+    # Whether every frame of the response arrived and it parsed as JSON.
+    is_complete: bool
+    raw_text: str
+    properties: tuple[tuple[str, Any], ...]
 
 
-def _parse_header_text(text: str) -> dict[str, Any] | None:
-    """Best-effort field extraction from one `TCMD_RESPONSE` body.
-
-    Returns None if the text doesn't even mention "file"/"file_size" --
-    i.e. it's plausibly some other command's response, not a bulk-download
-    descriptor at all.
+def _looks_like_file_descriptor(properties: dict[str, Any]) -> bool:
+    """Whether a response is plausibly a bulk-download descriptor at all,
+    rather than some other command's response.
     """
-    if '"file"' not in text and '"file_size"' not in text:
-        return None
-
-    result: dict[str, Any] = {}
-    if (m := _ACTION_RE.search(text)) is not None:
-        result["action"] = m.group(1)
-    if (m := _FILE_RE.search(text)) is not None:
-        result["file"] = m.group(1)
-    if (m := _FILE_SIZE_RE.search(text)) is not None:
-        result["file_size"] = int(m.group(1))
-    if (m := _SHA256_RE.search(text)) is not None and m.group(1):
-        result["sha256"] = m.group(1).lower()
-    if (m := _CRC16_RE.search(text)) is not None:
-        result["crc16"] = m.group(1)
-    if (m := _OFFSET_RE.search(text)) is not None:
-        result["offset"] = int(m.group(1))
-    if (m := _LENGTH_RE.search(text)) is not None:
-        result["length"] = int(m.group(1))
-    return result
+    return "file" in properties or "file_size" in properties
 
 
-def find_header_candidates(tcmd_df: pl.DataFrame) -> list[BulkHeaderCandidate]:
-    """Every first-frame `TCMD_RESPONSE` row in `tcmd_df` that looks like a
-    bulk-download file descriptor, oldest first.
+def find_header_candidates(
+    tcmd_responses: pl.DataFrame,
+) -> list[BulkHeaderCandidate]:
+    """Every reassembled `TCMD_RESPONSE` in `tcmd_responses` that looks like
+    a bulk-download file descriptor, oldest first.
 
-    `tcmd_df` must have `received_at`, `tcmd_response_seq_num`, and
-    `tcmd_response_text` columns. A response that spans multiple downlinked
-    frames numbers them `tcmd_response_seq_num` 1..`tcmd_response_max_seq_num`
-    -- only `seq_num == 1` is parsed, since the fields this module looks for
-    are always written before `TCMD_RESPONSE`'s 186-byte cap bites, so later
-    frames only ever add bytes past what's already captured.
+    `tcmd_responses` is (a slice of) step 5's
+    `reassembled_tcmd_responses.parquet`: it must have `first_received_at`,
+    `tcmd_sent_at`, `is_complete`, and `tcmd_response_text` columns.
     """
-    if tcmd_df.is_empty():
+    if tcmd_responses.is_empty():
         return []
 
-    first_frames = tcmd_df.filter(pl.col("tcmd_response_seq_num") == 1)
     candidates: list[BulkHeaderCandidate] = []
-    for text, received_at in zip(
-        first_frames["tcmd_response_text"].to_list(),
-        first_frames["received_at"].to_list(),
+    for text, received_at, tcmd_sent_at, response_complete in zip(
+        tcmd_responses["tcmd_response_text"].to_list(),
+        tcmd_responses["first_received_at"].to_list(),
+        tcmd_responses["tcmd_sent_at"].to_list(),
+        tcmd_responses["is_complete"].to_list(),
         strict=True,
     ):
         if not text:
             continue
-        parsed = _parse_header_text(text)
-        if parsed is None:
+        properties, parsed_whole = _parse_properties(text)
+        if not _looks_like_file_descriptor(properties):
             continue
+
+        action = _str_or_none(properties.get("action"))
+        sha256 = _str_or_none(properties.get("sha256"))
         candidates.append(
             BulkHeaderCandidate(
                 received_at=received_at,
-                action=parsed.get("action"),
-                file=parsed.get("file"),
-                file_size=parsed.get("file_size"),
-                sha256=parsed.get("sha256"),
-                crc16=parsed.get("crc16"),
-                offset=parsed.get("offset"),
-                length=parsed.get("length"),
+                tcmd_sent_at=tcmd_sent_at,
+                action=action,
+                file=_str_or_none(properties.get("file")),
+                file_size=_int_or_none(properties.get("file_size")),
+                sha256=sha256.lower() if sha256 else None,
+                crc16=_str_or_none(properties.get("crc16")),
+                offset=_int_or_none(properties.get("offset")),
+                length=_int_or_none(properties.get("length")),
+                adcs_modified_timestamp_utc=(
+                    _str_or_none(properties.get("datetime"))
+                    if (action is not None)
+                    and action.startswith(ADCS_SD_FILE_BLOB_ACTION)
+                    else None
+                ),
+                is_complete=bool(response_complete) and parsed_whole,
+                raw_text=text,
+                properties=tuple(properties.items()),
             )
         )
     candidates.sort(key=lambda c: c.received_at)

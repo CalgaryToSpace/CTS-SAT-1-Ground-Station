@@ -7,6 +7,7 @@ import polars as pl
 import pytest
 from cts1_mo_tools.cts1_decode_satnogs_packets import BULK_DOWNLINK_MAX_DATA
 from cts1_mo_tools.cts1_processing_pipeline.web_ui.file_reassembly import (
+    ADCS_SD_FILE_BLOB_ACTION,
     CONFLICT_ISLAND_MAX_BYTES,
     COVERAGE_OFFSET_LABEL_INTERVAL_ROWS,
     COVERAGE_ROW_WIDTH_BYTES,
@@ -470,16 +471,16 @@ def test_row_order_does_not_change_the_result() -> None:
 def _tcmd_row(
     *,
     text: str,
-    ts_sent: int = 1,
-    seq_num: int = 1,  # real firmware numbers frames 1..max_seq_num, not 0-based
-    max_seq_num: int = 1,
     received_at: str = "2026-01-01T00:00:00",
+    is_complete: bool = True,
 ) -> dict[str, Any]:
+    """One row of step 5's `reassembled_tcmd_responses.parquet` (just the
+    columns `find_header_candidates` reads).
+    """
     return {
-        "received_at": _dt(received_at),
-        "tcmd_ts_sent": ts_sent,
-        "tcmd_response_seq_num": seq_num,
-        "tcmd_response_max_seq_num": max_seq_num,
+        "first_received_at": _dt(received_at),
+        "tcmd_sent_at": _dt(received_at),
+        "is_complete": is_complete,
         "tcmd_response_text": text,
     }
 
@@ -493,11 +494,11 @@ def test_no_tcmd_responses_returns_empty() -> None:
 
 
 def test_non_header_response_is_ignored() -> None:
-    df = _tcmd_df([_tcmd_row(text="OK")])
+    df = _tcmd_df([_tcmd_row(text="OK"), _tcmd_row(text='{"action":"ping"}')])
     assert find_header_candidates(df) == []
 
 
-def test_full_single_packet_header_is_parsed() -> None:
+def test_full_header_is_parsed_with_every_property() -> None:
     text = (
         '{"action":"adcs_get_latest_sd_file_blob","file":"ADCS/log_b51a.TLM",'
         '"file_size":24874,"crc16":"0xb51a","sd_card_index":2}'
@@ -512,6 +513,16 @@ def test_full_single_packet_header_is_parsed() -> None:
     assert c.crc16 == "0xb51a"
     assert c.offset is None
     assert c.length is None
+    assert c.adcs_modified_timestamp_utc is None
+    assert c.is_complete
+    assert c.raw_text == text
+    assert dict(c.properties) == {
+        "action": "adcs_get_latest_sd_file_blob",
+        "file": "ADCS/log_b51a.TLM",
+        "file_size": 24874,
+        "crc16": "0xb51a",
+        "sd_card_index": 2,
+    }
 
 
 def test_header_with_offset_and_length_is_parsed() -> None:
@@ -532,86 +543,70 @@ def test_header_with_offset_and_length_is_parsed() -> None:
     assert c.length == 1170
 
 
-def test_truncated_json_still_yields_partial_fields() -> None:
-    # A long file path pushes the sha256 value past the 186-byte TCMD_RESPONSE
-    # cap -- real firmware behavior this decoder has to tolerate, per the
-    # module docstring. No closing brace, sha256 cut off mid-hex-string.
+def test_sd_file_blob_v2_datetime_is_the_adcs_modified_timestamp() -> None:
+    text = (
+        '{"action":"adcs_get_latest_sd_file_blob_v2","file":"ADCS/log_3c86.TLM",'
+        '"file_size":9370,"crc16":"0x3c86","sha256":'
+        '"7164d682fe086561f01046fc2c5dee97c39498195257d85de6119ccd39e8527d",'
+        '"datetime":"2026-09-29 08:05:08","sd_card_index":8,"advance_retries":0}'
+    )
+    (c,) = find_header_candidates(_tcmd_df([_tcmd_row(text=text)]))
+    assert str(c.action).startswith(ADCS_SD_FILE_BLOB_ACTION)
+    assert c.action == "adcs_get_latest_sd_file_blob_v2"
+    assert c.adcs_modified_timestamp_utc == "2026-09-29 08:05:08"
+    assert dict(c.properties)["advance_retries"] == 0
+
+
+def test_datetime_of_another_action_is_not_the_adcs_modified_timestamp() -> None:
+    text = '{"action":"bulk_downlink_start_blob","file":"x","datetime":"2026-01-01"}'
+    (c,) = find_header_candidates(_tcmd_df([_tcmd_row(text=text)]))
+    assert c.adcs_modified_timestamp_utc is None
+    assert dict(c.properties)["datetime"] == "2026-01-01"
+
+
+def test_response_with_a_missing_frame_still_yields_surviving_fields() -> None:
+    # Step 5 fills a never-received frame with `?`s, which can land
+    # mid-value -- here, partway through the sha256, taking the rest of the
+    # JSON with it.
     text = (
         '{"action":"bulk_downlink_start_blob","file":"mpi_data/2026-08-08.mpi",'
         '"file_size":1443001,"sha256":"543751B0D1ADE688FB6654EB5DD4B70F840AB9DCAA95F7C4'
+        + "?"
+        * 40
     )
-    df = _tcmd_df([_tcmd_row(text=text)])
+    df = _tcmd_df([_tcmd_row(text=text, is_complete=False)])
     (c,) = find_header_candidates(df)
     assert c.file == "mpi_data/2026-08-08.mpi"
     assert c.file_size == 1443001
     assert c.sha256 == "543751b0d1ade688fb6654eb5dd4b70f840ab9dcaa95f7c4"
-    assert len(c.sha256) < 64
+    assert not c.is_complete
+    assert c.raw_text == text
 
 
-def test_only_first_frame_is_parsed_later_frames_are_ignored() -> None:
-    # Real firmware numbers frames 1..max_seq_num. The header fields this
-    # module looks for are always written before TCMD_RESPONSE's 186-byte
-    # cap bites, so seq_num 1 alone is trusted -- a later frame (here,
-    # seq_num 2, arriving on its own row/timestamp) is never even looked at,
-    # rather than being joined on or tried as its own candidate.
+def test_unparseable_json_is_not_complete_even_if_every_frame_arrived() -> None:
+    text = '{"action":"adcs_get_latest_sd_file_blob","file":"ADCS/a.TLM","file_s'
+    (c,) = find_header_candidates(_tcmd_df([_tcmd_row(text=text)]))
+    assert c.file == "ADCS/a.TLM"
+    assert not c.is_complete
+
+
+def test_multiple_distinct_headers_are_all_returned_oldest_first() -> None:
     df = _tcmd_df(
         [
-            _tcmd_row(
-                text='{"action":"adcs_get_latest_sd_file_blob","file":"ADCS/log_aa21'
-                '.TLM","file_size":26470,"crc16":"0xaa21","sha256":'
-                '"74aa7f5b1ae416a9864a05b71cc2bfe8729d921f52d6405d2de1ddee2d4bc3'
-                'c2","sd_car',
-                ts_sent=7,
-                seq_num=1,
-                max_seq_num=2,
-                received_at="2026-01-01T00:00:00",
-            ),
-            _tcmd_row(
-                text='d_index":19}',  # trailing bytes only, no captured field
-                ts_sent=7,
-                seq_num=2,
-                max_seq_num=2,
-                received_at="2026-01-01T00:00:05",
-            ),
-        ]
-    )
-    candidates = find_header_candidates(df)
-    assert len(candidates) == 1
-    assert candidates[0].file == "ADCS/log_aa21.TLM"
-    assert candidates[0].received_at == _dt("2026-01-01T00:00:00")
-
-
-def test_second_frame_alone_is_not_a_candidate() -> None:
-    # A row whose seq_num isn't 1 is skipped outright, even if its own text
-    # happens to look header-shaped in isolation.
-    df = _tcmd_df(
-        [_tcmd_row(text='{"file":"x","file_size":1}', seq_num=2, max_seq_num=2)]
-    )
-    assert find_header_candidates(df) == []
-
-
-def test_multiple_distinct_headers_are_all_returned() -> None:
-    df = _tcmd_df(
-        [
-            _tcmd_row(
-                text='{"action":"adcs_get_latest_sd_file_blob","file":"ADCS/a.TLM",'
-                '"file_size":100}',
-                ts_sent=1,
-                received_at="2026-01-01T00:00:00",
-            ),
             _tcmd_row(
                 text='{"action":"adcs_get_latest_sd_file_blob","file":"ADCS/b.TLM",'
                 '"file_size":200}',
-                ts_sent=2,
                 received_at="2026-01-01T00:05:00",
+            ),
+            _tcmd_row(
+                text='{"action":"adcs_get_latest_sd_file_blob","file":"ADCS/a.TLM",'
+                '"file_size":100}',
+                received_at="2026-01-01T00:00:00",
             ),
         ]
     )
     candidates = find_header_candidates(df)
     assert [c.file for c in candidates] == ["ADCS/a.TLM", "ADCS/b.TLM"]
-    assert [c.received_at for c in candidates] == sorted(
-        c.received_at for c in candidates
-    )
 
 
 # ---------------------------------------------------------------------------

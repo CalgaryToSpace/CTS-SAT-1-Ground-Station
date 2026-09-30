@@ -1,6 +1,11 @@
 """The "File Reassembler" page: reassemble a downlinked bulk file from
 `BULK_FILE_DOWNLINK` packet chunks over one or more selected UTC time
 ranges -- see `file_reassembly` for the actual reassembly/decoding logic.
+
+The chunks come from step 3's `everything_decoded.parquet`; the file
+descriptor headers they're cross-checked against come from step 5's
+`reassembled_tcmd_responses.parquet`, so a header spanning several
+`TCMD_RESPONSE` frames is read whole.
 """
 
 # pyright: standard
@@ -11,6 +16,7 @@ from __future__ import annotations
 __all__ = ["build_file_reassembler_page"]
 
 import base64
+import json
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -22,9 +28,13 @@ from nicegui import ui
 from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
     pipeline as step_3_pipeline,
 )
+from cts1_mo_tools.cts1_processing_pipeline.step_5_reassemble_tcmd_responses import (
+    pipeline as step_5_pipeline,
+)
 
 from . import data as beacon_data
 from .file_reassembly import (
+    ADCS_SD_FILE_BLOB_ACTION,
     COVERAGE_PACKETS_PER_ROW,
     COVERAGE_ROW_WIDTH_BYTES,
     DEFAULT_CONFLICT_POLICY,
@@ -536,39 +546,45 @@ def _verification_section(
 def _best_named_candidate(
     candidates: list[BulkHeaderCandidate],
 ) -> BulkHeaderCandidate | None:
-    """Whichever candidate looks most trustworthy: prefer one with a full
-    (untruncated, 64-hex-char) SHA-256, then one with a known file_size,
-    tie-broken by most recently received.
+    """Whichever candidate looks most trustworthy: prefer one whose every
+    frame arrived, then one with a full (64-hex-char) SHA-256, then one with
+    a known file_size, tie-broken by most recently received.
     """
     named = [c for c in candidates if c.file]
     if not named:
         return None
 
-    def _score(c: BulkHeaderCandidate) -> tuple[int, int, datetime]:
-        has_full_sha256 = c.sha256 is not None and len(c.sha256) == 64  # noqa: PLR2004
-        return (int(has_full_sha256), int(c.file_size is not None), c.received_at)
+    def _score(c: BulkHeaderCandidate) -> tuple[int, int, int, datetime]:
+        has_full_sha256 = c.sha256 is not None and len(c.sha256) == SHA256_HEX_LEN
+        return (
+            int(c.is_complete),
+            int(has_full_sha256),
+            int(c.file_size is not None),
+            c.received_at,
+        )
 
     return max(named, key=_score)
 
 
-def _is_header_truncated(candidate: BulkHeaderCandidate) -> bool:
-    """Whether this candidate's *header* was cut off -- nothing to do with
-    whether the file itself came down whole (that's `_partial_reason`).
+def _is_header_incomplete(candidate: BulkHeaderCandidate) -> bool:
+    """Whether this candidate's *header* is missing anything -- nothing to do
+    with whether the file itself came down whole (that's `_partial_reason`).
 
-    Detected via the SHA-256, the only field truncation is currently
-    visible in (see the module docstring: a long file path pushes
-    TCMD_RESPONSE's 186-byte cap into the sha256 value before it's fully
-    written).
+    Either one of the response's frames never arrived (so step 5 filled it
+    with `?`s and the JSON no longer parses), or the SHA-256 is shorter than
+    a full one.
     """
-    return candidate.sha256 is not None and len(candidate.sha256) < SHA256_HEX_LEN
+    return not candidate.is_complete or (
+        candidate.sha256 is not None and len(candidate.sha256) < SHA256_HEX_LEN
+    )
 
 
 @dataclass(frozen=True, slots=True)
 class _HeaderGroup:
     """One or more consecutive (by `received_at`) candidates that all agree
-    on action/file/size/crc16/sha256 -- distinct receipts of what's
-    presumably the same underlying header, kept together as one row with
-    the individual timestamps available on expand.
+    on action/file/size/crc16/sha256/ADCS modified timestamp -- distinct
+    receipts of what's presumably the same underlying header, kept together
+    as one row with the individual receipts available on expand.
     """
 
     action: str | None
@@ -576,29 +592,51 @@ class _HeaderGroup:
     file_size: int | None
     crc16: str | None
     sha256: str | None
-    is_header_truncated: bool
+    adcs_modified_timestamp_utc: str | None
+    is_header_incomplete: bool
     members: tuple[BulkHeaderCandidate, ...]
+
+    @property
+    def most_complete_member(self) -> BulkHeaderCandidate:
+        """The member whose properties best represent the group: a complete
+        one if any, else whichever salvaged the most properties.
+        """
+        return max(self.members, key=lambda c: (c.is_complete, len(c.properties)))
 
 
 def _group_key(
     c: BulkHeaderCandidate,
-) -> tuple[str | None, str | None, int | None, str | None, str | None]:
-    return (c.action, c.file, c.file_size, c.crc16, c.sha256)
+) -> tuple[str | None, str | None, int | None, str | None, str | None, str | None]:
+    return (
+        c.action,
+        c.file,
+        c.file_size,
+        c.crc16,
+        c.sha256,
+        c.adcs_modified_timestamp_utc,
+    )
 
 
 def _group_consecutive_candidates(
     candidates_by_time: list[BulkHeaderCandidate],
 ) -> list[_HeaderGroup]:
     """Group *consecutive* (in `candidates_by_time`'s order) candidates that
-    share action/file/file_size/crc16/sha256. Candidates with the same
-    values but separated by a different one in between stay in separate
-    groups -- e.g. two genuinely distinct downloads of the same file don't
-    get merged just because they match.
+    share `_group_key`. Candidates with the same values but separated by a
+    different one in between stay in separate groups -- e.g. two genuinely
+    distinct downloads of the same file don't get merged just because they
+    match.
     """
     groups: list[_HeaderGroup] = []
     for c in candidates_by_time:
         if groups and _group_key(groups[-1].members[-1]) == _group_key(c):
-            groups[-1] = replace(groups[-1], members=(*groups[-1].members, c))
+            group = groups[-1]
+            groups[-1] = replace(
+                group,
+                is_header_incomplete=(
+                    group.is_header_incomplete and _is_header_incomplete(c)
+                ),
+                members=(*group.members, c),
+            )
         else:
             groups.append(
                 _HeaderGroup(
@@ -607,18 +645,69 @@ def _group_consecutive_candidates(
                     file_size=c.file_size,
                     crc16=c.crc16,
                     sha256=c.sha256,
-                    is_header_truncated=_is_header_truncated(c),
+                    adcs_modified_timestamp_utc=c.adcs_modified_timestamp_utc,
+                    is_header_incomplete=_is_header_incomplete(c),
                     members=(c,),
                 )
             )
     return groups
 
 
+ADCS_MODIFIED_TIMESTAMP_LABEL = "ADCS Modified (UTC)"
+
+
+def _property_label(action: str | None, key: str) -> str:
+    """The name a header property is shown under in the expanded view: its
+    own JSON key, plus the friendlier label for the ones that have one.
+    """
+    if (
+        (action is not None)
+        and action.startswith(ADCS_SD_FILE_BLOB_ACTION)
+        and key == "datetime"
+    ):
+        return f"{key} - {ADCS_MODIFIED_TIMESTAMP_LABEL}"
+    return key
+
+
+def _format_property_value(value: object) -> str:
+    """A property's value as it'd read in the JSON, minus a string's quotes."""
+    return value if isinstance(value, str) else json.dumps(value)
+
+
+def _raw_text_variants(group: _HeaderGroup) -> list[dict[str, Any]]:
+    """Each distinct raw response text among `group`'s members, with the
+    receipts that carried it -- usually just one text received N times, so
+    showing it once beats repeating it N times, but a receipt that differs
+    (a missing frame, or a property outside `_group_key` like a retry count)
+    still gets its own entry.
+    """
+    variants: dict[str, list[BulkHeaderCandidate]] = {}
+    for c in group.members:
+        variants.setdefault(c.raw_text, []).append(c)
+    return [
+        {
+            "id": i,
+            "text": text,
+            "receipts": [
+                f"{c.received_at:%Y-%m-%d %H:%M:%S}"
+                + (
+                    f" (telecommand sent {c.tcmd_sent_at:%Y-%m-%d %H:%M:%S})"
+                    if c.tcmd_sent_at is not None
+                    else ""
+                )
+                + ("" if c.is_complete else " -- incomplete")
+                for c in members
+            ],
+        }
+        for i, (text, members) in enumerate(variants.items())
+    ]
+
+
 # A `+`/`-` expand toggle per group row, native to NiceGUI/Quasar's own
 # expandable-row pattern (custom header/body slots) rather than a separate
-# `ui.expansion` per group -- keeps every group in the one table, and a
-# single-member group (nothing more to reveal) just gets a blank cell
-# instead of a button that would expand to repeat itself.
+# `ui.expansion` per group -- keeps every group in the one table. Expanding
+# shows every property the header carried (not just the columns above) and
+# its raw text, exactly as step 5 reassembled it.
 _HEADER_TABLE_HEADER_SLOT = r"""
     <q-tr :props="props">
         <q-th auto-width />
@@ -631,8 +720,7 @@ _HEADER_TABLE_HEADER_SLOT = r"""
 _HEADER_TABLE_BODY_SLOT = r"""
     <q-tr :props="props">
         <q-td auto-width>
-            <q-btn v-if="props.row.member_count > 1" size="sm" color="primary"
-                round dense flat
+            <q-btn size="sm" color="primary" round dense flat
                 @click="props.expand = !props.expand"
                 :icon="props.expand ? 'remove' : 'add'" />
         </q-td>
@@ -648,10 +736,26 @@ _HEADER_TABLE_BODY_SLOT = r"""
         </q-td>
     </q-tr>
     <q-tr v-show="props.expand" :props="props">
-        <q-td colspan="100%">
-            <div v-for="ts in props.row.member_timestamps" :key="ts"
-                class="text-left text-caption q-pl-lg">
-                {{ ts }}
+        <q-td colspan="100%" class="text-left" style="white-space: normal">
+            <div class="text-weight-bold q-pl-lg">Properties</div>
+            <div class="q-pl-lg q-mb-sm text-caption" style="display: grid;
+                grid-template-columns: max-content 1fr; gap: 2px 16px">
+                <template v-for="p in props.row.properties" :key="p.key">
+                    <div class="text-weight-medium">{{ p.label }}</div>
+                    <div class="font-mono" style="word-break: break-all">
+                        {{ p.value }}
+                    </div>
+                </template>
+            </div>
+            <div class="text-weight-bold q-pl-lg">Raw header content</div>
+            <div v-for="v in props.row.raw_variants" :key="v.id"
+                class="q-pl-lg q-mb-sm">
+                <div v-for="r in v.receipts" :key="r" class="text-caption text-grey">
+                    Received {{ r }}
+                </div>
+                <pre class="font-mono text-caption q-ma-none"
+                    style="white-space: pre-wrap; word-break: break-all"
+                    >{{ v.text }}</pre>
             </div>
         </q-td>
     </q-tr>
@@ -669,8 +773,8 @@ def _header_candidates_table(
     on_apply_filter: Callable[[datetime, datetime], None] | None = None,
 ) -> None:
     """Render the found header candidates -- sorted by Received, consecutive
-    look-alike entries collapsed into one row expandable (via a `+`/`-`
-    button) to its individual timestamps.
+    look-alike entries collapsed into one row, expandable (via a `+`/`-`
+    button) to every property the header carried and its raw text.
 
     Each row's "Apply as filter" button calls `on_apply_filter` with that
     group's first receipt through its last receipt plus
@@ -682,7 +786,7 @@ def _header_candidates_table(
     """
     if not candidates:
         ui.label(
-            "No TCMD_RESPONSE header found in the selected range(s) -- that's "
+            "No TCMD_RESPONSE header found received in the selected range(s) -- that's "
             "fine, headers are sometimes missing entirely; just cross-check "
             "the file name/size/hash some other way."
         ).classes("text-caption text-grey")
@@ -713,9 +817,14 @@ def _header_candidates_table(
         {"name": "crc16", "label": "CRC-16", "field": "crc16"},
         {"name": "sha256", "label": "SHA-256", "field": "sha256"},
         {
-            "name": "is_header_truncated",
-            "label": "Header Truncated?",
-            "field": "is_header_truncated",
+            "name": "adcs_modified_timestamp_utc",
+            "label": ADCS_MODIFIED_TIMESTAMP_LABEL,
+            "field": "adcs_modified_timestamp_utc",
+        },
+        {
+            "name": "is_header_incomplete",
+            "label": "Header Incomplete?",
+            "field": "is_header_incomplete",
         },
     ]
     rows = [
@@ -732,11 +841,17 @@ def _header_candidates_table(
             "file_size": f"{group.file_size:,}" if group.file_size is not None else "",
             "crc16": group.crc16 or "",
             "sha256": group.sha256 or "",
-            "is_header_truncated": "yes" if group.is_header_truncated else "",
-            "member_count": len(group.members),
-            "member_timestamps": [
-                f"{c.received_at:%Y-%m-%d %H:%M:%S}" for c in group.members
+            "adcs_modified_timestamp_utc": group.adcs_modified_timestamp_utc or "",
+            "is_header_incomplete": "yes" if group.is_header_incomplete else "",
+            "properties": [
+                {
+                    "key": key,
+                    "label": _property_label(group.action, key),
+                    "value": _format_property_value(value),
+                }
+                for key, value in group.most_complete_member.properties
             ],
+            "raw_variants": _raw_text_variants(group),
         }
         for i, group in enumerate(groups)
     ]
@@ -832,7 +947,7 @@ def _oversized_chunks_table(chunks: pl.DataFrame) -> None:
 
 
 def _reassembler_results(
-    path: Path,
+    data_dir: Path,
     ranges: list[tuple[datetime, datetime]],
     *,
     policy: ConflictPolicy,
@@ -847,18 +962,30 @@ def _reassembler_results(
         ).classes("text-caption text-grey")
         return
 
-    tcmd_responses = beacon_data.load_tcmd_response_packets(path, ranges=ranges)
-    candidates = find_header_candidates(tcmd_responses)
+    tcmd_responses = beacon_data.load_reassembled_tcmd_responses(
+        data_dir / step_5_pipeline.OUTPUT_FILENAME, ranges=ranges
+    )
+    candidates = (
+        find_header_candidates(tcmd_responses) if tcmd_responses is not None else []
+    )
 
     with ui.card().classes("w-full"):
         ui.label("Header candidates").classes("text-lg font-bold")
-        _header_candidates_table(candidates, on_apply_filter)
+        if tcmd_responses is None:
+            ui.label(
+                f"Step 5 hasn't produced {step_5_pipeline.OUTPUT_FILENAME} yet, "
+                "so there are no reassembled TCMD_RESPONSE headers to show."
+            ).classes("text-caption text-warning")
+        else:
+            _header_candidates_table(candidates, on_apply_filter)
 
     if headers_only:
         return
 
     best = _best_named_candidate(candidates)
-    chunks = beacon_data.load_bulk_file_downlink_packets(path, ranges=ranges)
+    chunks = beacon_data.load_bulk_file_downlink_packets(
+        data_dir / step_3_pipeline.OUTPUT_FILENAME, ranges=ranges
+    )
 
     with ui.card().classes("w-full"):
         ui.label("BULK_FILE_DOWNLINK chunks").classes("text-lg font-bold")
@@ -972,7 +1099,6 @@ def _make_filter_applier(
 
 
 def build_file_reassembler_page(data_dir: Path) -> None:
-    parquet_path = data_dir / step_3_pipeline.OUTPUT_FILENAME
     rows: list[_TimeRangeRow] = [_default_time_range_row()]
 
     @ui.refreshable
@@ -1054,7 +1180,7 @@ def build_file_reassembler_page(data_dir: Path) -> None:
             )
             return
         _reassembler_results(
-            parquet_path,
+            data_dir,
             _valid_ranges(rows),
             policy=search_state["policy"],
             headers_only=search_state["headers_only"],
