@@ -39,7 +39,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
-from nicegui import ui
+from nicegui import run, ui
 
 from . import data as beacon_data
 
@@ -503,21 +503,46 @@ class AttitudePlayer:
     def reload(self) -> None:
         """Re-query the window, keeping the current frame (by timestamp)
         unless parked on the newest frame, in which case follow the newest.
+
+        Blocks the event loop for the query -- prefer `reload_async` from
+        anything but the initial page build.
         """
+        frames, showing_fallback = self._load_frames(self._hours)
+        self._apply_frames(frames, showing_fallback=showing_fallback)
+
+    async def reload_async(self) -> None:
+        """`reload`, with the query run off the event loop."""
+        loaded = await run.io_bound(self._load_frames, self._hours)
+        if loaded is None:  # Only when the server's shutting down.
+            return
+        frames, showing_fallback = loaded
+        self._apply_frames(frames, showing_fallback=showing_fallback)
+
+    def _load_frames(self, hours: float) -> tuple[list[dict[str, Any]], bool]:
+        """Blocking: the frames in the last `hours`, and whether they're the
+        fallback (newest extended beacon ever) because the window was empty.
+        """
+        since = datetime.now(UTC) - timedelta(hours=hours)
+        frames = beacon_data.load_attitude_window(self._path, since=since).to_dicts()
+        if frames:
+            return frames, False
+        # Nothing in the window: still show the newest extended beacon ever,
+        # the same way the summary cards ignore the chart window.
+        fallback = beacon_data.latest_beacons(
+            self._path, n=1, packet_types=("BEACON_EXTENDED",)
+        ).to_dicts()
+        return fallback, True
+
+    def _apply_frames(
+        self, frames: list[dict[str, Any]], *, showing_fallback: bool
+    ) -> None:
+        # Decided here rather than before loading: the user may have moved
+        # the scrubber while `reload_async` was waiting on the query.
         at_latest = not self._frames or self._index >= len(self._frames) - 1
         current_time = None if at_latest else self._times[self._index]
 
-        since = datetime.now(UTC) - timedelta(hours=self._hours)
-        self._frames = beacon_data.load_attitude_window(
-            self._path, since=since
-        ).to_dicts()
-        # Nothing in the window: still show the newest extended beacon ever,
-        # the same way the summary cards ignore the chart window.
-        self._showing_fallback = not self._frames
-        if self._showing_fallback:
-            self._frames = beacon_data.latest_beacons(
-                self._path, n=1, packet_types=("BEACON_EXTENDED",)
-            ).to_dicts()
+        self._frames = frames
+        self._showing_fallback = showing_fallback
         self._times = [f["received_at"] for f in self._frames]
 
         last = max(len(self._frames) - 1, 0)
@@ -529,9 +554,9 @@ class AttitudePlayer:
             index = min(bisect.bisect_left(self._times, current_time), last)
         self._seek(index, force=True)
 
-    def _set_window(self, label: str) -> None:
+    async def _set_window(self, label: str) -> None:
         self._hours = self._window_choices[label]
-        self.reload()
+        await self.reload_async()
 
     # -- navigation ---------------------------------------------------------
 

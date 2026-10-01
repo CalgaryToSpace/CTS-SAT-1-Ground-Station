@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path  # noqa: TC003 -- tyro needs this at runtime elsewhere
 
-from nicegui import ui
+from nicegui import run, ui
 
 from . import export_tables
 from .export_raw import raw_export_url
@@ -244,7 +244,7 @@ def build_export_page(data_dir: Path) -> None:
     time_state: dict[str, str | None] = {"start": None, "end": None}
     options = _ExportOptions()
 
-    def _run_export() -> None:
+    async def _run_export() -> None:
         specs = [
             spec for spec in export_tables.TABLE_SPECS if selected_tables[spec.key]
         ]
@@ -261,8 +261,14 @@ def build_export_page(data_dir: Path) -> None:
             else None
         )
 
+        # Off the event loop: a big export can take long enough that the
+        # websocket misses its heartbeats, and NiceGUI shows "Reconnecting"
+        # (or reloads the page outright) while it waits.
+        export_button.disable()
+        export_spinner.set_visibility(True)
         try:
-            result = export_tables.export_selected_tables(
+            result = await run.io_bound(
+                export_tables.export_selected_tables,
                 specs,
                 data_dir,
                 start=start,
@@ -275,6 +281,11 @@ def build_export_page(data_dir: Path) -> None:
             )
         except ValueError as exc:
             ui.notify(str(exc), type="negative")
+            return
+        finally:
+            export_button.enable()
+            export_spinner.set_visibility(False)
+        if result is None:  # Only when the server's shutting down.
             return
 
         ui.download.content(result.data, filename=result.filename)
@@ -298,4 +309,7 @@ def build_export_page(data_dir: Path) -> None:
         _time_filter_section(time_state)
         _options_section(options)
 
-        ui.button("Export", icon="download", on_click=_run_export).classes("mt-2")
+        with ui.row().classes("items-center gap-2 mt-2"):
+            export_button = ui.button("Export", icon="download", on_click=_run_export)
+            export_spinner = ui.spinner(size="md")
+            export_spinner.set_visibility(False)

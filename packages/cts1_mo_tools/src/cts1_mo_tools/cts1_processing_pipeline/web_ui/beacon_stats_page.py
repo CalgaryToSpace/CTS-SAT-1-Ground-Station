@@ -11,11 +11,12 @@ from __future__ import annotations
 __all__ = ["build_beacon_stats_page"]
 
 import contextlib
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path  # noqa: TC003 -- tyro needs this at runtime elsewhere
 from typing import TYPE_CHECKING, Any
 
-from nicegui import ui
+from nicegui import run, ui
 
 from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
     pipeline as step_3_pipeline,
@@ -82,20 +83,44 @@ def _format_uptime(uptime_sec: float | None) -> str:
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
-def _local_max_pending_str(path: Path) -> str:
+@dataclass(frozen=True)
+class _LiveData:
+    """Everything the 30s-refreshed status widgets render, loaded up front
+    by `_load_live_data` so the parquet scans can run off the event loop.
+    """
+
+    latest: pl.DataFrame
+    latest_extended: pl.DataFrame
+    local_max_pending: tuple[int, datetime] | None
+    recent: pl.DataFrame
+
+
+def _load_live_data(path: Path) -> _LiveData:
+    """Blocking -- run it via `run.io_bound`."""
+    return _LiveData(
+        latest=beacon_data.latest_beacons(path, n=1),
+        latest_extended=beacon_data.latest_beacons(
+            path, n=1, packet_types=("BEACON_EXTENDED",)
+        ),
+        local_max_pending=beacon_data.latest_local_max_pending_tcmd_count(path),
+        recent=beacon_data.latest_beacons(path, n=10),
+    )
+
+
+def _local_max_pending_str(local_max: tuple[int, datetime] | None) -> str:
     """`pending_queued_tcmd_count` at its most recent local max -- see
     `beacon_data.latest_local_max_pending_tcmd_count` -- with when that
     beacon was received.
     """
-    local_max = beacon_data.latest_local_max_pending_tcmd_count(path)
     if local_max is None:
         return "?"
     count, received_at = local_max
     return f"{count} (at {received_at:%Y-%m-%d %H:%M:%S} UTC, {_age_str(received_at)})"
 
 
-def _latest_beacon_card(path: Path) -> None:
-    latest = beacon_data.latest_beacons(path, n=1)
+def _latest_beacon_card(
+    latest: pl.DataFrame, local_max_pending: tuple[int, datetime] | None
+) -> None:
     with ui.card().classes("w-full"):
         if latest.is_empty():
             ui.label("No beacon packets decoded yet.").classes("text-lg")
@@ -123,7 +148,10 @@ def _latest_beacon_card(path: Path) -> None:
             ("OBC State", row.get("cts1_operation_state")),
             ("Total TCMD Count", row.get("total_tcmd_queued_count", "?")),
             ("Pending TCMD Count", row.get("pending_queued_tcmd_count", "?")),
-            ("Latest Local Max Pending TCMD Count", _local_max_pending_str(path)),
+            (
+                "Latest Local Max Pending TCMD Count",
+                _local_max_pending_str(local_max_pending),
+            ),
             ("Time Sync Source", row.get("last_time_sync_source")),
             ("RF Switch Control Mode", row.get("active_rf_switch_control_mode")),
         ]
@@ -134,14 +162,13 @@ def _latest_beacon_card(path: Path) -> None:
                     ui.label(str(value)).classes("text-base font-medium")
 
 
-def _latest_extended_beacon_card(path: Path) -> None:
+def _latest_extended_beacon_card(latest: pl.DataFrame) -> None:
     """The extended-only fields (ADCS, extended EPS/OBC telemetry) only
     show up on `BEACON_EXTENDED` packets, which are interleaved with more
     frequent `BEACON_BASIC` ones -- so this looks up the latest *extended*
     beacon specifically, rather than reusing whatever `_latest_beacon_card`
     found.
     """
-    latest = beacon_data.latest_beacons(path, n=1, packet_types=("BEACON_EXTENDED",))
     with ui.card().classes("w-full"):
         ui.label("Latest Extended Beacon").classes("text-lg font-bold")
         if latest.is_empty():
@@ -197,12 +224,11 @@ def _latest_extended_beacon_card(path: Path) -> None:
                     ui.label(str(value)).classes("text-base font-medium")
 
 
-def _recent_beacons_table(path: Path, ui_state: dict[str, bool]) -> None:
+def _recent_beacons_table(recent: pl.DataFrame, ui_state: dict[str, bool]) -> None:
     """Collapsed by default. This is rebuilt by the 30s `live_status`
     refresh, so whether it's open lives in `ui_state` (per page load)
     rather than on the widget -- otherwise it'd snap shut every refresh.
     """
-    recent = beacon_data.latest_beacons(path, n=10)
 
     def _on_toggle(e: events.ValueChangeEventArguments) -> None:
         ui_state["recent_beacons_open"] = bool(e.value)
@@ -383,20 +409,19 @@ def build_beacon_stats_page(data_dir: Path, hours: float) -> None:
     # down and remounting ~47 ECharts instances every 30s regardless of
     # what's open was the main source of lag.
     @ui.refreshable
-    def live_status() -> None:
-        latest = beacon_data.latest_beacons(parquet_path, n=1)
-        if latest.is_empty():
+    def live_status(live: _LiveData) -> None:
+        if live.latest.is_empty():
             ui.label(
                 f"No beacon packets found at {parquet_path}. Run the "
                 "pipeline (step_1, step_2, step_3) first."
             ).classes("text-lg text-warning")
             return
-        _latest_beacon_card(parquet_path)
-        _latest_extended_beacon_card(parquet_path)
+        _latest_beacon_card(live.latest, live.local_max_pending)
+        _latest_extended_beacon_card(live.latest_extended)
 
     @ui.refreshable
-    def recent_status() -> None:
-        _recent_beacons_table(parquet_path, ui_state)
+    def recent_status(live: _LiveData) -> None:
+        _recent_beacons_table(live.recent, ui_state)
 
     @ui.refreshable
     def chart_section() -> None:
@@ -420,7 +445,8 @@ def build_beacon_stats_page(data_dir: Path, hours: float) -> None:
                 ui.button(
                     "Refresh charts", icon="refresh", on_click=chart_section.refresh
                 )
-        live_status()
+        initial_live = _load_live_data(parquet_path)
+        live_status(initial_live)
         # Not a refreshable: the 3D scene is built once and re-posed in
         # place, so the 30s refresh doesn't remount WebGL, reset the user's
         # camera, or interrupt playback.
@@ -430,12 +456,17 @@ def build_beacon_stats_page(data_dir: Path, hours: float) -> None:
             "Last 24h",
             lambda t: f"{t:%Y-%m-%d %H:%M:%S} UTC ({_age_str(t)})",
         )
-        recent_status()
+        recent_status(initial_live)
         chart_section()
 
-    def _refresh_live() -> None:
-        live_status.refresh()
-        attitude_player.reload()
-        recent_status.refresh()
+    async def _refresh_live() -> None:
+        # Load in a thread, then rebuild synchronously -- see
+        # `pipeline_status_page.build_pipeline_status_page._reload`.
+        live = await run.io_bound(_load_live_data, parquet_path)
+        if live is None:  # Only when the server's shutting down.
+            return
+        live_status.refresh(live)
+        recent_status.refresh(live)
+        await attitude_player.reload_async()
 
     ui.timer(REFRESH_INTERVAL_SEC, _refresh_live)
