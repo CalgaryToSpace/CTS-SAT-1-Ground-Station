@@ -18,11 +18,12 @@ from __future__ import annotations
 __all__ = ["build_pipeline_status_page"]
 
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from nicegui import ui
+from nicegui import run, ui
 
 from cts1_mo_tools.cts1_processing_pipeline import daemon_signals
 from cts1_mo_tools.cts1_processing_pipeline.daemon_signals import DaemonState
@@ -480,18 +481,46 @@ def _recent_packets_table(recent: pl.DataFrame) -> None:
         )
 
 
-def build_pipeline_status_page(data_dir: Path) -> None:
-    parquet_path = data_dir / status_data.DECODED_PACKETS_FILENAME
+@dataclass(frozen=True)
+class _PageData:
+    """Everything `content()` renders, loaded up front by `_load_page_data`
+    so the (slow, parquet-scanning) loading can run off the event loop.
+    """
 
+    counts: status_data.PipelineCounts
+    completeness: status_data.PacketCompletenessSummary
+    decoder_stats: list[status_data.DecoderToolStats]
+    recent: pl.DataFrame
+
+
+def _load_page_data(data_dir: Path) -> _PageData:
+    """Blocking -- run it via `run.io_bound`."""
+    parquet_path = data_dir / status_data.DECODED_PACKETS_FILENAME
+    return _PageData(
+        counts=status_data.pipeline_counts(data_dir),
+        completeness=status_data.packet_completeness_summary(parquet_path),
+        decoder_stats=status_data.decoder_tool_stats(data_dir),
+        recent=status_data.latest_packets(parquet_path, n=RECENT_PACKETS_LIMIT),
+    )
+
+
+def build_pipeline_status_page(data_dir: Path) -> None:
     @ui.refreshable
-    def content() -> None:
-        counts = status_data.pipeline_counts(data_dir)
-        completeness = status_data.packet_completeness_summary(parquet_path)
-        _counts_section(counts, completeness)
-        _decoder_tools_table(status_data.decoder_tool_stats(data_dir))
-        _recent_packets_table(
-            status_data.latest_packets(parquet_path, n=RECENT_PACKETS_LIMIT)
-        )
+    def content(page_data: _PageData) -> None:
+        _counts_section(page_data.counts, page_data.completeness)
+        _decoder_tools_table(page_data.decoder_stats)
+        _recent_packets_table(page_data.recent)
+
+    async def _reload() -> None:
+        # Load in a thread, then rebuild synchronously: scanning the
+        # parquet files on the event loop stalls the websocket (the
+        # "Reconnecting" banner), and loading inside an async refreshable
+        # would leave the section empty -- page collapsed, scroll position
+        # lost -- for the whole load.
+        page_data = await run.io_bound(_load_page_data, data_dir)
+        if page_data is None:  # Only when the server's shutting down.
+            return
+        content.refresh(page_data)
 
     with page_shell():
         with ui.row().classes("w-full items-center justify-between"):
@@ -504,11 +533,11 @@ def build_pipeline_status_page(data_dir: Path) -> None:
                     # Right next to the build it was built from: the commit
                     # here is only useful if you can go look at it.
                     ui.link("GitHub", REPO_URL, new_tab=True).classes("text-caption")
-            ui.button("Refresh", icon="refresh", on_click=content.refresh).tooltip(
+            ui.button("Refresh", icon="refresh", on_click=_reload).tooltip(
                 "Re-read this page's data from disk. To make the daemon go "
                 'fetch new data, use "Trigger Pipeline" below.'
             )
         _daemon_section(data_dir)
-        content()
+        content(_load_page_data(data_dir))
 
-    ui.timer(REFRESH_INTERVAL_SEC, content.refresh)
+    ui.timer(REFRESH_INTERVAL_SEC, _reload)
