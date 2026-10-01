@@ -2,8 +2,9 @@
 Plan MPI data-collection telecommands over geographic regions of interest.
 
 Fetches the latest TLE for a satellite from CelesTrak, propagates the orbit with
-satkit (SGP4), finds when the satellite is inside the configured lat/lon boxes,
-and schedules repeated MPI start/stop telecommands while it's inside them.
+satkit (SGP4), finds when the satellite is inside the configured lat/lon boxes
+while in Earth's shadow, and schedules repeated MPI start/stop telecommands
+while it's inside them.
 
 Usage (uv):
     uv run cts1_plan_mpi_ops --duration-hours 24
@@ -12,6 +13,7 @@ Usage (uv):
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import polars as pl
@@ -25,6 +27,8 @@ CELESTRAK_GP_URL = "https://celestrak.org/NORAD/elements/gp.php"
 TIME_STEP_SEC = 1.0
 """Propagation step used to detect region entry/exit."""
 
+EclipseStart = Literal["penumbra", "umbra"]
+
 
 @dataclass(frozen=True, slots=True)
 class Args:
@@ -36,7 +40,7 @@ class Args:
     north_latitude_range: str | None = "55.0 to 65.0"
     """Latitude range (degrees) of the northern region, like "55.0 to 65.0"."""
 
-    north_longitude_range: str | None = "-90 to -120"
+    north_longitude_range: str | None = None
     """Longitude range (degrees) of the northern region, like "-90 to -120"."""
 
     south_latitude_range: str | None = None
@@ -44,6 +48,10 @@ class Args:
 
     south_longitude_range: str | None = None
     """Longitude range (degrees) of the southern region. None to disable/unbound."""
+
+    eclipse_start: EclipseStart = "penumbra"
+    """Collect only in Earth's shadow, starting from either the penumbra (any part
+    of the Sun hidden) or the umbra (Sun fully hidden)."""
 
     mpi_collection_duration_sec: int | float = 60
     """Duration of each MPI recording."""
@@ -120,30 +128,60 @@ def fetch_tle_lines(norad_id: int) -> list[str]:
     return text.splitlines()
 
 
-def propagate_lat_lon(
-    tle: sk.TLE, times: list[datetime]
-) -> tuple[np.ndarray, np.ndarray]:
-    """Propagate the TLE to each time; return (latitude_deg, longitude_deg) arrays."""
+@dataclass(frozen=True, slots=True)
+class Ephemeris:
+    """Satellite state sampled at each propagation time."""
+
+    latitude_deg: np.ndarray
+    longitude_deg: np.ndarray
+
+    sun_fraction: np.ndarray
+    """Fraction of the Sun visible from the satellite: 0 in umbra, 1 in full sun."""
+
+
+def propagate(tle: sk.TLE, times: list[datetime]) -> Ephemeris:
+    """Propagate the TLE to each time; return its sub-satellite point and lighting."""
     sk_times = [sk.time.from_datetime(t) for t in times]
     pos_teme, _ = sk.sgp4(tle, sk_times)  # pyright: ignore[reportUnknownMemberType]
     pos_teme = np.atleast_2d(pos_teme)
 
-    quats = sk.frametransform.qteme2itrf(sk_times)
-    assert isinstance(quats, list)
+    q_itrf = sk.frametransform.qteme2itrf(sk_times)
+    q_gcrf = sk.frametransform.qteme2gcrf(sk_times)
+    assert isinstance(q_itrf, list)
+    assert isinstance(q_gcrf, list)
 
-    coords = [sk.itrfcoord(q * p) for q, p in zip(quats, pos_teme, strict=True)]
-    lat = np.array([c.latitude_deg for c in coords])
-    lon = np.array([c.longitude_deg for c in coords])
-    return lat, lon
+    coords = [sk.itrfcoord(q * p) for q, p in zip(q_itrf, pos_teme, strict=True)]
+
+    # Shadow check is done in GCRF, the frame satkit gives the Sun position in.
+    sun_gcrf = np.atleast_2d(sk.sun.pos_gcrf(sk_times))
+    sun_fraction = np.array(
+        [
+            sk.sun.shadowfunc(sun, q * p)
+            for q, p, sun in zip(q_gcrf, pos_teme, sun_gcrf, strict=True)
+        ]
+    )
+
+    return Ephemeris(
+        latitude_deg=np.array([c.latitude_deg for c in coords]),
+        longitude_deg=np.array([c.longitude_deg for c in coords]),
+        sun_fraction=sun_fraction,
+    )
 
 
-def _in_region_mask(region: Region, lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
+def _in_region_mask(region: Region, eph: Ephemeris) -> np.ndarray:
+    lat, lon = eph.latitude_deg, eph.longitude_deg
     mask = np.ones(lat.shape, dtype=bool)
     if region.lat_range is not None:
         mask &= (lat >= region.lat_range[0]) & (lat <= region.lat_range[1])
     if region.lon_range is not None:
         mask &= (lon >= region.lon_range[0]) & (lon <= region.lon_range[1])
     return mask
+
+
+def _in_shadow_mask(eclipse_start: EclipseStart, eph: Ephemeris) -> np.ndarray:
+    if eclipse_start == "penumbra":
+        return eph.sun_fraction < 1.0
+    return eph.sun_fraction <= 0.0
 
 
 def _mask_to_intervals(
@@ -224,7 +262,8 @@ def write_agenda(df: pl.DataFrame, args: Args, output_file: Path) -> None:
         command = f"{row['command']}@tssent={ts_ms}@tsexec={ts_ms}!"
         comment = (
             f"# {ts.strftime('%Y-%m-%dT%H:%M:%SZ')} region={row['region']} "
-            f"lat={row['latitude_deg']:.4f} lon={row['longitude_deg']:.4f}"
+            f"lat={row['latitude_deg']:.4f} lon={row['longitude_deg']:.4f} "
+            f"sun_fraction={row['sun_fraction']:.2f}"
         )
         lines.append(f"{command}  {comment}")
 
@@ -273,11 +312,18 @@ def run(args: Args) -> pl.DataFrame:
     times = [start + timedelta(seconds=i * TIME_STEP_SEC) for i in range(num_steps)]
     logger.info(f"Propagating {num_steps} steps from {start} ({args.duration_hours} h)")
 
-    lat, lon = propagate_lat_lon(tle, times)
+    eph = propagate(tle, times)
+    in_shadow = _in_shadow_mask(args.eclipse_start, eph)
+    logger.info(
+        f"Satellite is in {args.eclipse_start} or darker for "
+        f"{in_shadow.mean():.1%} of the planning window."
+    )
 
     intervals: list[tuple[str, datetime, datetime]] = []
     for region in regions:
-        region_intervals = _mask_to_intervals(_in_region_mask(region, lat, lon), times)
+        region_intervals = _mask_to_intervals(
+            _in_region_mask(region, eph) & in_shadow, times
+        )
         logger.info(f"Region {region.name}: {len(region_intervals)} passes")
         intervals.extend((region.name, a, b) for a, b in region_intervals)
     intervals.sort(key=lambda x: x[1])
@@ -296,18 +342,20 @@ def run(args: Args) -> pl.DataFrame:
         "region": pl.String,
         "latitude_deg": pl.Float64,
         "longitude_deg": pl.Float64,
+        "sun_fraction": pl.Float64,
     }
     if not events:
         logger.warning("Satellite never enters any region in the planning window.")
         return pl.DataFrame(schema=schema)
 
-    event_lat, event_lon = propagate_lat_lon(tle, [e["timestamp"] for e in events])  # type: ignore[misc]
+    event_eph = propagate(tle, [e["timestamp"] for e in events])  # pyright: ignore[reportArgumentType]
     return (
         pl.DataFrame(events)
         .with_columns(
             pl.col("timestamp").cast(pl.Datetime("us", "UTC")),
-            latitude_deg=pl.Series(event_lat).round(4),
-            longitude_deg=pl.Series(event_lon).round(4),
+            latitude_deg=pl.Series(event_eph.latitude_deg).round(4),
+            longitude_deg=pl.Series(event_eph.longitude_deg).round(4),
+            sun_fraction=pl.Series(event_eph.sun_fraction).round(4),
         )
         .select(schema.keys())
         .sort("timestamp")
