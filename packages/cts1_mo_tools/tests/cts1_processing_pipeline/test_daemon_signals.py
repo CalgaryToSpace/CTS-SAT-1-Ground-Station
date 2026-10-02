@@ -14,6 +14,9 @@ from cts1_mo_tools.cts1_processing_pipeline.daemon_signals import (
     DaemonState,
     StatusReporter,
 )
+from cts1_mo_tools.cts1_processing_pipeline.step_0_list_observations import (
+    pipeline as step_0_pipeline,
+)
 from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate import (
     pipeline as step_1_pipeline,
 )
@@ -327,6 +330,7 @@ def test_every_step_announces_itself(
         """Stand in for a step's `run`, so this exercises only the daemon."""
 
     for module in (
+        step_0_pipeline,
         step_1_pipeline,
         step_2_pipeline,
         step_3_pipeline,
@@ -368,7 +372,7 @@ def test_every_step_announces_itself(
         assert f"Starting step {number}/5: {name} -- backfill." in log
         assert f"backfill: step {number} ({name})" in details
 
-    assert "Finished all 5 steps -- backfill." in log
+    assert "Finished steps 0-5 -- backfill." in log
     # In order, and once each.
     starts = [m for m in messages if m.startswith("Starting step ")]
     assert [m.split("/")[0] for m in starts] == [

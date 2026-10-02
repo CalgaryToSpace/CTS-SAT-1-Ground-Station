@@ -1,12 +1,12 @@
 """Step 1: download and demodulate.
 
-List every SatNOGS observation for a satellite (paged across all statuses),
-land it in DuckDB's `raw_observations`, then decode every observation with
-audio and/or already-demodulated packets: download the `.ogg` into a
-throwaway temp dir and run it through `askew_demod_from_file`,
-`sso_rx_replay --forensics-report`, and `gr_satellites` (via
-`sox`-converted WAV), download any `demoddata` packet URLs directly, and
-land every decoded frame/PDU in DuckDB's `raw_packets`.
+Read the observations step 0 listed into DuckDB's `raw_observations` (this
+step never queries the SatNOGS observation listing itself), then decode
+every observation with audio and/or already-demodulated packets: download
+the `.ogg` into a throwaway temp dir and run it through
+`askew_demod_from_file`, `sso_rx_replay --forensics-report`, and
+`gr_satellites` (via `sox`-converted WAV), download any `demoddata` packet
+URLs directly, and land every decoded frame/PDU in DuckDB's `raw_packets`.
 
 Invoked via the top-level CLI's `step_1` subcommand -- see
 `cts1_mo_tools.cts1_processing_pipeline.cli`.
@@ -19,8 +19,6 @@ from . import _subprocess_registry
 __all__ = ["DB_FILENAME", "DEFAULT_DATA_DIR", "DEFAULT_DB_PATH", "run"]
 
 import concurrent.futures
-import os
-import re
 import tempfile
 import time
 from datetime import UTC, datetime, timedelta
@@ -30,9 +28,9 @@ from typing import TYPE_CHECKING, Any
 import polars as pl
 from loguru import logger
 
-from cts1_mo_tools.cts1_agenda_maker.satnogs_data import fetch_all_observations
 from cts1_mo_tools.cts1_decode_satnogs_packets import verify_csp_packet_crc32c
-from cts1_mo_tools.cts1_processing_pipeline import resource_limits
+from cts1_mo_tools.cts1_processing_pipeline import landing_db, resource_limits
+from cts1_mo_tools.cts1_processing_pipeline.common import parse_start_filter
 
 from . import db
 from .audio import convert_ogg_to_wav, download_audio
@@ -45,15 +43,11 @@ from .decode_sso_rx_replay import run_sso_rx_replay
 if TYPE_CHECKING:
     import duckdb
 
-# Every step (and the web UI) takes a single `data_dir` argument and finds
-# its own file(s) inside it by a fixed filename -- see each step's
-# `DEFAULT_DATA_DIR`/`OUTPUT_FILENAME` -- so pointing every process (the
-# daemon container and the web UI container alike) at the same directory is
-# one env var, `CTS1_DATA_DIR`, rather than a `--db-path`/`--parquet-path`
-# kept in sync by hand across both.
-DEFAULT_DATA_DIR = Path(os.environ.get("CTS1_DATA_DIR", "output"))
-DB_FILENAME = "cts1_processing_pipeline.duckdb"
-DEFAULT_DB_PATH = DEFAULT_DATA_DIR / DB_FILENAME
+# See `landing_db` for why every step shares one `data_dir`.
+DEFAULT_DATA_DIR = landing_db.DEFAULT_DATA_DIR
+DB_FILENAME = landing_db.DB_FILENAME
+DEFAULT_DB_PATH = landing_db.DEFAULT_DB_PATH
+# Observations decoded per batch; a checkpoint is considered after each one.
 CHECKPOINT_INTERVAL = 100
 # Floor on the wall-clock gap between two mid-run checkpoint writeouts.
 # `export_parquets` rewrites every table in full, which on a long run costs
@@ -116,47 +110,6 @@ def _resolve_decoder_versions(tools: frozenset[str]) -> dict[str, str | None]:
     return versions
 
 
-_DURATION_RE = re.compile(
-    r"^\s*(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>second|minute|hour|day|week)s?\s*$",
-    re.IGNORECASE,
-)
-_DURATION_UNIT_TO_TIMEDELTA_KWARG = {
-    "second": "seconds",
-    "minute": "minutes",
-    "hour": "hours",
-    "day": "days",
-    "week": "weeks",
-}
-
-
-def _parse_start_filter(value: str) -> datetime:
-    """Parse --start as either a relative duration or an absolute date/datetime.
-
-    A duration like "3 days" or "6 hours" is measured back from now (UTC).
-    Anything else is parsed as ISO 8601 ("2026-08-01" or
-    "2026-08-01T00:00:00Z"); a value with no timezone is treated as UTC.
-
-    Raises:
-        ValueError: If `value` matches neither form.
-    """
-    m = _DURATION_RE.match(value)
-    if m:
-        amount = float(m.group("value"))
-        kwarg = _DURATION_UNIT_TO_TIMEDELTA_KWARG[m.group("unit").lower()]
-        return datetime.now(UTC) - timedelta(**{kwarg: amount})
-
-    try:
-        dt = datetime.fromisoformat(value.strip())
-    except ValueError as exc:
-        msg = (
-            f"Could not parse --start={value!r}; expected a duration like "
-            f"'3 days' or an ISO 8601 date/datetime."
-        )
-        raise ValueError(msg) from exc
-
-    return dt.astimezone(UTC) if dt.tzinfo else dt.replace(tzinfo=UTC)
-
-
 def _csp_crc_valid(data_hex: str) -> bool:
     """Whether `data_hex` ends in a valid trailing CSP CRC-32C."""
     is_valid, _computed, _received = verify_csp_packet_crc32c(bytes.fromhex(data_hex))
@@ -173,10 +126,8 @@ def _received_at(obs: dict[str, Any], *, time_in_file_ms: float | None) -> datet
     estimate.
     """
     if time_in_file_ms is not None:
-        return datetime.fromisoformat(obs["start"]) + timedelta(
-            milliseconds=time_in_file_ms
-        )
-    return datetime.fromisoformat(obs["end"])
+        return obs["start"] + timedelta(milliseconds=time_in_file_ms)
+    return obs["end"]
 
 
 def _process_audio(  # noqa: C901, PLR0912
@@ -324,9 +275,7 @@ def _process_demod(obs: dict[str, Any], tools: frozenset[str]) -> list[dict[str,
         demod_rows = []
 
     for row in demod_rows:
-        time_in_file_ms = (
-            row["received_at"] - datetime.fromisoformat(obs["start"])
-        ).total_seconds() * 1000
+        time_in_file_ms = (row["received_at"] - obs["start"]).total_seconds() * 1000
 
         rows.append(
             {
@@ -370,20 +319,20 @@ def _process_fast_timed(
 
 
 def _select_candidates(
-    page: list[dict[str, Any]],
+    observations: list[dict[str, Any]],
     *,
     done: set[tuple[int, str]],
-    remaining: int | None,
+    limit: int | None,
     tools: frozenset[str],
 ) -> list[dict[str, Any]]:
-    """Observations in `page` that have audio and/or demoddata and still need decoding.
+    """Observations that have audio and/or demoddata and still need decoding.
 
-    Stops early once `remaining` candidates have been picked (None = no cap).
-    Only `tools` are considered when checking whether an observation is done.
+    Stops once `limit` candidates have been picked (None = no cap). Only
+    `tools` are considered when checking whether an observation is done.
     """
     candidates: list[dict[str, Any]] = []
-    for obs in page:
-        if remaining is not None and len(candidates) >= remaining:
+    for obs in observations:
+        if limit is not None and len(candidates) >= limit:
             break
         if not obs.get("payload") and not obs.get("demoddata"):
             continue
@@ -407,13 +356,15 @@ def run(  # noqa: C901, PLR0913, PLR0915
     """Run the pipeline once.
 
     Args:
-        norad_id: NORAD catalog ID of the target satellite.
-        data_dir: Directory to write/find the DuckDB database (`DB_FILENAME`)
-            in -- raw_observations/raw_packets land there, and its checkpoint
+        norad_id: NORAD catalog ID of the target satellite -- only its
+            observations in raw_observations are considered.
+        data_dir: Directory to find the DuckDB database (`DB_FILENAME`) in
+            -- raw_observations is read from there (step 0 writes it),
+            raw_packets/decoder_runs land there, and their checkpoint
             parquet exports land alongside it.
-        start: Only pull observations starting after this point: a duration
-            like "3 days" (relative to now) or an ISO 8601 date/datetime.
-            None means no lower bound (full history).
+        start: Only decode observations starting at/after this point: a
+            duration like "3 days" (relative to now) or an ISO 8601
+            date/datetime. None means every observation step 0 has listed.
         limit: Cap the number of observations decoded this run (for testing).
         workers: Concurrency for the decoders (askew_demod_from_file,
             sso_rx_replay, gr_satellites --hexdump, gr_satellites
@@ -445,26 +396,16 @@ def run(  # noqa: C901, PLR0913, PLR0915
 
     db_path = data_dir / DB_FILENAME
 
-    logger.info(f"Listing observations for NORAD {norad_id}")
-    logger.info(f"  Using tools: {sorted(enabled_tools)}")
+    start_gte = parse_start_filter(start) if start is not None else None
 
-    start_gt = _parse_start_filter(start) if start is not None else None
-    if start_gt is not None:
-        logger.info(
-            f"  Filtering to observations starting after {start_gt.isoformat()}"
-        )
-
-    total_observations = 0
     total_decoded = 0
-    since_checkpoint = 0
     last_checkpoint_at = time.monotonic()
-    reached_limit = False
 
     def write_checkpoint(con: duckdb.DuckDBPyConnection) -> None:
         nonlocal last_checkpoint_at
         started_at = time.monotonic()
         logger.debug(
-            f"Checkpointing after {total_observations} observation(s) "
+            f"Checkpointing after {total_decoded} observation(s) "
             f"({started_at - last_checkpoint_at:.1f}s since the last one)"
         )
         con.execute("CHECKPOINT")
@@ -473,7 +414,7 @@ def run(  # noqa: C901, PLR0913, PLR0915
         logger.debug(f"Checkpoint written in {last_checkpoint_at - started_at:.1f}s")
 
     with (
-        db.connect(db_path) as con,
+        landing_db.connect(db_path) as con,
         concurrent.futures.ThreadPoolExecutor(max_workers=workers) as fast_executor,
     ):
         done: set[tuple[int, str]] = (
@@ -482,14 +423,29 @@ def run(  # noqa: C901, PLR0913, PLR0915
         if force_rerun:
             logger.info("--force-rerun: ignoring decoder_runs history")
 
+        observations = db.load_observations(con, norad_id=norad_id, start_gte=start_gte)
+        candidates = _select_candidates(
+            observations, done=done, limit=limit, tools=enabled_tools
+        )
+        logger.info(
+            f"{len(candidates)} of {len(observations)} listed observation(s) for "
+            f"NORAD {norad_id}"
+            + (f" starting after {start_gte.isoformat()}" if start_gte else "")
+            + " need decoding"
+        )
+        logger.info(f"  Using tools: {sorted(enabled_tools)}")
+        if not candidates:
+            return
+
         decoder_versions = _resolve_decoder_versions(enabled_tools)
         logger.info(f"Decoder versions: {decoder_versions}")
 
         def dispatch(batch: list[dict[str, Any]]) -> None:
             nonlocal total_decoded
-            if not batch:
-                return
-            logger.info(f"Dispatching a batch of {len(batch)} observation(s)...")
+            logger.info(
+                f"Dispatching a batch of {len(batch)} observation(s) "
+                f"across {workers} worker(s)..."
+            )
             futures = {
                 fast_executor.submit(
                     _process_fast_timed, obs, temp_dir, enabled_tools
@@ -503,8 +459,8 @@ def run(  # noqa: C901, PLR0913, PLR0915
                 except Exception:  # noqa: BLE001
                     # Every decoder already swallows its own failures, so this
                     # is something unexpected: leave the observation unrecorded
-                    # (and not in `done`) so a later pass retries it, rather
-                    # than stamping a decoder_run with no runtime.
+                    # so a later run retries it, rather than stamping a
+                    # decoder_run with no runtime.
                     logger.exception(f"Failed processing observation {obs['id']}")
                     continue
                 if rows:
@@ -518,60 +474,24 @@ def run(  # noqa: C901, PLR0913, PLR0915
                 db.record_decoder_runs(
                     con, obs["id"], decoder_versions, runtime_ms=runtime_ms
                 )
-                for decoder in enabled_tools:
-                    done.add((obs["id"], decoder))
                 total_decoded += 1
-                logger.info(f"[{total_decoded}] observation {obs['id']}")
+                logger.info(
+                    f"[{total_decoded}/{len(candidates)}] observation {obs['id']}"
+                )
 
         try:
-            for page in fetch_all_observations(
-                norad_id,
-                start_gt_filter=start_gt,
-                start_lt_filter=datetime.now(UTC),
-                statuses=None,
-            ):
-                total_observations += len(page)
-                since_checkpoint += len(page)
-                observations_df = pl.DataFrame(page, infer_schema_length=None)
-                observations_df = observations_df.with_columns(
-                    pl.col("start").cast(pl.Datetime).dt.replace_time_zone("UTC"),
-                    pl.col("end").cast(pl.Datetime).dt.replace_time_zone("UTC"),
-                    pl.col("demoddata").struct.json_encode(),
-                )
-                db.upsert_observations(con, observations_df)
+            for batch_start in range(0, len(candidates), CHECKPOINT_INTERVAL):
+                dispatch(candidates[batch_start : batch_start + CHECKPOINT_INTERVAL])
 
-                if since_checkpoint >= CHECKPOINT_INTERVAL:
-                    seconds_since_checkpoint = time.monotonic() - last_checkpoint_at
-                    if seconds_since_checkpoint >= MIN_SECONDS_BETWEEN_CHECKPOINTS:
-                        write_checkpoint(con)
-                        since_checkpoint = 0
-                    else:
-                        # Leave `since_checkpoint` alone so the next page
-                        # retests it, rather than waiting another full
-                        # CHECKPOINT_INTERVAL observations after the rate
-                        # limit expires.
-                        logger.debug(
-                            "Skipping checkpoint: only "
-                            f"{seconds_since_checkpoint:.1f}s since the last "
-                            f"one (minimum {MIN_SECONDS_BETWEEN_CHECKPOINTS:.0f}s)"
-                        )
-
-                if reached_limit:
-                    continue
-
-                remaining = None if limit is None else limit - total_decoded
-                dispatch(
-                    _select_candidates(
-                        page, done=done, remaining=remaining, tools=enabled_tools
+                seconds_since_checkpoint = time.monotonic() - last_checkpoint_at
+                if seconds_since_checkpoint >= MIN_SECONDS_BETWEEN_CHECKPOINTS:
+                    write_checkpoint(con)
+                else:
+                    logger.debug(
+                        "Skipping checkpoint: only "
+                        f"{seconds_since_checkpoint:.1f}s since the last "
+                        f"one (minimum {MIN_SECONDS_BETWEEN_CHECKPOINTS:.0f}s)"
                     )
-                )
-
-                if limit is not None and total_decoded >= limit:
-                    # A generator-backed fetch, so breaking here stops
-                    # pulling further pages from the API rather than just
-                    # skipping them.
-                    reached_limit = True
-                    break
 
         except KeyboardInterrupt:
             # Worker threads block inside subprocess.run()-style calls, which
@@ -587,6 +507,4 @@ def run(  # noqa: C901, PLR0913, PLR0915
         # back above still lands before the run ends.
         write_checkpoint(con)
 
-    logger.info(
-        f"Done. {total_observations} observation(s) listed, {total_decoded} decoded."
-    )
+    logger.info(f"Done. {total_decoded} observation(s) decoded.")

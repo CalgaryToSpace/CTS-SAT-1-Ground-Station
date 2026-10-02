@@ -16,6 +16,8 @@ __all__ = [
     "DECODER_RUNS_FILENAME",
     "DEFAULT_DATA_DIR",
     "DISTINCT_PACKETS_FILENAME",
+    "LISTING_HISTORY_FILENAME",
+    "LISTING_WINDOWS_FILENAME",
     "RAW_OBSERVATIONS_FILENAME",
     "RAW_PACKETS_FILENAME",
     "SATELLITE_EVENTS_FILENAME",
@@ -35,6 +37,9 @@ from typing import TYPE_CHECKING
 
 import polars as pl
 
+from cts1_mo_tools.cts1_processing_pipeline.step_0_list_observations import (
+    db as step_0_db,
+)
 from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate import (
     db as step_1_db,
 )
@@ -58,11 +63,13 @@ if TYPE_CHECKING:
     from datetime import timedelta
     from pathlib import Path
 
-# Every one of these lives in the same output directory as step 1's DuckDB
-# export -- see `step_1_download_and_demodulate.db.export_parquets` and
+# Every one of these lives in the same output directory as steps 0/1's
+# DuckDB exports -- see each of those steps' `db.export_parquets` and
 # `step_2_deduplicate_packets.pipeline` for where each is written.
 DEFAULT_DATA_DIR = step_1_pipeline.DEFAULT_DATA_DIR
-RAW_OBSERVATIONS_FILENAME = f"{step_1_db.RAW_OBSERVATIONS_TABLE}.parquet"
+RAW_OBSERVATIONS_FILENAME = f"{step_0_db.RAW_OBSERVATIONS_TABLE}.parquet"
+LISTING_WINDOWS_FILENAME = f"{step_0_db.LISTING_WINDOWS_TABLE}.parquet"
+LISTING_HISTORY_FILENAME = f"{step_0_db.LISTING_HISTORY_TABLE}.parquet"
 RAW_PACKETS_FILENAME = f"{step_1_db.RAW_PACKETS_TABLE}.parquet"
 DECODER_RUNS_FILENAME = f"{step_1_db.DECODER_RUNS_TABLE}.parquet"
 DISTINCT_PACKETS_FILENAME = step_2_pipeline.OUTPUT_FILENAME

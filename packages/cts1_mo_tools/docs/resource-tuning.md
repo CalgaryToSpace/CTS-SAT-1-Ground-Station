@@ -142,7 +142,8 @@ sized to the machine.)
 
 ## Disk
 
-Step 1 rewrites every parquet file in full at each checkpoint, which on
+Step 1 rewrites its parquet files (`raw_packets` above all) in full at
+each checkpoint, which on
 btrfs-with-compression is the most disruptive thing the pipeline does to
 the web UI reading those same files. It's rate-limited to one rewrite per
 10 minutes (`MIN_SECONDS_BETWEEN_CHECKPOINTS`, in step 1's `pipeline.py`);

@@ -1,11 +1,10 @@
-"""DuckDB landing-zone tables for the processing pipeline.
+"""Step 1's tables in the shared landing-zone DuckDB database.
 
-Three tables, all append/upsert-friendly and tolerant of new columns showing
-up in later runs (the SatNOGS API and our decoder wrappers are both allowed
-to grow fields over time):
+Two tables, both append/upsert-friendly and tolerant of new columns showing
+up in later runs (our decoder wrappers are allowed to grow fields over
+time):
 
-  - raw_observations: one row per SatNOGS observation, upserted by `id`.
-  - raw_packets: one row per decoded frame/PDU (from either decoder),
+  - raw_packets: one row per decoded frame/PDU (from any decoder),
     append-only.
   - decoder_runs: one row per (observation_id, decoder) that has been run,
     upserted by that pair (primary key), along with the decoder tool's
@@ -13,6 +12,9 @@ to grow fields over time):
     Recorded unconditionally -- even when a decoder finds no packets -- so
     an observation/decoder pair with no output isn't retried on every
     subsequent run.
+
+Step 1's input, `raw_observations`, belongs to step 0 (see
+`step_0_list_observations.db`); `load_observations` reads it back.
 """
 
 from __future__ import annotations
@@ -20,34 +22,39 @@ from __future__ import annotations
 __all__ = [
     "DECODER_RUNS_TABLE",
     "QUALITY_TIER_ORDER",
-    "RAW_OBSERVATIONS_TABLE",
     "RAW_PACKETS_TABLE",
     "already_decoded_pairs",
     "append_packets",
-    "connect",
     "export_parquets",
     "format_counts",
+    "load_observations",
     "record_decoder_runs",
-    "upsert_observations",
 ]
 
+import json
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-import duckdb
 import polars as pl
 from loguru import logger
 
-from cts1_mo_tools.cts1_processing_pipeline.common import (
-    DEFAULT_DUCKDB_MEMORY_LIMIT,
-    connect_duckdb,
+from cts1_mo_tools.cts1_processing_pipeline.landing_db import (
+    add_missing_columns,
+    export_table_to_parquet,
+    insert_with_type_repair,
+    quote_ident,
+    table_exists,
+)
+from cts1_mo_tools.cts1_processing_pipeline.step_0_list_observations.db import (
+    RAW_OBSERVATIONS_TABLE,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from pathlib import Path
 
-RAW_OBSERVATIONS_TABLE = "raw_observations"
+    import duckdb
+
 RAW_PACKETS_TABLE = "raw_packets"
 DECODER_RUNS_TABLE = "decoder_runs"
 
@@ -62,148 +69,6 @@ QUALITY_TIER_ORDER = (
     "believable",
     "candidate",
 )
-
-
-def connect(
-    db_path: Path, *, memory_limit: str = DEFAULT_DUCKDB_MEMORY_LIMIT
-) -> duckdb.DuckDBPyConnection:
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    return connect_duckdb(db_path, memory_limit=memory_limit)
-
-
-def _quote_ident(name: str) -> str:
-    return '"' + name.replace('"', '""') + '"'
-
-
-def _quote_literal(value: str) -> str:
-    return "'" + value.replace("'", "''") + "'"
-
-
-def _table_exists(con: duckdb.DuckDBPyConnection, table: str) -> bool:
-    row = con.execute(
-        "SELECT count(*) FROM information_schema.tables WHERE table_name = ?",
-        [table],
-    ).fetchone()
-    assert row is not None
-    return bool(row[0] > 0)
-
-
-def _add_missing_columns(
-    con: duckdb.DuckDBPyConnection, table: str, incoming_view: str
-) -> None:
-    """Widen `table` with any columns present in incoming_view but not in it."""
-    existing_cols = {
-        row[1]
-        for row in con.execute(f"PRAGMA table_info({_quote_ident(table)})").fetchall()
-    }
-    for col_name, col_type, *_ in con.execute(f"DESCRIBE {incoming_view}").fetchall():
-        if col_name not in existing_cols:
-            logger.info(f"{table}: adding new column {col_name!r} ({col_type})")
-            con.execute(
-                f"ALTER TABLE {_quote_ident(table)} "
-                f"ADD COLUMN {_quote_ident(col_name)} {col_type}"
-            )
-
-
-def _alter_column_type(
-    con: duckdb.DuckDBPyConnection, table: str, col_name: str, new_type: str
-) -> bool:
-    """Try ALTER COLUMN ... TYPE; return whether it succeeded."""
-    try:
-        con.execute(
-            f"ALTER TABLE {_quote_ident(table)} "
-            f"ALTER COLUMN {_quote_ident(col_name)} TYPE {new_type}"
-        )
-    except duckdb.ConversionException:
-        return False
-    return True
-
-
-def _widen_mismatched_columns(
-    con: duckdb.DuckDBPyConnection, table: str, incoming_view: str
-) -> None:
-    """Widen any existing column that can't hold the incoming batch's type.
-
-    Small per-page/per-observation batches routinely have columns that are
-    entirely NULL (e.g. `payload` is null for most observations); DuckDB
-    infers those as a narrow type (often INTEGER) at CREATE TABLE time, which
-    then fails to hold a later batch's real data of a different type.
-
-    DuckDB's own ALTER COLUMN ... TYPE already knows how to promote sensibly
-    (INTEGER -> BIGINT -> DOUBLE, DATE -> TIMESTAMP, etc.) and simply raises
-    if the existing column's data can't be represented in the new type, so
-    the incoming batch's type is tried first and VARCHAR is only the
-    fallback when that specific promotion isn't representable.
-    """
-    existing_types = {
-        row[1]: row[2]
-        for row in con.execute(f"PRAGMA table_info({_quote_ident(table)})").fetchall()
-    }
-    for col_name, col_type, *_ in con.execute(f"DESCRIBE {incoming_view}").fetchall():
-        existing_type = existing_types.get(col_name)
-        if existing_type is None or existing_type in (col_type, "VARCHAR"):
-            continue
-
-        if _alter_column_type(con, table, col_name, col_type):
-            target_type = col_type
-        else:
-            _alter_column_type(con, table, col_name, "VARCHAR")
-            target_type = "VARCHAR"
-        logger.warning(
-            f"{table}: widened column {col_name!r} from {existing_type} to "
-            f"{target_type} (incoming batch has type {col_type})"
-        )
-
-
-def _insert_with_type_repair(
-    con: duckdb.DuckDBPyConnection, table: str, incoming_view: str
-) -> None:
-    """INSERT INTO ... BY NAME, self-healing on a column-type conflict.
-
-    Retries exactly once after widening the offending column(s) to VARCHAR.
-    """
-    insert_sql = (
-        f"INSERT INTO {_quote_ident(table)} BY NAME SELECT * FROM {incoming_view}"  # noqa: S608
-    )
-    try:
-        con.execute(insert_sql)
-    except duckdb.ConversionException:
-        logger.warning(
-            f"{table}: column type conflict inserting incoming batch; "
-            f"widening and retrying"
-        )
-        _widen_mismatched_columns(con, table, incoming_view)
-        con.execute(insert_sql)
-
-
-def upsert_observations(
-    con: duckdb.DuckDBPyConnection, df: pl.DataFrame, *, key_col: str = "id"
-) -> None:
-    """Insert/replace rows in raw_observations, keyed by `id`."""
-    if df.is_empty():
-        return
-
-    con.register("_incoming_observations", df)
-    try:
-        if not _table_exists(con, RAW_OBSERVATIONS_TABLE):
-            con.execute(
-                f"CREATE TABLE {_quote_ident(RAW_OBSERVATIONS_TABLE)} AS "  # noqa: S608
-                f"SELECT * FROM _incoming_observations"
-            )
-        else:
-            _add_missing_columns(con, RAW_OBSERVATIONS_TABLE, "_incoming_observations")
-            con.execute(
-                f"DELETE FROM {_quote_ident(RAW_OBSERVATIONS_TABLE)} "  # noqa: S608
-                f"WHERE {_quote_ident(key_col)} IN "
-                f"(SELECT {_quote_ident(key_col)} FROM _incoming_observations)"
-            )
-            _insert_with_type_repair(
-                con, RAW_OBSERVATIONS_TABLE, "_incoming_observations"
-            )
-    finally:
-        con.unregister("_incoming_observations")
-
-    logger.info(f"{RAW_OBSERVATIONS_TABLE}: upserted {len(df)} row(s)")
 
 
 def format_counts(
@@ -235,14 +100,14 @@ def append_packets(con: duckdb.DuckDBPyConnection, df: pl.DataFrame) -> None:
 
     con.register("_incoming_packets", df)
     try:
-        if not _table_exists(con, RAW_PACKETS_TABLE):
+        if not table_exists(con, RAW_PACKETS_TABLE):
             con.execute(
-                f"CREATE TABLE {_quote_ident(RAW_PACKETS_TABLE)} AS "  # noqa: S608
+                f"CREATE TABLE {quote_ident(RAW_PACKETS_TABLE)} AS "  # noqa: S608
                 f"SELECT * FROM _incoming_packets"
             )
         else:
-            _add_missing_columns(con, RAW_PACKETS_TABLE, "_incoming_packets")
-            _insert_with_type_repair(con, RAW_PACKETS_TABLE, "_incoming_packets")
+            add_missing_columns(con, RAW_PACKETS_TABLE, "_incoming_packets")
+            insert_with_type_repair(con, RAW_PACKETS_TABLE, "_incoming_packets")
     finally:
         con.unregister("_incoming_packets")
 
@@ -293,9 +158,9 @@ def record_decoder_runs(
     df = pl.DataFrame(rows)
     con.register("_incoming_decoder_runs", df)
     try:
-        if not _table_exists(con, DECODER_RUNS_TABLE):
+        if not table_exists(con, DECODER_RUNS_TABLE):
             con.execute(
-                f"CREATE TABLE {_quote_ident(DECODER_RUNS_TABLE)} ("
+                f"CREATE TABLE {quote_ident(DECODER_RUNS_TABLE)} ("
                 f"observation_id BIGINT NOT NULL, "
                 f"decoder VARCHAR NOT NULL, "
                 f"run_at TIMESTAMPTZ NOT NULL, "
@@ -304,9 +169,9 @@ def record_decoder_runs(
                 f"PRIMARY KEY (observation_id, decoder))"
             )
         else:
-            _add_missing_columns(con, DECODER_RUNS_TABLE, "_incoming_decoder_runs")
+            add_missing_columns(con, DECODER_RUNS_TABLE, "_incoming_decoder_runs")
         con.execute(
-            f"INSERT INTO {_quote_ident(DECODER_RUNS_TABLE)} BY NAME "  # noqa: S608
+            f"INSERT INTO {quote_ident(DECODER_RUNS_TABLE)} BY NAME "  # noqa: S608
             f"SELECT * FROM _incoming_decoder_runs "
             f"ON CONFLICT (observation_id, decoder) "
             f"DO UPDATE SET run_at = excluded.run_at, version = excluded.version, "
@@ -316,77 +181,70 @@ def record_decoder_runs(
         con.unregister("_incoming_decoder_runs")
 
 
-def export_table_to_parquet(
-    con: duckdb.DuckDBPyConnection,
-    table: str,
-    out_path: Path,
-    *,
-    order_by_columns: list[str],
-) -> None:
-    order_by_str = ", ".join([f"{_quote_ident(col)} ASC" for col in order_by_columns])
-
-    write_out_path = out_path.with_suffix(".tmp")
-    con.execute(
-        f"""
-            COPY (
-                SELECT * FROM {_quote_ident(table)}
-                ORDER BY {order_by_str}
-            )
-            TO {_quote_literal(str(write_out_path))} (FORMAT PARQUET)
-        """  # noqa: S608
-    )
-
-    write_out_path.replace(out_path)
-
-    logger.info(f"{table}: exported to {out_path}")
-
-
 def export_parquets(con: duckdb.DuckDBPyConnection, db_path: Path) -> None:
-    """Copy raw_observations/raw_packets out to Parquet files next to db_path.
-
-    Each table is sorted before writing (raw_observations by `id`,
-    raw_packets by `observation_id`/`received_at`) so the Parquet files are
-    stable to diff and cheap to range-scan downstream.
-    """
+    """Copy raw_packets/decoder_runs out to Parquet files next to db_path."""
     out_dir = db_path.parent
+    order_by = {
+        RAW_PACKETS_TABLE: ["received_at", "observation_id"],
+        DECODER_RUNS_TABLE: ["observation_id", "decoder"],
+    }
+    for table, order_by_columns in order_by.items():
+        if table_exists(con, table):
+            export_table_to_parquet(
+                con,
+                table=table,
+                out_path=out_dir / f"{table}.parquet",
+                order_by_columns=order_by_columns,
+            )
 
-    if _table_exists(con, RAW_OBSERVATIONS_TABLE):
-        out_path = out_dir / f"{RAW_OBSERVATIONS_TABLE}.parquet"
-        export_table_to_parquet(
-            con,
-            table=RAW_OBSERVATIONS_TABLE,
-            out_path=out_path,
-            order_by_columns=["id"],
-        )
-        logger.info(f"{RAW_OBSERVATIONS_TABLE}: exported to {out_path}")
 
-    if _table_exists(con, RAW_PACKETS_TABLE):
-        out_path = out_dir / f"{RAW_PACKETS_TABLE}.parquet"
-        export_table_to_parquet(
-            con,
-            table=RAW_PACKETS_TABLE,
-            out_path=out_path,
-            order_by_columns=["received_at", "observation_id"],
-        )
-        logger.info(f"{RAW_PACKETS_TABLE}: exported to {out_path}")
+def load_observations(
+    con: duckdb.DuckDBPyConnection,
+    *,
+    norad_id: str,
+    start_gte: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Read step 0's raw_observations back as observation dicts, newest first.
 
-    if _table_exists(con, DECODER_RUNS_TABLE):
-        out_path = out_dir / f"{DECODER_RUNS_TABLE}.parquet"
-        export_table_to_parquet(
-            con,
-            table=DECODER_RUNS_TABLE,
-            out_path=out_path,
-            order_by_columns=["observation_id", "decoder"],
-        )
-        logger.info(f"{DECODER_RUNS_TABLE}: exported to {out_path}")
+    Only the columns step 1 uses are read. `start`/`end` come back as
+    tz-aware UTC datetimes, and `demoddata` as the list of dicts the
+    SatNOGS API returned (step 0 stores it JSON-encoded). Empty if step 0
+    hasn't landed anything yet.
+    """
+    if not table_exists(con, RAW_OBSERVATIONS_TABLE):
+        logger.warning(f"{RAW_OBSERVATIONS_TABLE} not found -- run step_0 first.")
+        return []
+
+    sql = (
+        f'SELECT id, start, "end", payload, demoddata '  # noqa: S608
+        f"FROM {quote_ident(RAW_OBSERVATIONS_TABLE)} WHERE norad_cat_id = ?"
+    )
+    params: list[Any] = [int(norad_id)]
+    if start_gte is not None:
+        sql += " AND start >= ?"
+        params.append(start_gte)
+    sql += " ORDER BY start DESC, id DESC"
+
+    # Via polars rather than `fetchall()`: DuckDB needs pytz to hand back
+    # TIMESTAMPTZ values as Python objects, while polars uses zoneinfo.
+    observations_df = con.execute(sql, params).pl()
+    return [
+        {
+            **obs,
+            "start": obs["start"].astimezone(UTC),
+            "end": obs["end"].astimezone(UTC),
+            "demoddata": json.loads(obs["demoddata"]) if obs["demoddata"] else [],
+        }
+        for obs in observations_df.iter_rows(named=True)
+    ]
 
 
 def already_decoded_pairs(con: duckdb.DuckDBPyConnection) -> set[tuple[int, str]]:
     """Return {(observation_id, decoder)} already recorded in decoder_runs."""
-    if not _table_exists(con, DECODER_RUNS_TABLE):
+    if not table_exists(con, DECODER_RUNS_TABLE):
         return set()
     rows = con.execute(
         f"SELECT observation_id, decoder "  # noqa: S608
-        f"FROM {_quote_ident(DECODER_RUNS_TABLE)}"
+        f"FROM {quote_ident(DECODER_RUNS_TABLE)}"
     ).fetchall()
     return {(obs_id, decoder) for obs_id, decoder in rows}

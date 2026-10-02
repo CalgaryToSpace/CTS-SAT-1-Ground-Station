@@ -1,19 +1,19 @@
-"""Daemon: run steps 1-5 continuously.
+"""Daemon: run steps 0-5 continuously.
 
-First does one backfill of `start` (a duration like "24 hours" or an ISO
-8601 date/datetime -- same syntax as step 1's own `--start`), running steps
-1 through 5 once. Then, every `interval` minutes, requeries step 1 for
-observations starting in the trailing `interval + 30` minutes and reruns
-steps 2 through 5 again -- the 30-minute overlap is there so a SatNOGS
-observation still uploading/being vetted during one poll gets picked up on
-the next one, rather than falling into the gap between two non-overlapping
-windows.
+Runs steps 0 through 5 once as a backfill of `start` (a duration like "24
+hours" or an ISO 8601 date/datetime -- same syntax as step 0/1's own
+`--start`), then again every `interval` minutes.
 
-The overlap doesn't waste decode time: step 1 already skips any
-observation/decoder pair recorded in `decoder_runs` (see `force_rerun` in
-`step_1_download_and_demodulate.pipeline.run`), so requerying the same
-trailing window repeatedly only ever does new work for observations that
-weren't fully decoded yet.
+`start` is resolved to an absolute time once, when the daemon starts, and
+every run reuses it: step 0 only re-lists the tail of the SatNOGS listing
+windows since then that aren't settled yet (about the last hour of
+observations -- see `step_0_list_observations.pipeline`), and step 1 only decodes the
+observations since then not already recorded in `decoder_runs` (see
+`force_rerun` in `step_1_download_and_demodulate.pipeline.run`). So each
+periodic run only does new work, without the daemon having to pick a
+trailing window to requery: an observation that was still uploading
+during one run is picked up by the next, because its window is
+re-listed until it settles.
 
 While sleeping between requeries, the daemon polls `data_dir` for a pipeline-trigger
 request dropped there by the web UI's "Trigger Pipeline" button, and starts its
@@ -38,7 +38,9 @@ from typing import TYPE_CHECKING
 from loguru import logger
 
 from . import daemon_signals, resource_limits
+from .common import parse_start_filter
 from .daemon_signals import DaemonState, StatusReporter
+from .step_0_list_observations import pipeline as step_0_pipeline
 from .step_1_download_and_demodulate import pipeline as step_1_pipeline
 from .step_2_deduplicate_packets import pipeline as step_2_pipeline
 from .step_3_decode_packets import pipeline as step_3_pipeline
@@ -48,21 +50,19 @@ from .step_5_reassemble_tcmd_responses import pipeline as step_5_pipeline
 if TYPE_CHECKING:
     from pathlib import Path
 
-# What each step is announced as, both in the log ("Starting step 2/4:
+# What each step is announced as, both in the log ("Starting step 2/5:
 # deduplicate packets.") and in the web UI's status indicator. One table so
 # the two can't drift apart, and so the step count in those messages stays
 # right as steps are added.
 STEP_NAMES = {
+    0: "list observations",
     1: "download and demodulate",
     2: "deduplicate packets",
     3: "decode packets",
     4: "detect satellite events",
     5: "reassemble telecommand responses",
 }
-
-# The overlap added to `interval` for every requery after the initial
-# backfill -- see the module docstring for why.
-REQUERY_OVERLAP = timedelta(minutes=30)
+LAST_STEP = max(STEP_NAMES)
 
 # How often the sleep between requeries wakes up to check for a trigger
 # request from the web UI. Matched to the status heartbeat so one poll loop
@@ -83,7 +83,10 @@ def run_all_steps(  # noqa: PLR0913
     reporter: StatusReporter,
     run_label: str,
 ) -> None:
-    """Run steps 1-5 once, publishing which step is in flight as it goes.
+    """Run steps 0-5 once, publishing which step is in flight as it goes.
+
+    `start` bounds both step 0's listing and step 1's decoding -- see the
+    module docstring.
 
     `run_label` names this run in the status detail (and so in the web UI's
     indicator) -- e.g. the backfill vs. a scheduled requery vs. one a
@@ -93,11 +96,13 @@ def run_all_steps(  # noqa: PLR0913
     def announce(number: int) -> None:
         """Log and publish that step `number` is starting."""
         name = STEP_NAMES[number]
-        logger.info(f"Starting step {number}/{len(STEP_NAMES)}: {name} -- {run_label}.")
+        logger.info(f"Starting step {number}/{LAST_STEP}: {name} -- {run_label}.")
         reporter.set(
             DaemonState.PROCESSING, detail=f"{run_label}: step {number} ({name})"
         )
 
+    announce(0)
+    step_0_pipeline.run(norad_id=norad_id, data_dir=data_dir, start=start)
     announce(1)
     step_1_pipeline.run(
         norad_id=norad_id,
@@ -120,7 +125,7 @@ def run_all_steps(  # noqa: PLR0913
     announce(5)
     step_5_pipeline.run(data_dir=data_dir)
 
-    logger.info(f"Finished all {len(STEP_NAMES)} steps -- {run_label}.")
+    logger.info(f"Finished steps 0-{LAST_STEP} -- {run_label}.")
 
 
 def sleep_until_next_run(
@@ -169,18 +174,19 @@ def run(  # noqa: PLR0913
     force_rerun: bool = False,
     tools: tuple[str, ...] | None = None,
 ) -> None:
-    """Run steps 1-5 forever: one backfill of `start`, then a requery of
-    the trailing `interval + 30` minutes every `interval` minutes.
+    """Run steps 0-5 forever: one backfill of `start`, then a rerun every
+    `interval` minutes covering the same span (plus whatever's new).
 
     Args:
         norad_id: NORAD catalog ID of the target satellite.
-        data_dir: Directory step 1 reads/writes its DuckDB database in;
+        data_dir: Directory steps 0/1 read/write their DuckDB database in;
             every later step finds/writes its own parquet file(s) in the
             same directory.
         start: How far back the initial backfill reaches: a duration like
             "3 days" (relative to now) or an ISO 8601 date/datetime -- see
-            `step_1_download_and_demodulate.pipeline._parse_start_filter`.
-        interval: Minutes between requeries.
+            `common.parse_start_filter`. Resolved once, at startup, and
+            reused by every run after.
+        interval: Minutes between runs.
         limit: Cap the number of observations decoded per step-1 run (for
             testing).
         workers: Concurrency for step 1's decoders.
@@ -200,7 +206,24 @@ def run(  # noqa: PLR0913
     cleanly), after the status file has been marked stopped.
     """
     data_dir.mkdir(parents=True, exist_ok=True)
-    requery_window = timedelta(minutes=interval) + REQUERY_OVERLAP
+    # Pinned down now, so "24 hours" means the 24 hours before startup on
+    # every run, rather than a window that slides forward and stops
+    # covering observations listed/decoded on earlier runs.
+    start_at = parse_start_filter(start).isoformat()
+
+    def run_once(run_label: str) -> None:
+        run_all_steps(
+            norad_id=norad_id,
+            data_dir=data_dir,
+            start=start_at,
+            limit=limit,
+            workers=workers,
+            temp_dir=temp_dir,
+            force_rerun=force_rerun,
+            tools=tools,
+            reporter=reporter,
+            run_label=run_label,
+        )
 
     with StatusReporter(data_dir) as reporter:
         # A request sitting here from before the daemon started is about
@@ -208,19 +231,8 @@ def run(  # noqa: PLR0913
         # than letting it trigger an immediate redundant requery.
         daemon_signals.clear_trigger_request(data_dir)
 
-        logger.info(f"Daemon: initial backfill, start={start!r}")
-        run_all_steps(
-            norad_id=norad_id,
-            data_dir=data_dir,
-            start=start,
-            limit=limit,
-            workers=workers,
-            temp_dir=temp_dir,
-            force_rerun=force_rerun,
-            tools=tools,
-            reporter=reporter,
-            run_label="backfill",
-        )
+        logger.info(f"Daemon: initial backfill, start={start!r} ({start_at})")
+        run_once("backfill")
 
         while True:
             logger.info(f"Daemon: sleeping up to {interval} minute(s) until next run")
@@ -228,17 +240,5 @@ def run(  # noqa: PLR0913
                 data_dir=data_dir, interval=interval, reporter=reporter
             )
 
-            requery_start = (datetime.now(UTC) - requery_window).isoformat()
-            logger.info(f"Daemon: requerying since {requery_start}")
-            run_all_steps(
-                norad_id=norad_id,
-                data_dir=data_dir,
-                start=requery_start,
-                limit=limit,
-                workers=workers,
-                temp_dir=temp_dir,
-                force_rerun=force_rerun,
-                tools=tools,
-                reporter=reporter,
-                run_label="requery (requested)" if was_triggered else "requery",
-            )
+            logger.info(f"Daemon: requerying since {start_at}")
+            run_once("requery (requested)" if was_triggered else "requery")

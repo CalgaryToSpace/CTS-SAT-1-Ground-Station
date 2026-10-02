@@ -8,9 +8,12 @@ __all__ = [
     "connect_duckdb",
     "default_duckdb_memory_limit",
     "drop_timezones_for_excel",
+    "parse_start_filter",
 ]
 
 import os
+import re
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import duckdb
@@ -70,3 +73,45 @@ def drop_timezones_for_excel(df: pl.DataFrame) -> pl.DataFrame:
         if isinstance(dtype, pl.Datetime) and dtype.time_zone is not None
     ]
     return df.with_columns(exprs) if exprs else df
+
+
+_DURATION_RE = re.compile(
+    r"^\s*(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>second|minute|hour|day|week)s?\s*$",
+    re.IGNORECASE,
+)
+_DURATION_UNIT_TO_TIMEDELTA_KWARG = {
+    "second": "seconds",
+    "minute": "minutes",
+    "hour": "hours",
+    "day": "days",
+    "week": "weeks",
+}
+
+
+def parse_start_filter(value: str, *, now: datetime | None = None) -> datetime:
+    """Parse --start as either a relative duration or an absolute date/datetime.
+
+    A duration like "3 days" or "6 hours" is measured back from `now`
+    (default: the current time, UTC). Anything else is parsed as ISO 8601
+    ("2026-08-01" or "2026-08-01T00:00:00Z"); a value with no timezone is
+    treated as UTC.
+
+    Raises:
+        ValueError: If `value` matches neither form.
+    """
+    m = _DURATION_RE.match(value)
+    if m:
+        amount = float(m.group("value"))
+        kwarg = _DURATION_UNIT_TO_TIMEDELTA_KWARG[m.group("unit").lower()]
+        return (now or datetime.now(UTC)) - timedelta(**{kwarg: amount})
+
+    try:
+        dt = datetime.fromisoformat(value.strip())
+    except ValueError as exc:
+        msg = (
+            f"Could not parse --start={value!r}; expected a duration like "
+            f"'3 days' or an ISO 8601 date/datetime."
+        )
+        raise ValueError(msg) from exc
+
+    return dt.astimezone(UTC) if dt.tzinfo else dt.replace(tzinfo=UTC)
