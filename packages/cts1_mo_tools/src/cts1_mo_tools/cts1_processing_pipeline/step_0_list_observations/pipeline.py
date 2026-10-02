@@ -26,10 +26,18 @@ windows already listed for good. A window needs (re-)listing when:
     taken then may be missing data a later listing would see; or
   - someone set its `needs_refetch` by hand, or passed `refetch_all`.
 
-So a run that's repeated every few minutes (the daemon) re-lists only the
-window(s) still in their settle period -- in practice the current one, and
-the previous one for its first couple of hours -- plus any window an
-earlier run failed to list or never got to (e.g. after an interruption).
+Re-listing a window that's still settling is incremental: rather than the
+whole window again, it only queries observations starting from
+`RELIST_LOOKBACK` (45 minutes) before the window's previous listing, which
+is what can have changed since -- new observations, plus ones that were
+still in progress or uploading back then. Once the window has settled, it
+gets one last full listing, which is the one trusted as final.
+
+So a run that's repeated every few minutes (the daemon) only queries about
+the last hour of observations -- the current window's tail, plus the
+previous window's for its first couple of hours -- with a full 12h listing
+of a window once, after it settles, and of any window an earlier run
+failed to list or never got to (e.g. after an interruption).
 
 Invoked via the top-level CLI's `step_0` subcommand -- see
 `cts1_mo_tools.cts1_processing_pipeline.cli`.
@@ -43,7 +51,9 @@ __all__ = [
     "LISTING_WINDOW",
     "LISTING_WINDOW_OVERLAP",
     "REFETCH_SETTLE_PERIOD",
+    "RELIST_LOOKBACK",
     "ListingWindow",
+    "incremental_since",
     "list_window",
     "listing_windows",
     "run",
@@ -79,6 +89,11 @@ LISTING_WINDOW_OVERLAP = timedelta(minutes=25)
 # re-listing a settling window is a handful of API pages, while missing an
 # observation that uploaded late means never decoding it.
 REFETCH_SETTLE_PERIOD = timedelta(hours=2)
+# How far before a still-settling window's previous listing an incremental
+# re-listing of it reaches back -- see the module docstring. Covers an
+# observation that was in progress, or finished but not yet uploaded, when
+# the previous listing ran (the old trailing-requery daemon's margin).
+RELIST_LOOKBACK = timedelta(minutes=45)
 # Where listing starts when no `start` is given. Comfortably before
 # CTS-SAT-1's first SatNOGS observation (2026-08-08); pass an explicit
 # `start` to reach further back for another satellite.
@@ -102,16 +117,20 @@ class ListingWindow:
         """When a listing of this window can first be trusted to be final."""
         return self.end + LISTING_WINDOW_OVERLAP + REFETCH_SETTLE_PERIOD
 
-    def query_bounds(self, now: datetime) -> tuple[datetime, datetime]:
+    def query_bounds(
+        self, now: datetime, *, since: datetime | None = None
+    ) -> tuple[datetime, datetime]:
         """The (start_gt, start_lt) bounds to query the API with as of `now`.
 
         The overlap either side, but never past `now`: SatNOGS also lists
         scheduled future observations, which have nothing to decode yet.
+        `since` narrows the lower bound for an incremental re-listing (see
+        `incremental_since`); None queries the whole window.
         """
-        return (
-            self.start - LISTING_WINDOW_OVERLAP,
-            min(self.end + LISTING_WINDOW_OVERLAP, now),
-        )
+        start_gt = self.start - LISTING_WINDOW_OVERLAP
+        if since is not None:
+            start_gt = max(start_gt, since)
+        return start_gt, min(self.end + LISTING_WINDOW_OVERLAP, now)
 
 
 def listing_windows(start: datetime, now: datetime) -> list[ListingWindow]:
@@ -130,18 +149,38 @@ def listing_windows(start: datetime, now: datetime) -> list[ListingWindow]:
 
 def windows_needing_listing(
     windows: Sequence[ListingWindow],
-    refetch_flags: Mapping[datetime, bool],
+    states: Mapping[datetime, db.WindowState],
     *,
     refetch_all: bool = False,
 ) -> list[ListingWindow]:
     """The subset of `windows` to list this run, in the same order.
 
-    `refetch_flags` is `db.window_refetch_flags`: a window absent from it
-    has never been listed successfully.
+    `states` is `db.window_states`: a window absent from it has never been
+    listed successfully.
     """
     if refetch_all:
         return list(windows)
-    return [w for w in windows if refetch_flags.get(w.start, True)]
+    return [
+        w for w in windows if w.start not in states or states[w.start].needs_refetch
+    ]
+
+
+def incremental_since(
+    window: ListingWindow, state: db.WindowState | None, now: datetime
+) -> datetime | None:
+    """The lower bound to re-list `window` from incrementally as of `now`,
+    or None if it needs a full listing.
+
+    Incremental only while the window is still settling and its previous
+    listing was a settling-period one too. A full listing is needed for a
+    window never listed before; for its final listing once it has settled;
+    and for a settled window someone flagged `needs_refetch` by hand.
+    """
+    if state is None or not state.needs_refetch:
+        return None
+    if now >= window.settled_at or state.last_listed_at >= window.settled_at:
+        return None
+    return state.last_listed_at - RELIST_LOOKBACK
 
 
 def _observations_frame(page: list[dict[str, Any]]) -> pl.DataFrame:
@@ -160,14 +199,17 @@ def list_window(
     norad_id: str,
     window: ListingWindow,
     now: datetime,
+    since: datetime | None = None,
 ) -> db.ListingRecord:
     """List one window into raw_observations, returning how it went.
+
+    `since` makes it an incremental re-listing -- see `incremental_since`.
 
     A failure partway through (the API erroring past its retries) is
     caught and returned as a failed record, so one bad window doesn't stop
     the rest of the run; whatever pages landed before it stay landed.
     """
-    query_start_gt, query_start_lt = window.query_bounds(now)
+    query_start_gt, query_start_lt = window.query_bounds(now, since=since)
     started_at = datetime.now(UTC)
     observation_count = 0
     error: str | None = None
@@ -231,9 +273,8 @@ def run(
     windows = listing_windows(start_at, now)
 
     with landing_db.connect(db_path) as con:
-        to_list = windows_needing_listing(
-            windows, db.window_refetch_flags(con), refetch_all=refetch_all
-        )
+        states = db.window_states(con)
+        to_list = windows_needing_listing(windows, states, refetch_all=refetch_all)
         logger.info(
             f"Listing observations for NORAD {norad_id} since "
             f"{start_at.isoformat()}: {len(to_list)} of {len(windows)} "
@@ -245,13 +286,21 @@ def run(
         failed = 0
         run_started_at = time.monotonic()
         for number, window in enumerate(to_list, start=1):
-            record = list_window(con, norad_id=norad_id, window=window, now=now)
+            since = (
+                None
+                if refetch_all
+                else incremental_since(window, states.get(window.start), now)
+            )
+            record = list_window(
+                con, norad_id=norad_id, window=window, now=now, since=since
+            )
             db.record_listing(con, record)
             total_observations += record.observation_count
             failed += not record.succeeded
+            scope = "full" if since is None else f"since {since.isoformat()}"
             logger.info(
-                f"[{number}/{len(to_list)}] window {window.start.isoformat()}: "
-                f"{record.observation_count} observation(s)"
+                f"[{number}/{len(to_list)}] window {window.start.isoformat()} "
+                f"({scope}): {record.observation_count} observation(s)"
                 + (", still settling" if record.needs_refetch else "")
                 + ("" if record.succeeded else " -- FAILED, will retry next run")
             )

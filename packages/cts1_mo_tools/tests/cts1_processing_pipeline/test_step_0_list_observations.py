@@ -18,7 +18,9 @@ from cts1_mo_tools.cts1_processing_pipeline.step_0_list_observations import (
 from cts1_mo_tools.cts1_processing_pipeline.step_0_list_observations.pipeline import (
     LISTING_WINDOW_OVERLAP,
     REFETCH_SETTLE_PERIOD,
+    RELIST_LOOKBACK,
     ListingWindow,
+    incremental_since,
     listing_windows,
     windows_needing_listing,
 )
@@ -72,19 +74,51 @@ def test_query_bounds_overlap_both_neighbours_but_stop_at_now() -> None:
     assert window.query_bounds(now=now) == (_DAY - timedelta(minutes=25), now)
 
 
+def _state(*, needs_refetch: bool, last_listed_at: datetime) -> step_0_db.WindowState:
+    return step_0_db.WindowState(
+        needs_refetch=needs_refetch, last_listed_at=last_listed_at
+    )
+
+
 def test_only_unlisted_or_unsettled_windows_need_listing() -> None:
     windows = [ListingWindow(_DAY + timedelta(hours=12 * n)) for n in (3, 2, 1, 0)]
-    flags = {
-        windows[1].start: True,  # listed, but still settling
-        windows[2].start: False,  # listed for good
+    states = {
+        # Listed, but still settling.
+        windows[1].start: _state(needs_refetch=True, last_listed_at=_DAY),
+        # Listed for good.
+        windows[2].start: _state(needs_refetch=False, last_listed_at=_DAY),
     }
 
-    assert windows_needing_listing(windows, flags) == [
+    assert windows_needing_listing(windows, states) == [
         windows[0],
         windows[1],
         windows[3],
     ]
-    assert windows_needing_listing(windows, flags, refetch_all=True) == windows
+    assert windows_needing_listing(windows, states, refetch_all=True) == windows
+
+
+def test_settling_windows_are_relisted_incrementally_until_they_settle() -> None:
+    window = ListingWindow(_DAY)
+    last_listed_at = _DAY + timedelta(hours=6)
+    settling = _state(needs_refetch=True, last_listed_at=last_listed_at)
+    now = last_listed_at + timedelta(minutes=15)
+
+    # Never listed: a full listing.
+    assert incremental_since(window, None, now) is None
+    # Still settling: from just before the previous listing...
+    since = incremental_since(window, settling, now)
+    assert since == last_listed_at - RELIST_LOOKBACK
+    assert window.query_bounds(now, since=since) == (since, now)
+    # ...but never earlier than the window's own overlap.
+    early = _state(needs_refetch=True, last_listed_at=_DAY + timedelta(minutes=5))
+    assert window.query_bounds(now, since=incremental_since(window, early, now))[
+        0
+    ] == _DAY - timedelta(minutes=25)
+    # Settled since: one last full listing.
+    assert incremental_since(window, settling, window.settled_at) is None
+    # Flagged by hand after settling: a full listing too.
+    flagged = _state(needs_refetch=True, last_listed_at=window.settled_at)
+    assert incremental_since(window, flagged, window.settled_at) is None
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +130,13 @@ def test_only_unlisted_or_unsettled_windows_need_listing() -> None:
 def con(tmp_path: Path) -> Iterator[Any]:
     with landing_db.connect(tmp_path / landing_db.DB_FILENAME) as connection:
         yield connection
+
+
+def _flags(con: Any) -> dict[datetime, bool]:
+    return {
+        start: state.needs_refetch
+        for start, state in step_0_db.window_states(con).items()
+    }
 
 
 def _fake_api(
@@ -151,7 +192,7 @@ def test_listing_a_settled_window_lands_observations_and_history(
     assert record.succeeded
     assert record.observation_count == 3
     assert not record.needs_refetch
-    assert step_0_db.window_refetch_flags(con) == {window.start: False}
+    assert _flags(con) == {window.start: False}
     ids = con.execute("SELECT id FROM raw_observations ORDER BY id").fetchall()
     assert ids == [(1,), (2,), (3,)]
 
@@ -175,7 +216,7 @@ def test_a_window_listed_before_it_settles_needs_relisting(
 
     assert record.succeeded
     assert record.needs_refetch
-    assert step_0_db.window_refetch_flags(con) == {window.start: True}
+    assert _flags(con) == {window.start: True}
 
 
 def test_a_failed_listing_is_logged_but_not_recorded_as_listed(
@@ -195,7 +236,7 @@ def test_a_failed_listing_is_logged_but_not_recorded_as_listed(
 
     assert not record.succeeded
     assert record.error == "RuntimeError: SatNOGS is down"
-    assert step_0_db.window_refetch_flags(con) == {}
+    assert _flags(con) == {}
     history = con.execute(
         "SELECT succeeded, error FROM observation_listing_history"
     ).fetchall()
@@ -235,6 +276,7 @@ def test_run_skips_settled_windows_on_the_next_run(
     _fake_api(monkeypatch, [], calls)
     start = (datetime.now(UTC) - timedelta(days=3)).isoformat()
 
+    first_run_at = datetime.now(UTC)
     step_0_pipeline.run(data_dir=tmp_path, start=start)
     first_run_calls = len(calls)
     calls.clear()
@@ -242,8 +284,10 @@ def test_run_skips_settled_windows_on_the_next_run(
 
     # 3 days back, rounded down to a window boundary, plus the current one.
     assert first_run_calls in (7, 8)
-    # Only the windows still settling get listed again.
+    # Only the windows still settling get listed again, and only their tail.
     assert 1 <= len(calls) <= 2
+    for start_gt, _start_lt in calls:
+        assert start_gt >= first_run_at - RELIST_LOOKBACK - timedelta(seconds=5)
     assert (tmp_path / "observation_listing_windows.parquet").exists()
     assert (tmp_path / "observation_listing_history.parquet").exists()
 

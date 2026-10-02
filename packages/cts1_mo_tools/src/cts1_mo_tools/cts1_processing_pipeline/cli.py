@@ -146,9 +146,10 @@ class DaemonArgs:
     the same span."""
 
     interval: float = 15.0
-    """Minutes between runs. Each run re-lists only the SatNOGS listing
-    windows that haven't settled yet (in practice, the current one), then
-    decodes whatever's new and reruns steps 2 through 5."""
+    """Minutes between runs. Each run re-lists only the tail of the SatNOGS
+    listing windows that haven't settled yet (about the last hour of
+    observations), then decodes whatever's new and reruns steps 2 through
+    5."""
 
     limit: int | None = None
     """Cap the number of observations decoded per step-1 run (for testing)."""

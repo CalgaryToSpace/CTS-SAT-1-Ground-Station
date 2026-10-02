@@ -23,10 +23,11 @@ __all__ = [
     "LISTING_WINDOWS_TABLE",
     "RAW_OBSERVATIONS_TABLE",
     "ListingRecord",
+    "WindowState",
     "export_parquets",
     "record_listing",
     "upsert_observations",
-    "window_refetch_flags",
+    "window_states",
 ]
 
 from dataclasses import dataclass
@@ -197,8 +198,16 @@ def record_listing(con: duckdb.DuckDBPyConnection, record: ListingRecord) -> Non
     )
 
 
-def window_refetch_flags(con: duckdb.DuckDBPyConnection) -> dict[datetime, bool]:
-    """Map each successfully-listed window's start (UTC) to its `needs_refetch`.
+@dataclass(frozen=True, slots=True)
+class WindowState:
+    """A window's latest successful listing, from the windows table."""
+
+    needs_refetch: bool
+    last_listed_at: datetime
+
+
+def window_states(con: duckdb.DuckDBPyConnection) -> dict[datetime, WindowState]:
+    """Map each successfully-listed window's start (UTC) to its state.
 
     A window missing from the result has never been listed successfully.
     """
@@ -207,11 +216,14 @@ def window_refetch_flags(con: duckdb.DuckDBPyConnection) -> dict[datetime, bool]
     # Via polars rather than `fetchall()`: DuckDB needs pytz to hand back
     # TIMESTAMPTZ values as Python objects, while polars uses zoneinfo.
     rows = con.execute(
-        f"SELECT window_start, needs_refetch "  # noqa: S608
+        f"SELECT window_start, needs_refetch, last_listed_at "  # noqa: S608
         f"FROM {quote_ident(LISTING_WINDOWS_TABLE)}"
     ).pl()
     return {
-        window_start.astimezone(UTC): needs for window_start, needs in rows.iter_rows()
+        window_start.astimezone(UTC): WindowState(
+            needs_refetch=needs_refetch, last_listed_at=last_listed_at.astimezone(UTC)
+        )
+        for window_start, needs_refetch, last_listed_at in rows.iter_rows()
     }
 
 

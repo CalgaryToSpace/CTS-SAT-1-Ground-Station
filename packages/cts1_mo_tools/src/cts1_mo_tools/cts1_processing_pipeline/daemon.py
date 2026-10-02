@@ -5,14 +5,14 @@ hours" or an ISO 8601 date/datetime -- same syntax as step 0/1's own
 `--start`), then again every `interval` minutes.
 
 `start` is resolved to an absolute time once, when the daemon starts, and
-every run reuses it: step 0 only re-lists the SatNOGS listing windows since
-then that aren't settled yet (in practice the current one -- see
-`step_0_list_observations.pipeline`), and step 1 only decodes the
+every run reuses it: step 0 only re-lists the tail of the SatNOGS listing
+windows since then that aren't settled yet (about the last hour of
+observations -- see `step_0_list_observations.pipeline`), and step 1 only decodes the
 observations since then not already recorded in `decoder_runs` (see
 `force_rerun` in `step_1_download_and_demodulate.pipeline.run`). So each
 periodic run only does new work, without the daemon having to pick a
-trailing window to requery: an observation that was still uploading/being
-vetted during one run is picked up by the next, because its window is
+trailing window to requery: an observation that was still uploading
+during one run is picked up by the next, because its window is
 re-listed until it settles.
 
 While sleeping between requeries, the daemon polls `data_dir` for a pipeline-trigger

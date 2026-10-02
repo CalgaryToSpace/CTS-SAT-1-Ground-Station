@@ -11,7 +11,7 @@ web UI as two containers sharing that directory.
 
 * List every SatNOGS observation for the satellite (all statuses) into DuckDB, without downloading anything.
 * Logic: query the SatNOGS API in 12-hour listing windows aligned to 00:00/12:00 UTC, each one filtered to observations starting within the window plus 25 minutes either side (so an observation right on a boundary lands in both neighbours; `raw_observations` is upserted by `id`, so the overlap costs nothing). The current window's query stops at the current time.
-* Every listing attempt is logged, and a window is only listed again if it has never been listed successfully, or its latest listing started before it settled (within 2 hours of the end of its query range, when observations in it may still be in progress or uploading), or its `needs_refetch` was set to true by hand, or `--refetch-all` is passed. So repeated runs only re-list the window(s) still settling, and an interrupted backfill picks up where it left off.
+* Every listing attempt is logged, and a window is only listed again if it has never been listed successfully, or its latest listing started before it settled (within 2 hours of the end of its query range, when observations in it may still be in progress or uploading), or its `needs_refetch` was set to true by hand, or `--refetch-all` is passed. Re-listing a still-settling window is incremental: only observations starting from 45 minutes before its previous listing are queried, with one final full listing once it settles. So repeated runs (the daemon) only query about the last hour of observations, and an interrupted backfill picks up where it left off.
 * Output: DuckDB database (`cts1_processing_pipeline.duckdb`), exported to parquet files at the end of each run.
 * Output Tables:
     * `raw_observations` -- one row per SatNOGS observation.
@@ -56,7 +56,7 @@ web UI as two containers sharing that directory.
 ### Daemon
 
 * Runs steps 0-5 continuously instead of one-off: an initial backfill of `--start` (default: 24h), then a rerun of steps 0 through 5 every `--interval` minutes (default: 15).
-* `--start` is resolved to an absolute time once, at startup, and every run covers the same span: step 0 only re-lists the listing windows that haven't settled yet (in practice, the current one), and step 1 only decodes observations not already recorded in `decoder_runs`. So a SatNOGS observation that was still uploading/being vetted during one run is picked up by the next.
+* `--start` is resolved to an absolute time once, at startup, and every run covers the same span: step 0 only re-lists the tail of the listing windows that haven't settled yet (about the last hour of observations), and step 1 only decodes observations not already recorded in `decoder_runs`. So a SatNOGS observation that was still uploading during one run is picked up by the next.
 * Runs until interrupted (Ctrl+C).
 
 ### Web UI
