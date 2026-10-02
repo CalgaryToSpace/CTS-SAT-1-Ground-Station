@@ -7,6 +7,8 @@ its DuckDB database and parquet files in -- see each step's own
 `DEFAULT_DATA_DIR`/`OUTPUT_FILENAME` for the fixed filename it looks for.
 
 Usage (uv):
+    uv run cts1_processing_pipeline step_0
+    uv run cts1_processing_pipeline step_0 --start "3 days" --refetch-all
     uv run cts1_processing_pipeline step_1
     uv run cts1_processing_pipeline --data-dir output step_1 --norad-id 69015
     uv run cts1_processing_pipeline step_1 --limit 5 --debug
@@ -37,6 +39,7 @@ from loguru import logger
 from tyro.conf import OmitSubcommandPrefixes
 
 from . import daemon, resource_limits
+from .step_0_list_observations import pipeline as step_0_list_observations
 from .step_1_download_and_demodulate import pipeline as step_1_download_and_demodulate
 from .step_2_deduplicate_packets import pipeline as step_2_deduplicate_packets
 from .step_3_decode_packets import pipeline as step_3_decode_packets
@@ -45,20 +48,41 @@ from .step_5_reassemble_tcmd_responses import (
     pipeline as step_5_reassemble_tcmd_responses,
 )
 
-DEFAULT_DATA_DIR = step_1_download_and_demodulate.DEFAULT_DATA_DIR
+DEFAULT_DATA_DIR = step_0_list_observations.DEFAULT_DATA_DIR
 
 
 @dataclass(frozen=True, slots=True)
-class Step1Args:
-    """Step 1: list SatNOGS observations, download audio, and decode packets."""
+class Step0Args:
+    """Step 0: list SatNOGS observations into raw_observations, in 12h
+    windows, skipping windows already listed for good."""
 
     norad_id: Annotated[str, tyro.conf.Positional] = "69015"
     """NORAD catalog ID of the satellite (default: 69015, CTS-SAT-1)."""
 
     start: str | None = None
-    """Only pull observations starting after this point: a duration like
-    '3 days' (relative to now) or an ISO 8601 date/datetime. Omit for full
-    history."""
+    """List observations starting after this point: a duration like
+    '3 days' (relative to now) or an ISO 8601 date/datetime, rounded down to
+    the start of its 12h window. Omit for full history (since
+    2026-08-01)."""
+
+    refetch_all: bool = False
+    """By default, a window already listed after it settled (see the
+    observation_listing_windows table) is skipped. Set this to re-list
+    every window since --start regardless."""
+
+
+@dataclass(frozen=True, slots=True)
+class Step1Args:
+    """Step 1: download audio and decode packets for the observations step
+    0 listed."""
+
+    norad_id: Annotated[str, tyro.conf.Positional] = "69015"
+    """NORAD catalog ID of the satellite (default: 69015, CTS-SAT-1)."""
+
+    start: str | None = None
+    """Only decode observations starting after this point: a duration like
+    '3 days' (relative to now) or an ISO 8601 date/datetime. Omit for every
+    observation step 0 has listed."""
 
     limit: int | None = None
     """Cap the number of observations decoded this run (for testing)."""
@@ -109,9 +133,8 @@ class Step5Args:
 
 @dataclass(frozen=True, slots=True)
 class DaemonArgs:
-    """Daemon: run steps 1-5 continuously -- an initial backfill of
-    `--start`, then a periodic requery + full steps 1-5 rerun every
-    `--interval` minutes."""
+    """Daemon: run steps 0-5 continuously -- an initial backfill of
+    `--start`, then a full steps 0-5 rerun every `--interval` minutes."""
 
     norad_id: Annotated[str, tyro.conf.Positional] = "69015"
     """NORAD catalog ID of the satellite (default: 69015, CTS-SAT-1)."""
@@ -119,13 +142,13 @@ class DaemonArgs:
     start: str = "24 hours"
     """How far back the initial backfill reaches: a duration like '3 days'
     (relative to now) or an ISO 8601 date/datetime -- same syntax as step
-    1's own --start."""
+    0/1's own --start. Resolved once at startup; every later run covers
+    the same span."""
 
     interval: float = 15.0
-    """Minutes between requeries. Each requery re-pulls observations
-    starting in the trailing (interval + 30) minutes -- the 30-minute
-    overlap catches a SatNOGS observation still uploading/being vetted
-    during the previous poll -- then reruns steps 2 through 5."""
+    """Minutes between runs. Each run re-lists only the SatNOGS listing
+    windows that haven't settled yet (in practice, the current one), then
+    decodes whatever's new and reruns steps 2 through 5."""
 
     limit: int | None = None
     """Cap the number of observations decoded per step-1 run (for testing)."""
@@ -147,7 +170,8 @@ class DaemonArgs:
 # `Annotated[StepNArgs, tyro.conf.subcommand(name="step_n", prefix_name=False)]`
 # members below.
 Command = (
-    Annotated[Step1Args, tyro.conf.subcommand(name="step_1", prefix_name=False)]
+    Annotated[Step0Args, tyro.conf.subcommand(name="step_0", prefix_name=False)]
+    | Annotated[Step1Args, tyro.conf.subcommand(name="step_1", prefix_name=False)]
     | Annotated[Step2Args, tyro.conf.subcommand(name="step_2", prefix_name=False)]
     | Annotated[Step3Args, tyro.conf.subcommand(name="step_3", prefix_name=False)]
     | Annotated[Step4Args, tyro.conf.subcommand(name="step_4", prefix_name=False)]
@@ -161,8 +185,8 @@ class Args:
     """CTS-SAT-1 processing pipeline."""
 
     data_dir: Path = DEFAULT_DATA_DIR
-    """Directory every step reads/writes its files in: step 1's DuckDB
-    database (and the parquet files it checkpoints from that), and every
+    """Directory every step reads/writes its files in: steps 0/1's DuckDB
+    database (and the parquet files they checkpoint from that), and every
     later step's parquet-in-parquet-out file -- each step finds its own
     file(s) by a fixed filename inside this one directory."""
 
@@ -191,7 +215,14 @@ def main() -> None:
     resource_limits.lower_process_priority()
 
     try:
-        if isinstance(args.command, Step1Args):
+        if isinstance(args.command, Step0Args):
+            step_0_list_observations.run(
+                norad_id=args.command.norad_id,
+                data_dir=args.data_dir,
+                start=args.command.start,
+                refetch_all=args.command.refetch_all,
+            )
+        elif isinstance(args.command, Step1Args):
             step_1_download_and_demodulate.run(
                 norad_id=args.command.norad_id,
                 data_dir=args.data_dir,

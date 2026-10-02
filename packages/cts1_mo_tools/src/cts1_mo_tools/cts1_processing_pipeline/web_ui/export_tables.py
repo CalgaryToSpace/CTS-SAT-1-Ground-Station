@@ -97,13 +97,35 @@ _STEP_2_LINEAGE_COLUMNS: tuple[str, ...] = ("observation_ids", "sources")
 TABLE_SPECS: tuple[TableSpec, ...] = (
     TableSpec(
         key="raw_observations",
-        step="Step 1 -- Download & Demodulate",
+        step="Step 0 -- List Observations",
         description=(
             "Every SatNOGS observation window fetched for the satellite "
             "(metadata only -- no packet content)."
         ),
         filename=pipeline_status.RAW_OBSERVATIONS_FILENAME,
         time_column="start",
+        has_packet_type=False,
+    ),
+    TableSpec(
+        key="observation_listing_windows",
+        step="Step 0 -- List Observations",
+        description=(
+            "One row per 12h window of SatNOGS observations listed so far: "
+            "when it was last listed, and whether it needs listing again."
+        ),
+        filename=pipeline_status.LISTING_WINDOWS_FILENAME,
+        time_column="window_start",
+        has_packet_type=False,
+    ),
+    TableSpec(
+        key="observation_listing_history",
+        step="Step 0 -- List Observations",
+        description=(
+            "One row per attempt at listing a 12h window of SatNOGS "
+            "observations, including failed ones."
+        ),
+        filename=pipeline_status.LISTING_HISTORY_FILENAME,
+        time_column="started_at",
         has_packet_type=False,
     ),
     TableSpec(

@@ -23,13 +23,17 @@ from .layout import page_shell
 
 # A flowchart of every table the pipeline produces and the step that
 # produces it -- kept in sync with `export_tables.TABLE_SPECS` by hand
-# (there are only 5 steps/7 tables total, and the step boundaries rarely
+# (there are only 6 steps/9 tables total, and the step boundaries rarely
 # change), rather than generated from it, since the diagram also needs to
 # show the SatNOGS API as the ultimate source, which isn't a table at all.
 PIPELINE_FLOWCHART = """
 flowchart LR
-    satnogs[("SatNOGS API")] --> step1["Step 1\\nDownload & Demodulate"]
-    step1 --> raw_observations[("raw_observations")]
+    satnogs[("SatNOGS API")] --> step0["Step 0\\nList Observations"]
+    step0 --> raw_observations[("raw_observations")]
+    step0 --> observation_listing_windows[("observation_listing_windows")]
+    step0 --> observation_listing_history[("observation_listing_history")]
+    raw_observations --> step1["Step 1\\nDownload & Demodulate"]
+    satnogs --> step1
     step1 --> raw_packets[("raw_packets")]
     step1 --> decoder_runs[("decoder_runs")]
     raw_observations --> step2["Step 2\\nDeduplicate Packets"]
@@ -133,8 +137,10 @@ def _time_filter_section(time_state: dict[str, str | None]) -> None:
         ui.label("Time range filter").classes("text-lg font-bold")
         ui.label(
             "Applied to each table's own timestamp column -- received_at "
-            "for most tables, start for raw_observations, run_at for "
-            "decoder_runs, detected_at for satellite_events_from_beacons."
+            "for most tables, start for raw_observations, window_start for "
+            "observation_listing_windows, started_at for "
+            "observation_listing_history, run_at for decoder_runs, "
+            "detected_at for satellite_events_from_beacons."
         ).classes("text-caption text-grey")
 
         start_input: ui.input

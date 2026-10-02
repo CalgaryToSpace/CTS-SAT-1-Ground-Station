@@ -202,7 +202,7 @@ def _counts_section(
                 _freshness_row(
                     "Latest observation end (SatNOGS)",
                     counts.latest_observation_end,
-                    source="Step 1 · raw_observations.parquet · end",
+                    source="Step 0 · raw_observations.parquet · end",
                 )
                 _freshness_row(
                     "Latest packet received",

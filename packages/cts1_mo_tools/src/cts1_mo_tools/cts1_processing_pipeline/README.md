@@ -7,14 +7,25 @@ web UI as two containers sharing that directory.
 
 ## Steps
 
+### Step 0: List observations.
+
+* List every SatNOGS observation for the satellite (all statuses) into DuckDB, without downloading anything.
+* Logic: query the SatNOGS API in 12-hour listing windows aligned to 00:00/12:00 UTC, each one filtered to observations starting within the window plus 25 minutes either side (so an observation right on a boundary lands in both neighbours; `raw_observations` is upserted by `id`, so the overlap costs nothing). The current window's query stops at the current time.
+* Every listing attempt is logged, and a window is only listed again if it has never been listed successfully, or its latest listing started before it settled (within 2 hours of the end of its query range, when observations in it may still be in progress or uploading), or its `needs_refetch` was set to true by hand, or `--refetch-all` is passed. So repeated runs only re-list the window(s) still settling, and an interrupted backfill picks up where it left off.
+* Output: DuckDB database (`cts1_processing_pipeline.duckdb`), exported to parquet files at the end of each run.
+* Output Tables:
+    * `raw_observations` -- one row per SatNOGS observation.
+    * `observation_listing_windows` -- one row per listing window listed so far: its latest listing (`last_listed_at`, `last_query_start_gt`/`last_query_start_lt`, `last_observation_count`), how many times it's been listed, and `needs_refetch`.
+    * `observation_listing_history` -- one row per listing attempt, append-only, including failed ones (`succeeded`, `error`).
+
 ### Step 1: Download and demodulate.
 
+* Read the observations step 0 listed from `raw_observations` (filtered to the NORAD ID and, optionally, `--start`), skipping any observation/decoder pair already recorded in `decoder_runs`.
 * Download and demodulate each audio file.
 * Download the raw data files produced by the flowgraphs (one file per frame).
-* Output: DuckDB database (`cts1_processing_pipeline.duckdb`), which gets checkpointed into parquet files.
+* Output: the same DuckDB database as step 0, which gets checkpointed into parquet files.
 * Output Tables:
     * `decoder_runs`
-    * `raw_observations`
     * `raw_packets`
 
 ### Step 2: De-duplicate packets over time
@@ -44,8 +55,8 @@ web UI as two containers sharing that directory.
 
 ### Daemon
 
-* Runs steps 1-5 continuously instead of one-off: an initial backfill of `--start` (default: 24h), then every `--interval` minutes (default: 15), requeries step 1 for observations starting in the trailing `interval + 30` minutes and reruns steps 2 through 5.
-* The 30-minute overlap on every requery catches a SatNOGS observation that was still uploading/being vetted during the previous poll; it doesn't waste decode time since step 1 already skips any observation/decoder pair already recorded in `decoder_runs`.
+* Runs steps 0-5 continuously instead of one-off: an initial backfill of `--start` (default: 24h), then a rerun of steps 0 through 5 every `--interval` minutes (default: 15).
+* `--start` is resolved to an absolute time once, at startup, and every run covers the same span: step 0 only re-lists the listing windows that haven't settled yet (in practice, the current one), and step 1 only decodes observations not already recorded in `decoder_runs`. So a SatNOGS observation that was still uploading/being vetted during one run is picked up by the next.
 * Runs until interrupted (Ctrl+C).
 
 ### Web UI
