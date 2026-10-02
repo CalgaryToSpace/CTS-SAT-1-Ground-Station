@@ -28,8 +28,11 @@ from __future__ import annotations
 
 __all__ = ["Args", "main"]
 
+import os
+import shlex
 import sys
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, assert_never
 
@@ -209,6 +212,17 @@ def main() -> None:
         level="DEBUG" if args.debug else "INFO",
         format="<green>{time:HH:mm:ss}</green> | <level>{level:<8}</level> | {message}",
     )
+
+    # A loud banner per process start, so a restart after a crash (e.g. the
+    # daemon container coming back up) stands out when scrolling the logs.
+    # The log format only carries the time of day, so the date goes here.
+    logger.info("=" * 72)
+    logger.info(
+        f"STARTING NEW PROCESS: cts1_processing_pipeline (pid {os.getpid()}) "
+        f"at {datetime.now(UTC).isoformat(timespec='seconds')}"
+    )
+    logger.info(f"  argv: {shlex.join(sys.argv[1:]) or '(none)'}")
+    logger.info("=" * 72)
 
     # Nothing is waiting on a pipeline run, so it yields the CPU to
     # whatever is (the web UI, on the deployment box) -- and every decoder
