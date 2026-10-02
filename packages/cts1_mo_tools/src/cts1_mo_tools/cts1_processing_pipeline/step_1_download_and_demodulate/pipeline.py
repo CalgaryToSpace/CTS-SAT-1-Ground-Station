@@ -442,7 +442,10 @@ def run(  # noqa: C901, PLR0913, PLR0915
 
         def dispatch(batch: list[dict[str, Any]]) -> None:
             nonlocal total_decoded
-            logger.info(f"Dispatching a batch of {len(batch)} observation(s)...")
+            logger.info(
+                f"Dispatching a batch of {len(batch)} observation(s) "
+                f"across {workers} worker(s)..."
+            )
             futures = {
                 fast_executor.submit(
                     _process_fast_timed, obs, temp_dir, enabled_tools
