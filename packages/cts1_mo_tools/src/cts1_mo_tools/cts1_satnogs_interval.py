@@ -38,7 +38,7 @@ import requests
 import tyro
 from loguru import logger
 
-from .cts1_agenda_maker.satnogs_data import iter_future_observation_pages
+from .satnogs_data import iter_future_observation_pages
 
 # ---------------------------------------------------------------------------
 # Constants

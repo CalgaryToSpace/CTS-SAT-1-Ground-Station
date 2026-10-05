@@ -69,9 +69,9 @@ from typing import TYPE_CHECKING, Any
 import polars as pl
 from loguru import logger
 
-from cts1_mo_tools.cts1_agenda_maker.satnogs_data import fetch_all_observations
 from cts1_mo_tools.cts1_processing_pipeline import landing_db
 from cts1_mo_tools.cts1_processing_pipeline.common import parse_start_filter
+from cts1_mo_tools.satnogs_data import fetch_all_observations
 
 from . import db
 
