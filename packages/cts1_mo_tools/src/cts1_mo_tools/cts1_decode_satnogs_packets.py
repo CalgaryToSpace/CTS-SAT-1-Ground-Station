@@ -16,11 +16,13 @@ import sqlite3
 import struct
 import zlib
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any, Literal, assert_never
 
 import orjson
 import polars as pl
+import polars_hash
 import tyro
 from loguru import logger
 from ordered_set import OrderedSet
@@ -1225,9 +1227,12 @@ def decode_tcmd_response_packet(
 
 
 def decode_bulk_file_downlink_packet(
-    payload: bytes, full_payload: bytes
+    payload: bytes, full_payload: bytes, *, crc_valid: bool | None = None
 ) -> dict[str, Any]:
     """Decode a COMMS_bulk_file_downlink_packet_t payload (CSP header already stripped).
+
+    `crc_valid` is whether `full_payload` ends in a valid CSP CRC-32C, if the
+    caller already knows (computed here otherwise).
 
     Layout:
         uint8_t  packet_type  (1 byte, always 0x10)
@@ -1254,7 +1259,9 @@ def decode_bulk_file_downlink_packet(
     # This branch is always true in the nominal re-demodulating pipeline, but SatNOGS
     # stations are inconsistent whether they've pre-chopped the CRC. Thus, we must
     # check and chop here.
-    if crc32c(full_payload[:-4]) == int.from_bytes(full_payload[-4:], "big"):
+    if crc_valid is None:
+        crc_valid, _computed, _received = verify_csp_packet_crc32c(full_payload)
+    if crc_valid:
         data_bytes = data_bytes[:-4]
 
     return {
@@ -1541,7 +1548,18 @@ def decode_packet_safe(hex_str: str) -> dict[str, Any] | None:
         raw = bytes.fromhex(hex_str)
     except ValueError:
         return None
+    return decode_raw_packet_safe(raw)
 
+
+def decode_raw_packet_safe(
+    raw: bytes, *, crc_valid: bool | None = None
+) -> dict[str, Any] | None:
+    """`decode_packet_safe`, for a packet already parsed to bytes.
+
+    `crc_valid` is whether `raw` ends in a valid CSP CRC-32C, if the caller
+    already knows -- e.g. `decode_to_df`, which checks every packet's CRC
+    at once with polars rather than one at a time in (slow) pure Python.
+    """
     if len(raw) <= CSP_HEADER_SIZE:
         return None
 
@@ -1549,10 +1567,14 @@ def decode_packet_safe(hex_str: str) -> dict[str, Any] | None:
     payload = raw[CSP_HEADER_SIZE:]
     packet_type_byte = payload[0]
 
-    crc_valid, _crc_computed, _crc_received = verify_csp_packet_crc32c(raw)
+    if crc_valid is None:
+        crc_valid, _crc_computed, _crc_received = verify_csp_packet_crc32c(raw)
     base = {"csp_header_hex": csp.hex(), "csp_crc_valid": crc_valid}
 
     decoder = _PACKET_DECODERS.get(packet_type_byte)
+    if decoder is decode_bulk_file_downlink_packet:
+        # The only decoder that needs the CRC verdict itself.
+        decoder = partial(decode_bulk_file_downlink_packet, crc_valid=crc_valid)
     if decoder is not None:
         try:
             decoded = decoder(payload, raw)
@@ -1724,6 +1746,55 @@ def _bulk_data_hex_to_general_message(hex_str: str) -> str:
     return text
 
 
+# Payloads decoded per chunk in `_decode_unique_payloads`: bounds how many
+# per-packet Python dicts are alive at once, which otherwise dwarf the
+# dataframe they end up in.
+_DECODE_CHUNK_SIZE = 20_000
+
+
+def _decode_unique_payloads(hex_payloads: pl.Series) -> pl.DataFrame:
+    """One row per distinct, decodable `hex_payload`, with its decoded fields.
+
+    The hex parsing and CSP CRC-32C check run vectorized in polars, for every
+    payload at once; only the struct-unpacking itself runs per packet.
+    """
+    raw = pl.col("raw")
+    payloads = (
+        hex_payloads.unique(maintain_order=True)
+        .to_frame("hex_payload")
+        .with_columns(raw=pl.col("hex_payload").str.decode("hex", strict=False))
+        # Not valid hex at all (`decode_packet_safe` returns None for those).
+        .filter(raw.is_not_null())
+        # Same verdict as `verify_csp_packet_crc32c`: CRC-32C over all but the
+        # last 4 bytes must equal those last 4 bytes (big-endian).
+        .with_columns(crc_body=raw.bin.head(-CSP_CRC32C_SIZE))
+        .with_columns(
+            crc_valid=(raw.bin.size() > CSP_CRC32C_SIZE)
+            & (
+                polars_hash.col("crc_body").nchash.crc32c(
+                    return_binary=True, byte_order="big"
+                )
+                == raw.bin.tail(CSP_CRC32C_SIZE)
+            )
+        )
+        .select("hex_payload", "raw", "crc_valid")
+    )
+
+    chunks: list[pl.DataFrame] = []
+    for chunk in payloads.iter_slices(_DECODE_CHUNK_SIZE):
+        rows: list[dict[str, Any]] = []
+        for hex_val, raw_bytes, crc_valid in chunk.iter_rows():
+            decoded = decode_raw_packet_safe(raw_bytes, crc_valid=crc_valid)
+            if decoded:
+                rows.append({"hex_payload": hex_val, **decoded})
+        if rows:
+            chunks.append(pl.DataFrame(rows, infer_schema_length=None))
+
+    if not chunks:
+        return pl.DataFrame()
+    return pl.concat(chunks, how="diagonal_relaxed")
+
+
 def decode_to_df(
     df: pl.DataFrame,
     *,
@@ -1732,23 +1803,8 @@ def decode_to_df(
     """Decode CTS-SAT-1 packets already loaded into a dataframe."""
     input_columns_at_start = df.columns
 
-    # Create a separate dataframe of decoded packets.
-    decoded_packets: dict[str, dict[str, Any]] = {
-        # Keys: hex_str, Vals: decoded packet
-    }
-    for hex_val in df["hex_payload"].unique():
-        decoded = decode_packet_safe(hex_val)
-        if decoded:
-            decoded_packets[hex_val] = decoded
-
-    # Build a dataframe from the decoded results and join back.
-    df_decoded = pl.DataFrame(
-        [
-            {"hex_payload": hex_val, **decoded_packet}
-            for hex_val, decoded_packet in decoded_packets.items()
-        ],
-        infer_schema_length=None,  # Use all rows.
-    )
+    # Create a separate dataframe of decoded packets, then join back.
+    df_decoded = _decode_unique_payloads(df["hex_payload"])
 
     # `general_message` below unconditionally references these three --
     # guarantee they all exist even if this particular batch didn't happen

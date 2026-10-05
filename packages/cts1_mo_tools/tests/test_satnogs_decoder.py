@@ -3,6 +3,7 @@ import math
 import struct
 from typing import Any
 
+import polars as pl
 import pytest
 from cts1_mo_tools.cts1_decode_satnogs_packets import (
     ADCS_ENABLED_BITS,
@@ -28,6 +29,7 @@ from cts1_mo_tools.cts1_decode_satnogs_packets import (
     TCMD_RESPONSE_HEADER_FMT,
     TCMD_RESPONSE_HEADER_SIZE,
     convert_obc_adc_battery_voltage_to_percent,
+    crc32c,
     decode_adcs_current_state_1,
     decode_beacon_basic_packet,
     decode_beacon_extended_packet,
@@ -36,6 +38,7 @@ from cts1_mo_tools.cts1_decode_satnogs_packets import (
     decode_log_message_packet,
     decode_packet_safe,
     decode_tcmd_response_packet,
+    decode_to_df,
     e,
     ecef_to_geodetic,
     novatel_crc32,
@@ -1341,3 +1344,57 @@ class TestDecodeGnssBestxyzbSample:
         assert result is not None
         assert result["packet_type"] == "GNSS_BESTXYZB_SAMPLE"
         assert result["gnss_position_type"] == "SINGLE"
+
+
+# ---------------------------------------------------------------------------
+# Tests for decode_to_df (vectorized hex parsing + CRC check)
+# ---------------------------------------------------------------------------
+
+
+def _with_crc(packet: bytes) -> bytes:
+    return packet + crc32c(packet).to_bytes(4, "big")
+
+
+class TestDecodeToDf:
+    def _decode(self, hex_payloads: list[str]) -> pl.DataFrame:
+        df = pl.DataFrame(
+            {"hex_payload": hex_payloads}, schema={"hex_payload": pl.String}
+        )
+        return decode_to_df(df, sort_setting="no_sort")
+
+    def test_bulk_trailing_crc_is_trimmed(self) -> None:
+        packet = _with_crc(DUMMY_CSP + _make_bulk_payload(data=b"\x01\x02\x03"))
+        row = self._decode([packet.hex()]).row(0, named=True)
+        assert row["csp_crc_valid"] is True
+        assert row["bulk_data_hex"] == "010203"
+
+    def test_bulk_without_crc_keeps_all_data(self) -> None:
+        packet = DUMMY_CSP + _make_bulk_payload(data=b"\x01\x02\x03\x04\x05")
+        row = self._decode([packet.hex()]).row(0, named=True)
+        assert row["csp_crc_valid"] is False
+        assert row["bulk_data_hex"] == "0102030405"
+
+    def test_matches_decode_packet_safe(self) -> None:
+        """The vectorized path agrees with the one-packet-at-a-time one,
+        including for payloads that don't decode at all.
+        """
+        hex_payloads = [
+            _with_crc(DUMMY_CSP + _make_beacon_payload()).hex(),
+            (DUMMY_CSP + _make_beacon_payload()).hex(),  # no CRC
+            _with_crc(DUMMY_CSP + _make_log_payload(message=b"hi\n")).hex().upper(),
+            _with_crc(DUMMY_CSP + _make_tcmd_payload(data=b"ok\n")).hex(),
+            _with_crc(DUMMY_CSP + b"\xff" + b"\x00" * 10).hex(),  # unknown type
+            DUMMY_CSP.hex(),  # too short
+            "ZZZZZZZZ",  # invalid hex
+            "",
+        ]
+        result = self._decode(hex_payloads)
+
+        assert result["hex_payload"].to_list() == hex_payloads
+        for row in result.iter_rows(named=True):
+            expected = decode_packet_safe(row["hex_payload"]) or {}
+            decoded_cols = {
+                k for k in row if k not in ("hex_payload", "general_message")
+            }
+            assert {k: row[k] for k in expected} == expected
+            assert all(row[k] is None for k in decoded_cols - expected.keys())
