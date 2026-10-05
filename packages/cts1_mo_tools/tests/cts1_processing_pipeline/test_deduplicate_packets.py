@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import polars as pl
+import pytest
 from cts1_mo_tools.cts1_decode_satnogs_packets import crc32c, verify_csp_packet_crc32c
 from cts1_mo_tools.cts1_processing_pipeline.step_2_deduplicate_packets.pipeline import (
     compute_distinct_packets,
@@ -79,7 +80,7 @@ def test_sso_dedupes_within_one_minute_across_observations() -> None:
     """Two ground stations catching the same overpass, both sso_rx_replay,
     within BASELINE_DEDUPE_TOLERANCE of each other, merge into one row --
     received_at is their median, not either one's own reading (see
-    `_cluster_baseline` for why: propagation delay is milliseconds, so the
+    `_aggregate_clusters` for why: propagation delay is milliseconds, so the
     "first" copy mostly just reflects clock skew direction).
     """
     observations = _observations_df(
@@ -635,6 +636,47 @@ def test_packet_with_wrong_csp_header_is_dropped() -> None:
     result = compute_distinct_packets(packets, observations)
 
     assert result.is_empty()
+
+
+@pytest.mark.parametrize(
+    "data_hex",
+    [
+        "c2a28a00a",  # odd length, despite a valid CTS-SAT-1 header
+        "c2a28a00zz",  # non-hex characters
+        "deadbeefz",  # invalid even without the CTS-SAT-1 header
+    ],
+)
+def test_invalid_hex_fails_loudly(data_hex: str) -> None:
+    """A data_hex that doesn't parse back to bytes means step 1 or its
+    export is broken -- not radio noise -- so it must not be silently dropped.
+    """
+    observations = _observations_df([_OBS_1])
+    packets = _packets_df(
+        [
+            _packet(received_at="2026-08-12T19:35:00"),
+            _packet(received_at="2026-08-12T19:36:00", data_hex=data_hex),
+        ]
+    )
+
+    with pytest.raises(pl.exceptions.ComputeError, match="invalid `hex`"):
+        compute_distinct_packets(packets, observations)
+
+
+def test_hex_case_is_normalized_and_merged() -> None:
+    """Upper- and lowercase spellings of the same bytes are the same packet."""
+    observations = _observations_df([_OBS_1])
+    packets = _packets_df(
+        [
+            _packet(received_at="2026-08-12T19:35:00", data_hex="c2a28a00aa"),
+            _packet(received_at="2026-08-12T19:35:10", data_hex="C2A28A00AA"),
+        ]
+    )
+
+    result = compute_distinct_packets(packets, observations)
+
+    assert len(result) == 1
+    assert result["data_hex"][0] == "c2a28a00aa"
+    assert result["packet_count"][0] == 2
 
 
 def test_empty_data_hex_rows_are_dropped() -> None:

@@ -157,8 +157,9 @@ def _prepare_rows(packets: pl.LazyFrame, observations: pl.LazyFrame) -> pl.LazyF
         key-only frames and join its verdict back onto the full rows once.
       - `_data`: `data_hex` parsed to raw bytes (half the size, and
         hex-case-insensitive); `data_hex` itself is dropped until
-        `_finalize` re-encodes it once per distinct packet. Rows that
-        aren't valid hex are dropped as noise.
+        `_finalize` re-encodes it once per distinct packet. A value that
+        isn't valid hex raises: every step 1 decoder hex-encodes bytes, so
+        that means step 1 is broken, not radio noise.
       - `_content_id`: a dense integer stand-in for `_data` (an exact rank,
         not a hash, so distinct contents can never collide). Every sort,
         window, join and group-by below keys on content, and packets run to
@@ -179,7 +180,7 @@ def _prepare_rows(packets: pl.LazyFrame, observations: pl.LazyFrame) -> pl.LazyF
     )
     return (
         _complete_missing_crc(packets)
-        .with_columns(_data=pl.col("data_hex").str.decode("hex", strict=False))
+        .with_columns(_data=pl.col("data_hex").str.decode("hex"))
         .drop("data_hex")
         .filter(pl.col("_data").bin.starts_with(bytes.fromhex(CTS1_CSP_HEADER_HEX)))
         .join(observations, on="observation_id", how="left")
