@@ -25,20 +25,32 @@ outcome -- a window that keeps failing to list, or an observation whose
 audio keeps failing to download, would otherwise be retried back to back
 for as long as the daemon is idle. Restarting the daemon retries them.
 
+SatNOGS rate-limits observation listing (240 requests/hour with an API
+key), and the regular requeries need some of that, so a chunk only starts
+while fewer than `LISTING_REQUESTS_PER_HOUR_LIMIT` listing requests went
+out in the past hour -- see `satnogs_data.listing_requests_in_last_hour`.
+
 Enabled with the daemon's `--idle-backfill`, or `CTS1_IDLE_BACKFILL=1` --
 see `ENV_VAR`.
 """
 
 from __future__ import annotations
 
-__all__ = ["ENV_VAR", "IdleBackfill", "enabled_by_env"]
+__all__ = [
+    "ENV_VAR",
+    "LISTING_REQUESTS_PER_HOUR_LIMIT",
+    "IdleBackfill",
+    "enabled_by_env",
+]
 
 import os
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from loguru import logger
+
+from cts1_mo_tools import satnogs_data
 
 from . import landing_db
 from .daemon_signals import DaemonState
@@ -54,6 +66,9 @@ if TYPE_CHECKING:
 
 ENV_VAR = "CTS1_IDLE_BACKFILL"
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+# SatNOGS's 240 listing requests/hour, less 50 kept for the regular requeries.
+LISTING_REQUESTS_PER_HOUR_LIMIT: Final = 240 - 50
 
 
 def enabled_by_env() -> bool:
@@ -114,7 +129,18 @@ class IdleBackfill:
         An exception from either step is logged rather than raised: idle
         backfill is opportunistic, and shouldn't take down the daemon's
         regular runs with it.
+
+        Also returns False, doing nothing, while the past hour's SatNOGS
+        listing requests are at `LISTING_REQUESTS_PER_HOUR_LIMIT`.
         """
+        used = satnogs_data.count_listing_requests_in_last_hour()
+        if used >= LISTING_REQUESTS_PER_HOUR_LIMIT:
+            logger.info(
+                f"Daemon: idle backfill paused -- {used} SatNOGS listing "
+                f"request(s) in the past hour (limit "
+                f"{LISTING_REQUESTS_PER_HOUR_LIMIT})"
+            )
+            return False
         try:
             pending = self.pending_windows()
         except Exception:  # noqa: BLE001

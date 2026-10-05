@@ -3,6 +3,7 @@
 import os
 import re
 import time
+from collections import deque
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any, Final
@@ -22,6 +23,11 @@ _REQUEST_TIMEOUT_SEC: Final = 120
 # these explicitly and concatenating the results (see fetch_all_observations).
 OBSERVATION_STATUSES: Final = ("good", "bad", "failed", "unknown", "future")
 
+# `time.monotonic()` of every observation-listing request this process has
+# sent, so callers can stay under the API's hourly rate limit.
+_listing_request_log: deque[float] = deque()
+_LISTING_REQUEST_LOG_PERIOD_SEC: Final = 3600.0
+
 
 def _get_auth_headers() -> dict[str, str]:
     """Return auth headers if SATNOGS_NETWORK_API_KEY is set, else empty dict."""
@@ -36,11 +42,20 @@ def _next_url_from_headers(headers: Any) -> str | None:
     return m.group(1) if m else None
 
 
+def count_listing_requests_in_last_hour() -> int:
+    """Observation-listing requests this process sent in the past hour."""
+    cutoff = time.monotonic() - _LISTING_REQUEST_LOG_PERIOD_SEC
+    while _listing_request_log and _listing_request_log[0] <= cutoff:
+        _listing_request_log.popleft()
+    return len(_listing_request_log)
+
+
 def _get_with_retry(
     url: str, *, params: dict[str, Any], headers: dict[str, str]
 ) -> requests.Response:
     """GET with retry-with-backoff on 429/500, honoring Retry-After when present."""
     for attempt in range(_MAX_RETRIES):
+        _listing_request_log.append(time.monotonic())
         r = requests.get(
             url, params=params, headers=headers, timeout=_REQUEST_TIMEOUT_SEC
         )

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from cts1_mo_tools import satnogs_data
 from cts1_mo_tools.cts1_processing_pipeline import (
     daemon,
     daemon_signals,
@@ -223,6 +224,26 @@ def test_a_failing_chunk_does_not_stop_the_backfill(
     with StatusReporter(tmp_path, interval_sec=0.05) as reporter:
         assert backfill.run_next_chunk(reporter)
         assert not backfill.run_next_chunk(reporter)
+
+
+def test_backfill_waits_while_listing_requests_are_at_the_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_if_run(**_kwargs: Any) -> None:
+        pytest.fail("backfill ran with the listing request log full")
+
+    monkeypatch.setattr(step_0_pipeline, "run", fail_if_run)
+    monkeypatch.setattr(
+        satnogs_data,
+        "count_listing_requests_in_last_hour",
+        lambda: idle_backfill.LISTING_REQUESTS_PER_HOUR_LIMIT,
+    )
+    backfill = _backfill(tmp_path, since=_DAY, until=_DAY + LISTING_WINDOW)
+
+    with StatusReporter(tmp_path, interval_sec=0.05) as reporter:
+        assert not backfill.run_next_chunk(reporter)
+
+    assert backfill.pending_windows() == [ListingWindow(_DAY)]
 
 
 def test_nothing_to_backfill_before_history_starts(tmp_path: Path) -> None:
