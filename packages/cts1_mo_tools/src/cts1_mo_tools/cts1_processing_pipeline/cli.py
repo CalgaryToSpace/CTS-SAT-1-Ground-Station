@@ -18,6 +18,7 @@ Usage (uv):
     uv run cts1_processing_pipeline step_5
     uv run cts1_processing_pipeline daemon
     uv run cts1_processing_pipeline daemon --start "3 days" --interval 5
+    uv run cts1_processing_pipeline daemon --idle-backfill
 """
 
 from __future__ import annotations
@@ -41,7 +42,7 @@ from dotenv import load_dotenv
 from loguru import logger
 from tyro.conf import OmitSubcommandPrefixes
 
-from . import daemon, resource_limits
+from . import daemon, idle_backfill, resource_limits
 from .step_0_list_observations import pipeline as step_0_list_observations
 from .step_1_download_and_demodulate import pipeline as step_1_download_and_demodulate
 from .step_2_deduplicate_packets import pipeline as step_2_deduplicate_packets
@@ -169,6 +170,12 @@ class DaemonArgs:
     tools: tuple[str, ...] | None = None
     """Same as step 1's --tools, applied to every requery."""
 
+    idle_backfill: bool = False
+    """While waiting between runs, list and decode (steps 0 and 1) the
+    history before --start, back to the satellite's first observations,
+    one 12h window at a time. Also enabled by setting CTS1_IDLE_BACKFILL=1
+    in the environment."""
+
 
 # Add further steps as additional
 # `Annotated[StepNArgs, tyro.conf.subcommand(name="step_n", prefix_name=False)]`
@@ -267,6 +274,9 @@ def main() -> None:
                 temp_dir=args.command.temp_dir,
                 force_rerun=args.command.force_rerun_decoders,
                 tools=args.command.tools,
+                idle_backfill=(
+                    args.command.idle_backfill or idle_backfill.enabled_by_env()
+                ),
             )
         else:
             assert_never(args.command)

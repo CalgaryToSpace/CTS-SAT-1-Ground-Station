@@ -203,8 +203,12 @@ def load_observations(
     *,
     norad_id: str,
     start_gte: datetime | None = None,
+    start_lt: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """Read step 0's raw_observations back as observation dicts, newest first.
+
+    `start_gte`/`start_lt` bound which observations are read by their start
+    time; None leaves that side open.
 
     Only the columns step 1 uses are read. `start`/`end` come back as
     tz-aware UTC datetimes, and `demoddata` as the list of dicts the
@@ -223,6 +227,9 @@ def load_observations(
     if start_gte is not None:
         sql += " AND start >= ?"
         params.append(start_gte)
+    if start_lt is not None:
+        sql += " AND start < ?"
+        params.append(start_lt)
     sql += " ORDER BY start DESC, id DESC"
 
     # Via polars rather than `fetchall()`: DuckDB needs pytz to hand back

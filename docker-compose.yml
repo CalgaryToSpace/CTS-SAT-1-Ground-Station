@@ -19,8 +19,9 @@ services:
       CTS1_DUCKDB_THREADS: "1" # appends and exports, not heavy analytics
       CTS1_DUCKDB_MEMORY_LIMIT: "500MB" # spills to disk past this, never OOMs
       CTS1_DAEMON_NICENESS: "10" # yield the CPU to the web server
+      CTS1_IDLE_BACKFILL: "1" # "1": decode history before --start while idle
     env_file:
-      - .env # SATNOGS_NETWORK_API_KEY, if you have one -- see .env.sample
+      - .env # SATNOGS_NETWORK_API_KEY and others (see .env.sample
     volumes:
       - /opt/cts1_processing_pipeline:/opt/cts1_processing_pipeline
     command:

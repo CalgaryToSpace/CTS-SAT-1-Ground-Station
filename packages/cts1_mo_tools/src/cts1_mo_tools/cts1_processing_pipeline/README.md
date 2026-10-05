@@ -57,6 +57,7 @@ web UI as two containers sharing that directory.
 
 * Runs steps 0-5 continuously instead of one-off: an initial backfill of `--start` (default: 24h), then a rerun of steps 0 through 5 every `--interval` minutes (default: 15).
 * `--start` is resolved to an absolute time once, at startup, and every run covers the same span: step 0 only re-lists the tail of the listing windows that haven't settled yet (about the last hour of observations), and step 1 only decodes observations not already recorded in `decoder_runs`. So a SatNOGS observation that was still uploading during one run is picked up by the next.
+* With `--idle-backfill` (or `CTS1_IDLE_BACKFILL=1`), the time between runs is spent backfilling steps 0 and 1 for the history before `--start`, back to the satellite's first observations: one 12h listing window at a time, newest first, picking only windows step 0 hasn't listed or with observations step 1 hasn't decoded. A trigger request or the next scheduled run is honoured between windows. Steps 2-5 pick up the backfilled packets on the next run.
 * Runs until interrupted (Ctrl+C).
 
 ### Web UI

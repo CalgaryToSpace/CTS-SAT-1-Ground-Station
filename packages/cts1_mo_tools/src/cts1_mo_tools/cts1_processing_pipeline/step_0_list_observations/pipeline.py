@@ -57,6 +57,7 @@ __all__ = [
     "list_window",
     "listing_windows",
     "run",
+    "window_containing",
     "windows_needing_listing",
 ]
 
@@ -133,13 +134,17 @@ class ListingWindow:
         return start_gt, min(self.end + LISTING_WINDOW_OVERLAP, now)
 
 
+def window_containing(at: datetime) -> ListingWindow:
+    """The window `at` falls in."""
+    return ListingWindow(_EPOCH + ((at - _EPOCH) // LISTING_WINDOW) * LISTING_WINDOW)
+
+
 def listing_windows(start: datetime, now: datetime) -> list[ListingWindow]:
     """Every window from the one containing `start` to the one containing
     `now`, newest first -- so a long backfill lands fresh data first.
     """
-    first_start = _EPOCH + ((start - _EPOCH) // LISTING_WINDOW) * LISTING_WINDOW
     windows: list[ListingWindow] = []
-    window_start = first_start
+    window_start = window_containing(start).start
     while window_start < now:
         windows.append(ListingWindow(window_start))
         window_start += LISTING_WINDOW
@@ -250,9 +255,11 @@ def run(
     norad_id: str = "69015",
     data_dir: Path = DEFAULT_DATA_DIR,
     start: str | None = None,
+    end: str | None = None,
     refetch_all: bool = False,
 ) -> None:
-    """List every window from `start` to now that needs (re-)listing.
+    """List every window from `start` to `end` (default: now) that needs
+    (re-)listing.
 
     Args:
         norad_id: NORAD catalog ID of the target satellite.
@@ -264,20 +271,26 @@ def run(
             now) or an ISO 8601 date/datetime. Rounded down to the start of
             the listing window it falls in. None means
             `DEFAULT_HISTORY_START`.
+        end: Where listing stops, in the same syntax as `start`: only
+            windows starting before it are listed (the window it falls in
+            included). None means now. Never past now either way.
         refetch_all: Re-list every window from `start` to now, ignoring
             the record of which ones are already listed for good.
     """
     db_path = data_dir / landing_db.DB_FILENAME
     now = datetime.now(UTC)
     start_at = parse_start_filter(start) if start is not None else DEFAULT_HISTORY_START
-    windows = listing_windows(start_at, now)
+    end_at = min(parse_start_filter(end), now) if end is not None else now
+    windows = listing_windows(start_at, end_at)
 
     with landing_db.connect(db_path) as con:
         states = db.window_states(con)
         to_list = windows_needing_listing(windows, states, refetch_all=refetch_all)
         logger.info(
             f"Listing observations for NORAD {norad_id} since "
-            f"{start_at.isoformat()}: {len(to_list)} of {len(windows)} "
+            f"{start_at.isoformat()}"
+            + (f" until {end_at.isoformat()}" if end is not None else "")
+            + f": {len(to_list)} of {len(windows)} "
             f"{LISTING_WINDOW}-long window(s) need listing"
             + (" (--refetch-all)" if refetch_all else "")
         )
