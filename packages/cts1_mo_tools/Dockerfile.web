@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # Serves the CTS-SAT-1 processing pipeline's NiceGUI web UI
-# (`cts1_data_web_ui`) -- a view over the parquet/duckdb files `daemon`
+# (`cts1_serve_dashboard`) -- a view over the parquet/duckdb files `daemon`
 # (see Dockerfile.daemon) writes to `CTS1_DATA_DIR`. The mount must be
 # writable: the "Trigger Pipeline" button drops a trigger file in there
 # (see cts1_processing_pipeline/daemon_signals.py). Fully
@@ -52,5 +52,5 @@ COPY --from=gitinfo /project_git_commit /etc/project_git_commit
 VOLUME ["/opt/cts1_processing_pipeline"]
 EXPOSE 8089
 
-ENTRYPOINT ["cts1_data_web_ui"]
+ENTRYPOINT ["cts1_serve_dashboard"]
 CMD ["--port", "8089"]

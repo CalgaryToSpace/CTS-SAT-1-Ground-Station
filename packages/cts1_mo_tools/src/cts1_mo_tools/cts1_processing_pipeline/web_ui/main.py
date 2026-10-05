@@ -8,9 +8,9 @@ the basic and extended beacon packets, grouped by subsystem -- see
 `export_page` for the individual pages.
 
 Usage (uv):
-    uv run cts1_data_web_ui
-    uv run cts1_data_web_ui --data-dir output
-    uv run cts1_data_web_ui --hours 6
+    uv run cts1_serve_dashboard
+    uv run cts1_serve_dashboard --data-dir output
+    uv run cts1_serve_dashboard --hours 6
 """
 
 # pyright: standard

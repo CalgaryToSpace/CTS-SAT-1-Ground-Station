@@ -40,7 +40,7 @@ REFRESH_INTERVAL_SEC = 30.0
 def _read_build_info_file(path: str) -> str:
     """The contents of a build-info file baked in at image build time (see
     Dockerfile.web) -- "unknown" if missing, e.g. a plain
-    `uv run cts1_data_web_ui` outside Docker.
+    `uv run cts1_serve_dashboard` outside Docker.
     """
     try:
         return Path(path).read_text().strip()
