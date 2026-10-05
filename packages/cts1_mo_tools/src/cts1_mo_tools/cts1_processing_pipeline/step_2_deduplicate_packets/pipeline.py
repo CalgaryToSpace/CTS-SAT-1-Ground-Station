@@ -101,7 +101,7 @@ _SOURCE_FIELDS: Sequence[str] = (
 )
 
 
-def _complete_missing_crc(packets: pl.DataFrame) -> pl.DataFrame:
+def _complete_missing_crc(packets: pl.LazyFrame) -> pl.LazyFrame:
     """satnogs_client_live_data sometimes reports a packet with its trailing CSP
     CRC-32C already stripped and sometimes doesn't -- there's no way to tell
     from SatNOGS's API alone which case a given packet is. Any row from that
@@ -123,8 +123,7 @@ def _complete_missing_crc(packets: pl.DataFrame) -> pl.DataFrame:
     ).fill_null(value=False).not_()
 
     incomplete = (
-        packets.lazy()
-        .filter(needs_crc)
+        packets.filter(needs_crc)
         .with_columns(
             temp_data_binary=pl.col("data_hex").str.decode("hex"),
         )
@@ -145,93 +144,195 @@ def _complete_missing_crc(packets: pl.DataFrame) -> pl.DataFrame:
         )
         .drop("temp_data_binary")
     )
-    complete = (
-        packets.lazy().filter(~needs_crc).with_columns(csp_crc_source=pl.lit("decoded"))
+    complete = packets.filter(~needs_crc).with_columns(csp_crc_source=pl.lit("decoded"))
+    return pl.concat([complete, incomplete], how="vertical_relaxed")
+
+
+def _prepare_rows(packets: pl.LazyFrame, observations: pl.LazyFrame) -> pl.LazyFrame:
+    """Filter out noise, complete missing CRCs, and attach everything the
+    clustering below keys on.
+
+    Adds, per decode:
+      - `_row_id`: a stable row key, so the clustering can work on narrow
+        key-only frames and join its verdict back onto the full rows once.
+      - `_data`: `data_hex` parsed to raw bytes (half the size, and
+        hex-case-insensitive); `data_hex` itself is dropped until
+        `_finalize` re-encodes it once per distinct packet. Rows that
+        aren't valid hex are dropped as noise.
+      - `_content_id`: a dense integer stand-in for `_data` (an exact rank,
+        not a hash, so distinct contents can never collide). Every sort,
+        window, join and group-by below keys on content, and packets run to
+        hundreds of bytes -- comparing those millions of times over is most
+        of the cost if done on the bytes themselves.
+      - `_trust_rank`: position in `BASELINE_DECODERS` (null for others).
+      - `_source`: one full per-decode trace record, already JSON-encoded.
+    """
+    observations = observations.select(
+        observation_id=pl.col("id"),
+        obs_start=pl.col("start").dt.replace_time_zone("UTC"),
+        obs_end=pl.col("end").dt.replace_time_zone("UTC"),
     )
-    return pl.concat([complete, incomplete], how="vertical_relaxed").collect()
-
-
-def _with_source_struct(packets: pl.DataFrame) -> pl.DataFrame:
-    """Attach a `_source` struct column: one full per-decode trace record."""
-    return packets.with_columns(
-        _source=pl.struct(
-            *(pl.col(f) for f in _SOURCE_FIELDS),
-            received_at=pl.col("received_at").dt.strftime("%Y-%m-%dT%H:%M:%S%.3fZ"),
+    packets = packets.filter(
+        pl.col("data_hex").is_not_null()
+        & (pl.col("data_hex") != "")
+        & pl.col("rs_correctable")
+    )
+    return (
+        _complete_missing_crc(packets)
+        .with_columns(_data=pl.col("data_hex").str.decode("hex", strict=False))
+        .drop("data_hex")
+        .filter(pl.col("_data").bin.starts_with(bytes.fromhex(CTS1_CSP_HEADER_HEX)))
+        .join(observations, on="observation_id", how="left")
+        .with_row_index("_row_id")
+        .with_columns(
+            _content_id=pl.col("_data").rank("dense").cast(pl.UInt32),
+            _trust_rank=pl.col("decoder").replace_strict(
+                {decoder: rank for rank, decoder in enumerate(BASELINE_DECODERS)},
+                default=None,
+                return_dtype=pl.UInt32,
+            ),
+            _source=pl.struct(
+                *(pl.col(f) for f in _SOURCE_FIELDS),
+                received_at=pl.col("received_at").dt.strftime("%Y-%m-%dT%H:%M:%S%.3fZ"),
+            ).struct.json_encode(),
         )
     )
 
 
 def _cluster_by_content_and_time(
-    df: pl.DataFrame, *, tolerance: timedelta, cluster_col: str
-) -> pl.DataFrame:
-    """Assign `cluster_col`: rows with the same `data_hex` chained together
+    df: pl.LazyFrame, *, tolerance: timedelta
+) -> pl.LazyFrame:
+    """Assign `_cluster`: rows with the same `_content_id` chained together
     by consecutive `received_at` gaps no larger than `tolerance`
-    (gap-and-island / "sessionization").
+    (gap-and-island / "sessionization"). Cluster ids are unique across all
+    content, not just within one content.
 
     A long chain of close-together rows can end up spanning more than
     `tolerance` end-to-end even though no single gap in it exceeds
     `tolerance` -- an accepted approximation, standard for this kind of
     event clustering.
     """
-    return (
-        df.sort(["data_hex", "received_at"])
-        .with_columns(
-            _gap=pl.col("received_at") - pl.col("received_at").shift(1).over("data_hex")
-        )
-        .with_columns(
-            **{
-                cluster_col: (
-                    (pl.col("_gap").is_null() | (pl.col("_gap") > tolerance))
-                    .cum_sum()
-                    .over("data_hex")
-                )
-            }
-        )
-        .drop("_gap")
+    starts_new_cluster = (
+        (pl.col("_content_id") != pl.col("_content_id").shift(1))
+        | ((pl.col("received_at") - pl.col("received_at").shift(1)) > tolerance)
+    ).fill_null(value=True)  # the very first row
+    return df.sort(["_content_id", "received_at"]).with_columns(
+        _cluster=starts_new_cluster.cum_sum()
     )
 
 
-def _cluster_baseline(baseline: pl.DataFrame) -> pl.DataFrame:
-    """Cluster askew_demod_from_file/sso_rx_replay rows into distinct baseline
-    packet events.
+def _assign_clusters(rows: pl.LazyFrame) -> pl.LazyFrame:
+    """Decide which distinct packet each decode belongs to.
 
-    Both decoders have trustworthy timing, so they're clustered together by
-    content+time same as a single decoder would be. Within a cluster, only
-    rows from `BASELINE_DECODERS`' highest-trust decoder *present* (never a
-    mix of both) contribute to the cluster's `received_at`: their median
-    timestamp. Several ground stations catching the same overpass can be
-    time-synced to within a few seconds of each other rather than exactly,
-    and propagation delay between stations is only milliseconds -- so which
-    single copy arrived "first" mostly reflects which station's clock
-    happens to run behind, not which timestamp is more correct. The median
-    cancels that symmetric clock skew out instead of picking a side of it;
-    with only one copy (the common case) it's just that copy's own time.
+    Returns one `(_row_id, _cluster, _is_leftover)` row per input row:
+    `(_cluster, _is_leftover)` is the distinct packet's key.
+
+      - Baseline-decoder rows are clustered by content+time with
+        `BASELINE_DEDUPE_TOLERANCE`.
+      - Every other row is matched to its nearest same-content baseline
+        cluster: either its `received_at` falls within
+        `OTHER_DECODER_TOLERANCE` of the cluster's observation-window span,
+        or its own observation window overlaps that span.
+      - Whatever's left is clustered against itself with the wide
+        `OTHER_DECODER_TOLERANCE` (`_is_leftover`).
+
+    Everything here works on narrow key/timestamp-only columns: the
+    other-to-baseline join fans out to every same-content baseline cluster
+    before the nearest is picked, so for content that repeats a lot (e.g.
+    identical idle beacons) it's the one place the row count can blow up.
+    """
+    keys = ["_row_id", "_content_id", "received_at", "obs_start", "obs_end"]
+    is_baseline = pl.col("_trust_rank").is_not_null()
+
+    baseline = _cluster_by_content_and_time(
+        rows.filter(is_baseline).select(keys), tolerance=BASELINE_DEDUPE_TOLERANCE
+    )
+    others = rows.filter(~is_baseline).select(keys)
+
+    cluster_spans = baseline.group_by("_cluster").agg(
+        pl.col("_content_id").first(),
+        pl.col("obs_start").min().alias("cluster_obs_start"),
+        pl.col("obs_end").max().alias("cluster_obs_end"),
+    )
+    window_overlap = (pl.col("obs_start") <= pl.col("cluster_obs_end")) & (
+        pl.col("obs_end") >= pl.col("cluster_obs_start")
+    )
+    dist = pl.min_horizontal(
+        (pl.col("received_at") - pl.col("cluster_obs_start")).abs(),
+        (pl.col("received_at") - pl.col("cluster_obs_end")).abs(),
+    )
+    matched = (
+        others.join(cluster_spans, on="_content_id", how="inner")
+        .with_columns(
+            _dist=pl.when(window_overlap)
+            .then(pl.duration(microseconds=0))
+            .otherwise(dist),
+        )
+        .filter(window_overlap | (dist <= OTHER_DECODER_TOLERANCE))
+        .group_by("_row_id")
+        # Nearest cluster; ties (e.g. a window overlapping several) go to the
+        # earliest, so the output is deterministic run to run.
+        .agg(pl.col("_cluster").sort_by(["_dist", "_cluster"]).first())
+    )
+    leftover = _cluster_by_content_and_time(
+        others.join(matched, on="_row_id", how="anti"),
+        tolerance=OTHER_DECODER_TOLERANCE,
+    )
+
+    return pl.concat(
+        [
+            baseline.select("_row_id", "_cluster", _is_leftover=pl.lit(value=False)),
+            matched.select("_row_id", "_cluster", _is_leftover=pl.lit(value=False)),
+            leftover.select("_row_id", "_cluster", _is_leftover=pl.lit(value=True)),
+        ]
+    )
+
+
+def _aggregate_clusters(rows: pl.LazyFrame) -> pl.LazyFrame:
+    """Collapse each cluster's decodes into its one distinct-packet row.
+
+    Rows are ordered within a cluster baseline-first (by `_trust_rank`, then
+    `received_at`), so `.first()` picks the highest-trust, earliest baseline
+    decode when there is one, and `sources` lists baseline decodes first.
+
+    For a baseline cluster, only rows from `BASELINE_DECODERS`'
+    highest-trust decoder *present* (never a mix of both) contribute to the
+    cluster's `received_at`: their median timestamp. Several ground stations
+    catching the same overpass can be time-synced to within a few seconds of
+    each other rather than exactly, and propagation delay between stations
+    is only milliseconds -- so which single copy arrived "first" mostly
+    reflects which station's clock happens to run behind, not which
+    timestamp is more correct. The median cancels that symmetric clock skew
+    out instead of picking a side of it; with only one copy (the common
+    case) it's just that copy's own time.
 
     `rssi_db` is picked separately: askew_demod_from_file is preferred over
     any other decoder, and if several askew_demod_from_file decodes landed
     in the same cluster (e.g. multiple ground stations), the strongest
     (max) of their rssi_db values is used. Only when no
     askew_demod_from_file decode is present does it fall back to the
-    cluster's other authoritative-row value above.
+    cluster's first (highest-trust) row's value.
+
+    A leftover cluster (no baseline decode at all) reports its earliest
+    contributing decode as a best-effort `received_at`, with no
+    `rssi_db`/`rs_*` values.
     """
-    clustered = _cluster_by_content_and_time(
-        baseline, tolerance=BASELINE_DEDUPE_TOLERANCE, cluster_col="cluster_id"
-    )
-    trust_rank = pl.col("decoder").replace_strict(
-        {decoder: rank for rank, decoder in enumerate(BASELINE_DECODERS)},
-        return_dtype=pl.UInt32,
-    )
-    clustered = clustered.with_columns(_trust_rank=trust_rank).sort(
-        ["data_hex", "cluster_id", "_trust_rank", "received_at"]
-    )
     is_askew = pl.col("decoder") == ASKEW_DECODER
     # The highest-trust decoder's own rows within the cluster -- i.e. every
     # row tied for the lowest `_trust_rank` present, not just the first one.
+    # Null (never true) for non-baseline rows.
     is_best_rank = pl.col("_trust_rank") == pl.col("_trust_rank").min()
+    if_baseline = pl.when(~pl.col("_is_leftover"))
     return (
-        clustered.group_by(["data_hex", "cluster_id"], maintain_order=True)
+        rows.sort(
+            ["_is_leftover", "_cluster", "_trust_rank", "received_at"],
+            nulls_last=True,
+        )
+        .group_by(["_is_leftover", "_cluster"], maintain_order=True)
         .agg(
-            pl.col("received_at").filter(is_best_rank).median().alias("received_at"),
+            pl.col("_content_id").first(),
+            pl.col("received_at").filter(is_best_rank).median().alias("_baseline_at"),
+            pl.col("received_at").min().alias("_earliest_at"),
             pl.col("decoder").filter(is_best_rank).first().alias("received_at_source"),
             pl.col("data_length_bytes").first(),
             pl.col("csp_crc_valid").first(),
@@ -242,153 +343,34 @@ def _cluster_baseline(baseline: pl.DataFrame) -> pl.DataFrame:
             ).alias("rssi_db"),
             pl.col("rs_corrected_error_count").first(),
             pl.col("rs_correctable").first(),
-            pl.col("obs_start").min().alias("cluster_obs_start"),
-            pl.col("obs_end").max().alias("cluster_obs_end"),
-            pl.col("observation_id").unique().alias("baseline_observation_ids"),
-            pl.col("decoder").unique().alias("baseline_decoders"),
-            pl.col("_source").alias("sources"),
-        )
-        .drop("cluster_id")
-        .with_row_index("baseline_cluster_idx")
-    )
-
-
-def _match_others_to_baseline(
-    others: pl.DataFrame, baseline_clusters: pl.DataFrame
-) -> tuple[pl.DataFrame, pl.DataFrame]:
-    """Match each `others` row to its nearest same-content baseline cluster.
-
-    A match requires: the same `data_hex`, and either the row's `received_at`
-    falling within `OTHER_DECODER_TOLERANCE` of the cluster's own time span,
-    or the row's observation window overlapping an observation window the
-    baseline cluster was itself seen in.
-
-    Returns `(matched, unmatched)`: `matched` has one row per `others` row
-    that found a baseline match (nearest one, if several clusters of the
-    same content exist), `unmatched` is everything left over.
-    """
-    empty_matched = others.clear().with_columns(
-        baseline_cluster_idx=pl.lit(None, dtype=pl.UInt32)
-    )
-    if others.is_empty() or baseline_clusters.is_empty():
-        return empty_matched, others
-
-    pairs = others.join(
-        baseline_clusters.select(
-            "data_hex",
-            "baseline_cluster_idx",
-            "cluster_obs_start",
-            "cluster_obs_end",
-        ),
-        on="data_hex",
-        how="inner",
-    )
-    if pairs.is_empty():
-        return empty_matched, others
-
-    window_overlap = (pl.col("obs_start") <= pl.col("cluster_obs_end")) & (
-        pl.col("obs_end") >= pl.col("cluster_obs_start")
-    )
-    dist = pl.min_horizontal(
-        (pl.col("received_at") - pl.col("cluster_obs_start")).abs(),
-        (pl.col("received_at") - pl.col("cluster_obs_end")).abs(),
-    )
-    pairs = pairs.with_columns(
-        _dist=pl.when(window_overlap).then(pl.duration(microseconds=0)).otherwise(dist),
-        _match_ok=window_overlap | (dist <= OTHER_DECODER_TOLERANCE),
-    )
-
-    matched = (
-        pairs.filter(pl.col("_match_ok"))
-        .sort("_dist")
-        .unique(subset=["_row_id"], keep="first")
-    )
-    unmatched = others.join(matched.select("_row_id"), on="_row_id", how="anti")
-    return matched, unmatched
-
-
-def _attach_others_to_baseline(
-    baseline_clusters: pl.DataFrame, matched: pl.DataFrame
-) -> pl.DataFrame:
-    """Fold matched low-trust decodes into their baseline cluster's row."""
-    if matched.is_empty():
-        attached = baseline_clusters.with_columns(
-            _other_decoders=pl.lit([], dtype=pl.List(pl.String)),
-            _other_observation_ids=pl.lit([], dtype=pl.List(pl.Int64)),
-            _other_sources=pl.lit([], dtype=baseline_clusters.schema["sources"]),
-        )
-    else:
-        agg = matched.group_by("baseline_cluster_idx").agg(
-            pl.col("decoder").alias("_other_decoders"),
-            pl.col("observation_id").alias("_other_observation_ids"),
-            pl.col("_source").alias("_other_sources"),
-        )
-        attached = baseline_clusters.join(agg, on="baseline_cluster_idx", how="left")
-        attached = attached.with_columns(
-            pl.col("_other_decoders").fill_null([]),
-            pl.col("_other_observation_ids").fill_null([]),
-            pl.col("_other_sources").fill_null([]),
-        )
-
-    return attached.with_columns(
-        decoders=pl.col("_other_decoders")
-        .list.concat(pl.col("baseline_decoders"))
-        .list.unique()
-        .list.sort(),
-        observation_ids=pl.concat_list(
-            [pl.col("baseline_observation_ids"), pl.col("_other_observation_ids")]
-        )
-        .list.unique()
-        .list.sort(),
-        sources=pl.concat_list([pl.col("sources"), pl.col("_other_sources")]),
-    ).select(
-        "data_hex",
-        "received_at",
-        "received_at_source",
-        "data_length_bytes",
-        "csp_crc_valid",
-        "csp_crc_source",
-        "rssi_db",
-        "rs_corrected_error_count",
-        "rs_correctable",
-        "decoders",
-        "observation_ids",
-        "sources",
-    )
-
-
-def _cluster_leftover_others(unmatched: pl.DataFrame) -> pl.DataFrame:
-    """Distinct-packet rows for content with no baseline-decoder decode at
-    all: clustered against themselves with the wide, low-trust tolerance,
-    reporting the earliest contributing decode as a best-effort `received_at`.
-    """
-    clustered = _cluster_by_content_and_time(
-        unmatched, tolerance=OTHER_DECODER_TOLERANCE, cluster_col="cluster_id"
-    )
-    return (
-        clustered.group_by(["data_hex", "cluster_id"], maintain_order=True)
-        .agg(
-            pl.col("received_at").min(),  # earliest available guess
-            pl.col("data_length_bytes").first(),
-            pl.col("csp_crc_valid").first(),
-            pl.col("csp_crc_source").first(),
-            pl.lit(None).alias("rssi_db"),
-            pl.lit(None).alias("rs_corrected_error_count"),
-            pl.lit(None).alias("rs_correctable"),
             pl.col("decoder").unique().sort().alias("decoders"),
             pl.col("observation_id").unique().sort().alias("observation_ids"),
             pl.col("_source").alias("sources"),
         )
-        .drop("cluster_id")
-        .with_columns(received_at_source=pl.lit("estimated"))
+        # Looked up only now, once per distinct packet, rather than carried
+        # through the sort and group-by above.
+        .join(
+            rows.select("_content_id", "_data").unique("_content_id"),
+            on="_content_id",
+            how="left",
+        )
+        .with_columns(
+            received_at=if_baseline.then("_baseline_at").otherwise("_earliest_at"),
+            received_at_source=if_baseline.then("received_at_source").otherwise(
+                pl.lit("estimated")
+            ),
+            rssi_db=if_baseline.then("rssi_db"),
+            rs_corrected_error_count=if_baseline.then("rs_corrected_error_count"),
+            rs_correctable=if_baseline.then("rs_correctable"),
+        )
     )
 
 
-def _finalize(df: pl.DataFrame) -> pl.DataFrame:
+def _finalize(df: pl.LazyFrame) -> pl.LazyFrame:
     """Encode the traceability columns to JSON and add id/bookkeeping columns."""
     quoted_decoders = pl.col("decoders").list.eval(pl.format('"{}"', pl.element()))
-    encoded_sources = pl.col("sources").list.eval(pl.element().struct.json_encode())
     df = df.with_columns(
+        data_hex=pl.col("_data").bin.encode("hex"),
         decoders="[" + quoted_decoders.list.join(",") + "]",
         observation_ids=(
             "["
@@ -396,7 +378,7 @@ def _finalize(df: pl.DataFrame) -> pl.DataFrame:
             + "]"
         ),
         packet_count=pl.col("sources").list.len(),
-        sources="[" + encoded_sources.list.join(",") + "]",
+        sources="[" + pl.col("sources").list.join(",") + "]",
     )
     df = df.with_columns(
         packet_id=(
@@ -429,47 +411,28 @@ def _finalize(df: pl.DataFrame) -> pl.DataFrame:
 
 
 def compute_distinct_packets(
-    packets_df: pl.DataFrame, observations_df: pl.DataFrame
+    packets: pl.DataFrame | pl.LazyFrame, observations: pl.DataFrame | pl.LazyFrame
 ) -> pl.DataFrame:
     """Pure computation: `raw_packets`/`raw_observations` -> distinct packets.
 
     Args:
-        packets: `raw_packets.parquet`, as exported by step 1.
+        packets: `raw_packets.parquet`, as exported by step 1 -- ideally a
+            `pl.scan_parquet` LazyFrame, so the noise filters are pushed
+            down into the scan.
         observations: `raw_observations.parquet`, as exported by step 1.
 
     Returns:
         One row per distinct received packet -- see module docstring for the
         merge/trust rules, and `_finalize` for the output schema.
     """
-    observations_df = observations_df.select(
-        observation_id=pl.col("id"),
-        obs_start=pl.col("start").dt.replace_time_zone("UTC"),
-        obs_end=pl.col("end").dt.replace_time_zone("UTC"),
-    )
-
-    packets_df = packets_df.filter(
-        pl.col("data_hex").is_not_null()
-        & (pl.col("data_hex") != "")
-        & pl.col("data_hex").str.starts_with(CTS1_CSP_HEADER_HEX)
-        & pl.col("rs_correctable")
-    )
-    packets_df = _complete_missing_crc(packets_df)
-    is_baseline = pl.col("decoder").is_in(BASELINE_DECODERS)
-
-    packets_df = packets_df.join(observations_df, on="observation_id", how="left")
-    packets_df = _with_source_struct(packets_df)
-
-    baseline = packets_df.filter(is_baseline).with_row_index("_row_id")
-    others = packets_df.filter(~is_baseline).with_row_index("_row_id")
-
-    baseline_clusters = _cluster_baseline(baseline)
-    matched, unmatched = _match_others_to_baseline(others, baseline_clusters)
-
-    baseline_final = _attach_others_to_baseline(baseline_clusters, matched)
-    leftover_final = _cluster_leftover_others(unmatched)
-
-    result = pl.concat([baseline_final, leftover_final], how="diagonal_relaxed")
-    return _finalize(result)
+    # Materialized once up front: every branch below (clustering, matching,
+    # the final aggregation) reads these rows and joins back on `_row_id`, so
+    # they must all see the exact same `_row_id` assignment -- not depend on
+    # the optimizer deduplicating the shared subplan.
+    rows = _prepare_rows(packets.lazy(), observations.lazy()).collect().lazy()
+    clusters = _assign_clusters(rows)
+    clustered_rows = rows.join(clusters, on="_row_id", how="inner")
+    return _finalize(_aggregate_clusters(clustered_rows)).collect()
 
 
 def _write_parquet_atomic(df: pl.DataFrame, path: Path) -> None:
@@ -495,39 +458,45 @@ def run(*, data_dir: Path = DEFAULT_DATA_DIR) -> None:
             msg = f"{path} not found -- run step_1 first."
             raise FileNotFoundError(msg)
 
-    logger.info(f"Reading {packets_path} and {observations_path}")
-    packets_df = pl.read_parquet(packets_path)
-    observations_df = pl.read_parquet(observations_path)
-
+    packets = pl.scan_parquet(packets_path)
+    observations = pl.scan_parquet(observations_path)
+    # Both counts come straight from the parquet footers.
+    raw_packet_count = packets.select(pl.len()).collect().item()
+    raw_observation_count = observations.select(pl.len()).collect().item()
     logger.info(
-        f"Loaded {len(packets_df):,} raw packets across "
-        f"{len(observations_df):,} raw observations."
+        f"Scanning {raw_packet_count:,} raw packets across "
+        f"{raw_observation_count:,} raw observations "
+        f"from {packets_path} and {observations_path}."
     )
 
-    result_df = compute_distinct_packets(packets_df, observations_df)
+    result_df = compute_distinct_packets(packets, observations)
 
     out_path = data_dir / OUTPUT_FILENAME
     _write_parquet_atomic(result_df, out_path)
 
-    logger.info(f"Done. {len(result_df):,} distinct packet(s) written to {out_path}.")
-
-    mean_packet_count = result_df["packet_count"].mean()
-    median_packet_count = result_df["packet_count"].median()
+    stats = result_df.select(
+        distinct=pl.len(),
+        contributing=pl.col("packet_count").sum(),
+        mean=pl.col("packet_count").mean(),
+        median=pl.col("packet_count").median(),
+    ).row(0, named=True)
+    logger.info(
+        f"Done. {stats['distinct']:,} distinct packet(s) written to {out_path}."
+    )
     logger.info(
         f"On average, each packet was received+decoded "
-        f"{mean_packet_count:.2f} times (mean) "
-        f"or {median_packet_count:.1f} times (median)."
+        f"{stats['mean']:.2f} times (mean) "
+        f"or {stats['median']:.1f} times (median)."
     )
 
-    # `packets_df.height` includes rows compute_distinct_packets drops before
+    # `raw_packet_count` includes rows compute_distinct_packets drops before
     # grouping (empty data_hex, RS-uncorrectable sso frames) -- those were
     # never "received+decoded copies" of anything, so they're excluded here
     # rather than inflating the ratio above.
-    contributing_packets = result_df["packet_count"].sum()
-    dropped_packets = packets_df.height - contributing_packets
+    dropped_packets = raw_packet_count - stats["contributing"]
     logger.info(
-        f"{packets_df.height:,} raw packets loaded, "
+        f"{raw_packet_count:,} raw packets loaded, "
         f"{dropped_packets:,} dropped as noise (e.g., RS errors, empty data_hex), "
-        f"{contributing_packets:,} received+decoded into "
-        f"{result_df.height:,} distinct packets."
+        f"{stats['contributing']:,} received+decoded into "
+        f"{stats['distinct']:,} distinct packets."
     )
