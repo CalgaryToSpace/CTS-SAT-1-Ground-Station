@@ -26,7 +26,7 @@ import pycountry
 from dotenv import load_dotenv
 from nicegui import ui
 
-from .satnogs_data import iter_future_observation_pages
+from cts1_mo_tools.satnogs_data import iter_future_observation_pages
 
 # -------------------------------------------------------------
 # CONSTANTS

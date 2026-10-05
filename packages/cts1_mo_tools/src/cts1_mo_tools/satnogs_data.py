@@ -14,6 +14,8 @@ SATNOGS_BASE = "https://network.satnogs.org/api"
 _LINK_NEXT_RE = re.compile(r'<([^>]+)>;\s*rel="next"')
 _SATNOGS_API_DATETIME_REQUEST_FORMAT = "%Y-%m-%dT%H:%M:%S"
 _MAX_RETRIES: Final = 6
+# The SatNOGS Network API can be very slow on large listings, so be generous.
+_REQUEST_TIMEOUT_SEC: Final = 120
 
 # The SatNOGS API does not reliably return every status when the `status`
 # filter is omitted, so an unfiltered listing is built by querying each of
@@ -39,7 +41,9 @@ def _get_with_retry(
 ) -> requests.Response:
     """GET with retry-with-backoff on 429/500, honoring Retry-After when present."""
     for attempt in range(_MAX_RETRIES):
-        r = requests.get(url, params=params, headers=headers, timeout=30)
+        r = requests.get(
+            url, params=params, headers=headers, timeout=_REQUEST_TIMEOUT_SEC
+        )
         if r.status_code not in (
             requests.codes.too_many_requests,
             requests.codes.internal_server_error,
