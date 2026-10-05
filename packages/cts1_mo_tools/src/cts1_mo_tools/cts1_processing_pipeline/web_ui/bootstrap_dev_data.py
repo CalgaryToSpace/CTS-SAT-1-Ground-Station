@@ -7,8 +7,8 @@ the same fixed filenames the pipeline itself writes -- so afterwards
 `cts1_serve_dashboard` finds them exactly as if they'd been produced here.
 
 Usage (uv):
-    uv run cts1_bootstrap_dev_data
-    uv run cts1_bootstrap_dev_data --data-dir output --only everything_decoded
+    uv run cts1_bootstrap_dashboard
+    uv run cts1_bootstrap_dashboard --data-dir output --only everything_decoded
 """
 
 from __future__ import annotations
