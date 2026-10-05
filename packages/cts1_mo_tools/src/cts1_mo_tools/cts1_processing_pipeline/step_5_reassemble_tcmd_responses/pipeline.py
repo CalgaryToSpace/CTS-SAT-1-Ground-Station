@@ -139,7 +139,7 @@ def _reassemble_lazy(lf: pl.LazyFrame) -> pl.LazyFrame:
         parts.select(_GROUP_KEY)
         .unique()
         .with_columns(tcmd_response_seq_num=pl.int_ranges(1, max_seq + 1))
-        .explode("tcmd_response_seq_num")
+        .explode("tcmd_response_seq_num", empty_as_null=True)
     )
 
     is_received = pl.col("packet_id").is_not_null()

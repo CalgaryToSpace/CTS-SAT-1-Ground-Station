@@ -187,8 +187,8 @@ def _observations_frame(page: list[dict[str, Any]]) -> pl.DataFrame:
     """One API page of observations, typed for `raw_observations`."""
     observations_df = pl.DataFrame(page, infer_schema_length=None)
     return observations_df.with_columns(
-        pl.col("start").cast(pl.Datetime).dt.replace_time_zone("UTC"),
-        pl.col("end").cast(pl.Datetime).dt.replace_time_zone("UTC"),
+        pl.col("start").str.to_datetime(time_unit="us", time_zone="UTC"),
+        pl.col("end").str.to_datetime(time_unit="us", time_zone="UTC"),
         pl.col("demoddata").struct.json_encode(),
     )
 
