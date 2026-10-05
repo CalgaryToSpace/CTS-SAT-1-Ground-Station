@@ -1746,13 +1746,13 @@ def _bulk_data_hex_to_general_message(hex_str: str) -> str:
     return text
 
 
-# Payloads decoded per chunk in `_decode_unique_payloads`: bounds how many
+# Payloads decoded per chunk in `_decode_distinct_payloads`: bounds how many
 # per-packet Python dicts are alive at once, which otherwise dwarf the
 # dataframe they end up in.
 _DECODE_CHUNK_SIZE = 20_000
 
 
-def _decode_unique_payloads(hex_payloads: pl.Series) -> pl.DataFrame:
+def _decode_distinct_payloads(hex_payloads: pl.Series) -> pl.DataFrame:
     """One row per distinct, decodable `hex_payload`, with its decoded fields.
 
     The hex parsing and CSP CRC-32C check run vectorized in polars, for every
@@ -1804,7 +1804,7 @@ def decode_to_df(
     input_columns_at_start = df.columns
 
     # Create a separate dataframe of decoded packets, then join back.
-    df_decoded = _decode_unique_payloads(df["hex_payload"])
+    df_decoded = _decode_distinct_payloads(df["hex_payload"])
 
     # `general_message` below unconditionally references these three --
     # guarantee they all exist even if this particular batch didn't happen
