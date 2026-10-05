@@ -77,5 +77,12 @@ docker compose run --rm daemon 69015 --start "2026-05-01" --interval 15
 docker compose start daemon
 ```
 
+Alternatively, let the regular daemon fill in history on its own while it
+has nothing else to do: set `CTS1_IDLE_BACKFILL: "1"` on the `daemon`
+service in `docker-compose.yml` (or pass `--idle-backfill`). It then lists
+and decodes everything before `--start`, back to launch, one 12h window at
+a time between its scheduled runs -- slower than a one-off backfill, but
+with no downtime. Progress shows in the logs and the web UI's daemon status.
+
 A backfill is worth raising the daemon's resource caps for -- see
 [docs/resource-tuning.md](docs/resource-tuning.md#backfills).

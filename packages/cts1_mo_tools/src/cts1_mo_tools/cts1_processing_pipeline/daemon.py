@@ -23,6 +23,11 @@ the web UI's "daemon is running..." indicator. Both files -- and the reason
 they're files rather than anything cleverer -- are described in
 `daemon_signals`.
 
+With idle backfill enabled (`idle_backfill`, or the `CTS1_IDLE_BACKFILL`
+environment variable), the daemon spends that sleep running steps 0 and 1
+over the history before `start` instead, back to the satellite's first
+observations, one 12h chunk at a time -- see `idle_backfill`.
+
 Invoked via the top-level CLI's `daemon` subcommand -- see
 `cts1_mo_tools.cts1_processing_pipeline.cli`.
 """
@@ -40,6 +45,7 @@ from loguru import logger
 from . import daemon_signals, resource_limits
 from .common import parse_start_filter
 from .daemon_signals import DaemonState, StatusReporter
+from .idle_backfill import IdleBackfill
 from .step_0_list_observations import pipeline as step_0_pipeline
 from .step_1_download_and_demodulate import pipeline as step_1_pipeline
 from .step_2_deduplicate_packets import pipeline as step_2_pipeline
@@ -48,6 +54,7 @@ from .step_4_detect_satellite_events import pipeline as step_4_pipeline
 from .step_5_reassemble_tcmd_responses import pipeline as step_5_pipeline
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 # What each step is announced as, both in the log ("Starting step 2/5:
@@ -129,7 +136,11 @@ def run_all_steps(  # noqa: PLR0913
 
 
 def sleep_until_next_run(
-    *, data_dir: Path, interval: float, reporter: StatusReporter
+    *,
+    data_dir: Path,
+    interval: float,
+    reporter: StatusReporter,
+    idle_work: Callable[[StatusReporter], bool] | None = None,
 ) -> bool:
     """Sleep `interval` minutes, waking early for a web UI trigger request.
 
@@ -137,9 +148,16 @@ def sleep_until_next_run(
     full interval elapsed. Consumes (deletes) the request before returning,
     so a request arriving *during* the run that follows is a fresh one that
     gets honoured on the next pass rather than being swallowed here.
+
+    `idle_work`, if given, is called repeatedly in place of sleeping, each
+    call doing one chunk of work and returning False once there's none
+    left (after which this sleeps as usual). The trigger request and the
+    deadline are checked between chunks, so a chunk in flight delays them
+    -- keep chunks short.
     """
     interval_sec = timedelta(minutes=interval).total_seconds()
     deadline = time.monotonic() + interval_sec
+    has_idle_work = idle_work is not None
 
     while True:
         request = daemon_signals.read_trigger_request(data_dir)
@@ -152,6 +170,12 @@ def sleep_until_next_run(
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return False
+
+        if has_idle_work:
+            assert idle_work is not None
+            has_idle_work = idle_work(reporter)
+            if has_idle_work:
+                continue
 
         next_run_at = datetime.now(UTC) + timedelta(seconds=remaining)
         reporter.set(
@@ -173,6 +197,7 @@ def run(  # noqa: PLR0913
     temp_dir: Path | None = None,
     force_rerun: bool = False,
     tools: tuple[str, ...] | None = None,
+    idle_backfill: bool = False,
 ) -> None:
     """Run steps 0-5 forever: one backfill of `start`, then a rerun every
     `interval` minutes covering the same span (plus whatever's new).
@@ -197,6 +222,8 @@ def run(  # noqa: PLR0913
         tools: Which step-1 decoders to run, from step 1's DECODERS. None
             (the default) runs all of them. Passed through to every step-1
             run.
+        idle_backfill: While waiting between runs, backfill steps 0 and 1
+            for the history before `start` -- see `idle_backfill`.
 
     Publishes its state to `data_dir` throughout (see `daemon_signals`) and,
     while sleeping, honours a trigger request left there by the web UI.
@@ -225,6 +252,19 @@ def run(  # noqa: PLR0913
             run_label=run_label,
         )
 
+    backfiller = (
+        IdleBackfill(
+            norad_id=norad_id,
+            data_dir=data_dir,
+            until=datetime.fromisoformat(start_at),
+            workers=workers,
+            temp_dir=temp_dir,
+            tools=tools,
+        )
+        if idle_backfill
+        else None
+    )
+
     with StatusReporter(data_dir) as reporter:
         # A request sitting here from before the daemon started is about
         # data this backfill is going to cover anyway -- drop it rather
@@ -237,7 +277,10 @@ def run(  # noqa: PLR0913
         while True:
             logger.info(f"Daemon: sleeping up to {interval} minute(s) until next run")
             was_triggered = sleep_until_next_run(
-                data_dir=data_dir, interval=interval, reporter=reporter
+                data_dir=data_dir,
+                interval=interval,
+                reporter=reporter,
+                idle_work=backfiller.run_next_chunk if backfiller else None,
             )
 
             logger.info(f"Daemon: requerying since {start_at}")

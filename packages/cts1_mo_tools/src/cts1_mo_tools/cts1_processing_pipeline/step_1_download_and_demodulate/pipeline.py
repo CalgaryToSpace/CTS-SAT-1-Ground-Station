@@ -16,7 +16,13 @@ from __future__ import annotations
 
 from . import _subprocess_registry
 
-__all__ = ["DB_FILENAME", "DEFAULT_DATA_DIR", "DEFAULT_DB_PATH", "run"]
+__all__ = [
+    "DB_FILENAME",
+    "DEFAULT_DATA_DIR",
+    "DEFAULT_DB_PATH",
+    "pending_observation_starts",
+    "run",
+]
 
 import concurrent.futures
 import tempfile
@@ -342,11 +348,51 @@ def _select_candidates(
     return candidates
 
 
+def _enabled_tools(tools: tuple[str, ...] | None) -> frozenset[str]:
+    """`tools` as a set, with None meaning every decoder in DECODERS.
+
+    Raises:
+        ValueError: If `tools` names something outside DECODERS.
+    """
+    if tools is None:
+        return frozenset(DECODERS)
+    unknown = set(tools) - set(DECODERS)
+    if unknown:
+        msg = f"Unknown tool(s) {sorted(unknown)}; choose from {DECODERS}"
+        raise ValueError(msg)
+    return frozenset(tools)
+
+
+def pending_observation_starts(
+    con: duckdb.DuckDBPyConnection,
+    *,
+    norad_id: str,
+    tools: tuple[str, ...] | None = None,
+    start_lt: datetime | None = None,
+) -> list[datetime]:
+    """Start times of the listed observations a `run` would decode, newest
+    first -- i.e. those with audio and/or demoddata still missing a
+    decoder_runs row for one of `tools`. `start_lt` bounds them by start
+    time, as in `db.load_observations`.
+
+    Lets a caller (the daemon's idle backfill) find what's left to decode
+    without decoding any of it.
+    """
+    candidates = _select_candidates(
+        db.load_observations(con, norad_id=norad_id, start_lt=start_lt),
+        done=db.already_decoded_pairs(con),
+        limit=None,
+        tools=_enabled_tools(tools),
+    )
+    return [obs["start"] for obs in candidates]
+
+
 def run(  # noqa: C901, PLR0913, PLR0915
     *,
     norad_id: str = "69015",
     data_dir: Path = DEFAULT_DATA_DIR,
     start: str | None = None,
+    end: str | None = None,
     limit: int | None = None,
     workers: int = resource_limits.DEFAULT_DECODER_WORKERS,
     temp_dir: Path | None = None,
@@ -365,6 +411,8 @@ def run(  # noqa: C901, PLR0913, PLR0915
         start: Only decode observations starting at/after this point: a
             duration like "3 days" (relative to now) or an ISO 8601
             date/datetime. None means every observation step 0 has listed.
+        end: Only decode observations starting before this point, in the
+            same syntax as `start`. None means no upper bound.
         limit: Cap the number of observations decoded this run (for testing).
         workers: Concurrency for the decoders (askew_demod_from_file,
             sso_rx_replay, gr_satellites --hexdump, gr_satellites
@@ -385,18 +433,12 @@ def run(  # noqa: C901, PLR0913, PLR0915
     Raises:
         ValueError: If `tools` names something outside DECODERS.
     """
-    if tools is None:
-        enabled_tools = frozenset(DECODERS)
-    else:
-        unknown = set(tools) - set(DECODERS)
-        if unknown:
-            msg = f"Unknown tool(s) {sorted(unknown)}; choose from {DECODERS}"
-            raise ValueError(msg)
-        enabled_tools = frozenset(tools)
+    enabled_tools = _enabled_tools(tools)
 
     db_path = data_dir / DB_FILENAME
 
     start_gte = parse_start_filter(start) if start is not None else None
+    start_lt = parse_start_filter(end) if end is not None else None
 
     total_decoded = 0
     last_checkpoint_at = time.monotonic()
@@ -423,7 +465,9 @@ def run(  # noqa: C901, PLR0913, PLR0915
         if force_rerun:
             logger.info("--force-rerun: ignoring decoder_runs history")
 
-        observations = db.load_observations(con, norad_id=norad_id, start_gte=start_gte)
+        observations = db.load_observations(
+            con, norad_id=norad_id, start_gte=start_gte, start_lt=start_lt
+        )
         candidates = _select_candidates(
             observations, done=done, limit=limit, tools=enabled_tools
         )
@@ -431,6 +475,7 @@ def run(  # noqa: C901, PLR0913, PLR0915
             f"{len(candidates)} of {len(observations)} listed observation(s) for "
             f"NORAD {norad_id}"
             + (f" starting after {start_gte.isoformat()}" if start_gte else "")
+            + (f" and before {start_lt.isoformat()}" if start_lt else "")
             + " need decoding"
         )
         logger.info(f"  Using tools: {sorted(enabled_tools)}")
