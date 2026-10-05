@@ -21,11 +21,8 @@ dependencies = [
     "duckdb>=1.5.5",
     "pyarrow>=25.0.1",
     "numpy",
-    "scipy",
-    "sgp4",
     "matplotlib",
-    "cartopy",
-    "pyproj",
+    "satkit>=0.24",
 ]
 
 [project.scripts]
