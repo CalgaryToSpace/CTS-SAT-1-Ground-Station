@@ -8,9 +8,9 @@ the basic and extended beacon packets, grouped by subsystem -- see
 `export_page` for the individual pages.
 
 Usage (uv):
-    uv run cts1_data_web_ui
-    uv run cts1_data_web_ui --data-dir output
-    uv run cts1_data_web_ui --hours 6
+    uv run cts1_serve_dashboard
+    uv run cts1_serve_dashboard --data-dir output
+    uv run cts1_serve_dashboard --hours 6
 """
 
 # pyright: standard
@@ -91,6 +91,8 @@ def _build_uvicorn_log_config() -> dict:
     return config
 
 
+APP_TITLE = "FrontierSat Dashboard 🐮"
+
 NAV_LINKS = (
     ("Beacon Data", "/"),
     ("Browse Packets", "/browse-packets"),
@@ -100,6 +102,12 @@ NAV_LINKS = (
     ("Pipeline Status", "/pipeline-status"),
     ("Export Data", "/export"),
 )
+
+
+def _page_title(path: str) -> str:
+    """Browser tab title for the page at `path`, e.g. "Beacon Data | <app>"."""
+    label = next(label for label, link in NAV_LINKS if link == path)
+    return f"{label} | {APP_TITLE}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,7 +137,7 @@ def _build_pages(args: Args) -> None:  # noqa: C901
             app.storage.user["dark_mode"] = dark.value
 
         with ui.header().classes("items-center gap-4"):
-            ui.label("FrontierSat Data").classes("text-lg font-bold")
+            ui.label(APP_TITLE).classes("text-lg font-bold")
             with ui.row().classes("items-center gap-0 ml-4 divide-x divide-white/25"):
                 for label, path in NAV_LINKS:
                     ui.link(label, path).classes(
@@ -144,37 +152,37 @@ def _build_pages(args: Args) -> None:  # noqa: C901
                 backward=lambda is_dark: "light_mode" if is_dark else "dark_mode",
             ).tooltip("Toggle dark mode")
 
-    @ui.page("/")
+    @ui.page("/", title=_page_title("/"))
     def beacon_stats_page() -> None:
         _nav()
         build_beacon_stats_page(args.data_dir, args.hours)
 
-    @ui.page("/browse-packets")
+    @ui.page("/browse-packets", title=_page_title("/browse-packets"))
     def packet_browser_page() -> None:
         _nav()
         build_packet_browser_page(args.data_dir)
 
-    @ui.page("/satellite-events")
+    @ui.page("/satellite-events", title=_page_title("/satellite-events"))
     def satellite_events_page() -> None:
         _nav()
         build_satellite_events_page(args.data_dir)
 
-    @ui.page("/file-reassembler")
+    @ui.page("/file-reassembler", title=_page_title("/file-reassembler"))
     def file_reassembler_page() -> None:
         _nav()
         build_file_reassembler_page(args.data_dir)
 
-    @ui.page("/overpasses")
+    @ui.page("/overpasses", title=_page_title("/overpasses"))
     def overpasses_page() -> None:
         _nav()
         build_overpasses_page()
 
-    @ui.page("/pipeline-status")
+    @ui.page("/pipeline-status", title=_page_title("/pipeline-status"))
     def pipeline_status_page() -> None:
         _nav()
         build_pipeline_status_page(args.data_dir)
 
-    @ui.page("/export")
+    @ui.page("/export", title=_page_title("/export"))
     def export_page() -> None:
         _nav()
         build_export_page(args.data_dir)
@@ -194,7 +202,7 @@ def main() -> None:
     # `_build_uvicorn_log_config`. `uvicorn_logging_level=None` is required
     # for that log_config's per-logger levels to actually stick.
     ui.run(
-        title="FrontierSat Data",
+        title=APP_TITLE,
         port=args.port,
         reload=False,
         uvicorn_logging_level=None,  # pyright: ignore[reportArgumentType]

@@ -4,11 +4,11 @@ pipeline output instead of running the whole pipeline locally.
 Fetches every table in `export_tables.TABLE_SPECS` from the server's
 `/raw-export/{table_key}` route (see `export_raw`) into `--data-dir`, under
 the same fixed filenames the pipeline itself writes -- so afterwards
-`cts1_data_web_ui` finds them exactly as if they'd been produced here.
+`cts1_serve_dashboard` finds them exactly as if they'd been produced here.
 
 Usage (uv):
-    uv run cts1_bootstrap_dev_data
-    uv run cts1_bootstrap_dev_data --data-dir output --only everything_decoded
+    uv run cts1_bootstrap_dashboard
+    uv run cts1_bootstrap_dashboard --data-dir output --only everything_decoded
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ class Args:
     """Download the web UI's parquet files from a deployed server."""
 
     data_dir: Path = step_1_pipeline.DEFAULT_DATA_DIR
-    """Directory to save the files in -- the same one `cts1_data_web_ui
+    """Directory to save the files in -- the same one `cts1_serve_dashboard
     --data-dir` reads from."""
 
     base_url: str = DEFAULT_BASE_URL
@@ -106,7 +106,7 @@ def main() -> None:
     if failed:
         logger.error(f"Failed to download: {', '.join(failed)}")
         sys.exit(1)
-    logger.info("Done -- run `uv run cts1_data_web_ui` next.")
+    logger.info("Done -- run `uv run cts1_serve_dashboard` next.")
 
 
 if __name__ == "__main__":
