@@ -16,6 +16,7 @@ Usage (uv):
     uv run cts1_processing_pipeline step_3
     uv run cts1_processing_pipeline step_4
     uv run cts1_processing_pipeline step_5
+    uv run cts1_processing_pipeline step_6
     uv run cts1_processing_pipeline daemon
     uv run cts1_processing_pipeline daemon --start "3 days" --interval 5
     uv run cts1_processing_pipeline daemon --idle-backfill
@@ -50,6 +51,9 @@ from .step_3_decode_packets import pipeline as step_3_decode_packets
 from .step_4_detect_satellite_events import pipeline as step_4_detect_satellite_events
 from .step_5_reassemble_tcmd_responses import (
     pipeline as step_5_reassemble_tcmd_responses,
+)
+from .step_6_deduplicate_gnss_samples import (
+    pipeline as step_6_deduplicate_gnss_samples,
 )
 
 DEFAULT_DATA_DIR = step_0_list_observations.DEFAULT_DATA_DIR
@@ -136,9 +140,15 @@ class Step5Args:
 
 
 @dataclass(frozen=True, slots=True)
+class Step6Args:
+    """Step 6: de-duplicate GNSS samples (ignoring the downlink counter) from
+    everything_decoded into distinct_gnss_samples, counting receptions."""
+
+
+@dataclass(frozen=True, slots=True)
 class DaemonArgs:
-    """Daemon: run steps 0-5 continuously -- an initial backfill of
-    `--start`, then a full steps 0-5 rerun every `--interval` minutes."""
+    """Daemon: run steps 0-6 continuously -- an initial backfill of
+    `--start`, then a full steps 0-6 rerun every `--interval` minutes."""
 
     norad_id: Annotated[str, tyro.conf.Positional] = "69015"
     """NORAD catalog ID of the satellite (default: 69015, CTS-SAT-1)."""
@@ -153,7 +163,7 @@ class DaemonArgs:
     """Minutes between runs. Each run re-lists only the tail of the SatNOGS
     listing windows that haven't settled yet (about the last hour of
     observations), then decodes whatever's new and reruns steps 2 through
-    5."""
+    6."""
 
     limit: int | None = None
     """Cap the number of observations decoded per step-1 run (for testing)."""
@@ -187,6 +197,7 @@ Command = (
     | Annotated[Step3Args, tyro.conf.subcommand(name="step_3", prefix_name=False)]
     | Annotated[Step4Args, tyro.conf.subcommand(name="step_4", prefix_name=False)]
     | Annotated[Step5Args, tyro.conf.subcommand(name="step_5", prefix_name=False)]
+    | Annotated[Step6Args, tyro.conf.subcommand(name="step_6", prefix_name=False)]
     | Annotated[DaemonArgs, tyro.conf.subcommand(name="daemon", prefix_name=False)]
 )
 
@@ -263,6 +274,8 @@ def main() -> None:
             step_4_detect_satellite_events.run(data_dir=args.data_dir)
         elif isinstance(args.command, Step5Args):
             step_5_reassemble_tcmd_responses.run(data_dir=args.data_dir)
+        elif isinstance(args.command, Step6Args):
+            step_6_deduplicate_gnss_samples.run(data_dir=args.data_dir)
         elif isinstance(args.command, DaemonArgs):  # pyright: ignore[reportUnnecessaryIsInstance]
             daemon.run(
                 norad_id=args.command.norad_id,

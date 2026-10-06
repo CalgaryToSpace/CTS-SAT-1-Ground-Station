@@ -52,6 +52,9 @@ from cts1_mo_tools.cts1_processing_pipeline.step_4_detect_satellite_events impor
 from cts1_mo_tools.cts1_processing_pipeline.step_5_reassemble_tcmd_responses import (
     pipeline as step_5_pipeline,
 )
+from cts1_mo_tools.cts1_processing_pipeline.step_6_deduplicate_gnss_samples import (
+    pipeline as step_6_pipeline,
+)
 
 from . import pipeline_status
 
@@ -195,6 +198,18 @@ TABLE_SPECS: tuple[TableSpec, ...] = (
             "'?' characters."
         ),
         filename=step_5_pipeline.OUTPUT_FILENAME,
+        time_column="first_received_at",
+        has_packet_type=False,
+    ),
+    TableSpec(
+        key="distinct_gnss_samples",
+        step="Step 6 -- De-duplicate GNSS Samples",
+        description=(
+            "GNSS_BESTXYZB_SAMPLE packets de-duplicated by content (ignoring "
+            "the downlink counter), one row per distinct GNSS sample, with "
+            "how many times it was received."
+        ),
+        filename=step_6_pipeline.OUTPUT_FILENAME,
         time_column="first_received_at",
         has_packet_type=False,
     ),

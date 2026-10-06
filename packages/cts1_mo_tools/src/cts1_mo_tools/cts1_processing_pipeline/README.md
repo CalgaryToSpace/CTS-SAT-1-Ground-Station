@@ -53,11 +53,17 @@ web UI as two containers sharing that directory.
 * Logic: a response too long for one downlink frame is split across several packets sharing one `tcmd_ts_sent`, numbered `tcmd_response_seq_num` 1..`tcmd_response_max_seq_num`. Group packets by `tcmd_ts_sent` (plus the response code/duration/part count every part shares), order by sequence number, and join their `tcmd_response_text` back together. Any never-received part is filled with a full frame's worth (186) of `?` characters. Single-packet responses pass through as groups of one.
 * Output: `reassembled_tcmd_responses.parquet` -- one row per telecommand response, with `tcmd_ts_sent`/`tcmd_sent_at`, `part_count`, `received_part_count`, `missing_seq_nums`, `is_complete`, `packet_ids`, and the reassembled `tcmd_response_text`.
 
+### Step 6: De-duplicate GNSS samples
+
+* Read the `everything_decoded.parquet` table from step 3, filtered to `GNSS_BESTXYZB_SAMPLE` rows with a valid CSP CRC. Independent of steps 4 and 5 (all only depend on step 3).
+* Logic: the satellite can downlink the same GNSS sample many times, each with a new `downlink_seq_num`, so step 2 keeps every downlink as its own packet. Group the packets by their bytes with the downlink counter (and the CRC covering it) cut out -- the `ring_position` field plus the raw BESTXYZB log -- to get one row per distinct sample. The decoded `gnss_*` fields come from the earliest-received copy.
+* Output: `distinct_gnss_samples.parquet` -- one row per distinct GNSS sample, with `gnss_sample_id`, `first_received_at`/`last_received_at`, `receive_count` (how many downlinks of it were received), `decode_count` (total decodes across ground stations/decoders), `downlink_seq_nums`, `packet_ids`, `gnss_sample_hex`, and every decoded `gnss_*` field.
+
 ### Daemon
 
-* Runs steps 0-5 continuously instead of one-off: an initial backfill of `--start` (default: 24h), then a rerun of steps 0 through 5 every `--interval` minutes (default: 15).
+* Runs steps 0-6 continuously instead of one-off: an initial backfill of `--start` (default: 24h), then a rerun of steps 0 through 6 every `--interval` minutes (default: 15).
 * `--start` is resolved to an absolute time once, at startup, and every run covers the same span: step 0 only re-lists the tail of the listing windows that haven't settled yet (about the last hour of observations), and step 1 only decodes observations not already recorded in `decoder_runs`. So a SatNOGS observation that was still uploading during one run is picked up by the next.
-* With `--idle-backfill` (or `CTS1_IDLE_BACKFILL=1`), the time between runs is spent backfilling steps 0 and 1 for the history before `--start`, back to the satellite's first observations: one 12h listing window at a time, newest first, picking only windows step 0 hasn't listed or with observations step 1 hasn't decoded. A trigger request or the next scheduled run is honoured between windows. Steps 2-5 pick up the backfilled packets on the next run.
+* With `--idle-backfill` (or `CTS1_IDLE_BACKFILL=1`), the time between runs is spent backfilling steps 0 and 1 for the history before `--start`, back to the satellite's first observations: one 12h listing window at a time, newest first, picking only windows step 0 hasn't listed or with observations step 1 hasn't decoded. A trigger request or the next scheduled run is honoured between windows. Steps 2-6 pick up the backfilled packets on the next run.
 * Runs until interrupted (Ctrl+C).
 
 ### Web UI

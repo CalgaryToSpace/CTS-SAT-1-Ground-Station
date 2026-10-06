@@ -16,7 +16,7 @@ A window is a chunk worth backfilling when either:
 
 Both checks read the same DuckDB tables the steps themselves use, so a
 window backfilled by an earlier daemon process (or by a one-off backfill
-run) is never redone. Steps 2-5 aren't run per chunk: they reprocess
+run) is never redone. Steps 2-6 aren't run per chunk: they reprocess
 everything step 1 has landed on every requery, so backfilled packets show
 up after the next one.
 

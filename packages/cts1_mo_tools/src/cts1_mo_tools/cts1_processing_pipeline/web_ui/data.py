@@ -14,13 +14,16 @@ __all__ = [
     "ATTITUDE_COLUMNS",
     "ATTITUDE_MODE_COLUMNS",
     "BEACON_PACKET_TYPES",
+    "DEFAULT_DISTINCT_GNSS_SAMPLES_PATH",
     "DEFAULT_PARQUET_PATH",
     "DEFAULT_REASSEMBLED_TCMD_PATH",
+    "GNSS_RECEIVE_COUNT_CAP",
     "latest_beacons",
     "latest_local_max_pending_tcmd_count",
     "load_attitude_window",
     "load_beacon_window",
     "load_bulk_file_downlink_packets",
+    "load_gnss_sample_counts_per_window",
     "load_packet_counts_per_window",
     "load_reassembled_tcmd_responses",
 ]
@@ -35,6 +38,9 @@ from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
 from cts1_mo_tools.cts1_processing_pipeline.step_5_reassemble_tcmd_responses import (
     pipeline as step_5_pipeline,
 )
+from cts1_mo_tools.cts1_processing_pipeline.step_6_deduplicate_gnss_samples import (
+    pipeline as step_6_pipeline,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -47,6 +53,13 @@ DEFAULT_PARQUET_PATH = (
 DEFAULT_REASSEMBLED_TCMD_PATH = (
     step_5_pipeline.DEFAULT_DATA_DIR / step_5_pipeline.OUTPUT_FILENAME
 )
+DEFAULT_DISTINCT_GNSS_SAMPLES_PATH = (
+    step_6_pipeline.DEFAULT_DATA_DIR / step_6_pipeline.OUTPUT_FILENAME
+)
+
+# Distinct GNSS samples received this many times or more share one bucket in
+# `load_gnss_sample_counts_per_window`.
+GNSS_RECEIVE_COUNT_CAP = 4
 
 BEACON_PACKET_TYPES = ("BEACON_BASIC", "BEACON_EXTENDED")
 
@@ -104,6 +117,49 @@ def load_packet_counts_per_window(
         )
         .agg(count=pl.len())
         .sort("window_start", "packet_type")
+        .collect()
+    )
+
+
+def load_gnss_sample_counts_per_window(
+    path: Path = DEFAULT_DISTINCT_GNSS_SAMPLES_PATH,
+    *,
+    since: datetime | None = None,
+    every: timedelta,
+) -> pl.DataFrame:
+    """Distinct GNSS sample counts (step 6) first received at/after `since`,
+    bucketed into `every`-wide windows of `first_received_at` and split by
+    how many times each sample was received (`times_received`: "1x", "2x",
+    ..., with everything at `GNSS_RECEIVE_COUNT_CAP` or above lumped into
+    one "Nx+" bucket).
+
+    Same shape and window alignment as `load_packet_counts_per_window`, so
+    it can be drawn the same way.
+    """
+    lf = _scan(path)
+    if lf is None:
+        return pl.DataFrame(
+            schema={
+                "window_start": pl.Datetime("us", "UTC"),
+                "times_received": pl.String,
+                "count": pl.UInt32,
+            }
+        )
+    lf = lf.select("first_received_at", "receive_count")
+    if since is not None:
+        lf = lf.filter(pl.col("first_received_at") >= since)
+    receive_count = pl.col("receive_count")
+    return (
+        lf.group_by(
+            window_start=pl.col("first_received_at").dt.truncate(every),
+            times_received=(
+                pl.when(receive_count >= GNSS_RECEIVE_COUNT_CAP)
+                .then(pl.lit(f"{GNSS_RECEIVE_COUNT_CAP}x+"))
+                .otherwise(pl.format("{}x", receive_count))
+            ),
+        )
+        .agg(count=pl.len())
+        .sort("window_start", "times_received")
         .collect()
     )
 

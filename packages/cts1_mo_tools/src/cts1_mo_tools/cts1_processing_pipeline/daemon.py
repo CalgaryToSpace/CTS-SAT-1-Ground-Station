@@ -1,6 +1,6 @@
-"""Daemon: run steps 0-5 continuously.
+"""Daemon: run steps 0-6 continuously.
 
-Runs steps 0 through 5 once as a backfill of `start` (a duration like "24
+Runs steps 0 through 6 once as a backfill of `start` (a duration like "24
 hours" or an ISO 8601 date/datetime -- same syntax as step 0/1's own
 `--start`), then again every `interval` minutes.
 
@@ -52,6 +52,7 @@ from .step_2_deduplicate_packets import pipeline as step_2_pipeline
 from .step_3_decode_packets import pipeline as step_3_pipeline
 from .step_4_detect_satellite_events import pipeline as step_4_pipeline
 from .step_5_reassemble_tcmd_responses import pipeline as step_5_pipeline
+from .step_6_deduplicate_gnss_samples import pipeline as step_6_pipeline
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -68,6 +69,7 @@ STEP_NAMES = {
     3: "decode packets",
     4: "detect satellite events",
     5: "reassemble telecommand responses",
+    6: "deduplicate GNSS samples",
 }
 LAST_STEP = max(STEP_NAMES)
 
@@ -90,7 +92,7 @@ def run_all_steps(  # noqa: PLR0913
     reporter: StatusReporter,
     run_label: str,
 ) -> None:
-    """Run steps 0-5 once, publishing which step is in flight as it goes.
+    """Run steps 0-6 once, publishing which step is in flight as it goes.
 
     `start` bounds both step 0's listing and step 1's decoding -- see the
     module docstring.
@@ -127,10 +129,12 @@ def run_all_steps(  # noqa: PLR0913
     step_3_pipeline.run(data_dir=data_dir)
     announce(4)
     step_4_pipeline.run(data_dir=data_dir)
-    # Steps 4 and 5 are independent (both only read step 3's output); they
+    # Steps 4, 5 and 6 are independent (all only read step 3's output); they
     # just run one after the other here to keep the daemon single-threaded.
     announce(5)
     step_5_pipeline.run(data_dir=data_dir)
+    announce(6)
+    step_6_pipeline.run(data_dir=data_dir)
 
     logger.info(f"Finished steps 0-{LAST_STEP} -- {run_label}.")
 
@@ -199,7 +203,7 @@ def run(  # noqa: PLR0913
     tools: tuple[str, ...] | None = None,
     idle_backfill: bool = False,
 ) -> None:
-    """Run steps 0-5 forever: one backfill of `start`, then a rerun every
+    """Run steps 0-6 forever: one backfill of `start`, then a rerun every
     `interval` minutes covering the same span (plus whatever's new).
 
     Args:

@@ -187,6 +187,9 @@ def _counts_section(
             _stat_tile("Decoded packets", f"{counts.total_decoded_packets:,}")
             _stat_tile("Satellite events", f"{counts.total_satellite_events:,}")
             _stat_tile("TCMD responses", f"{counts.total_tcmd_responses:,}")
+            _stat_tile(
+                "Distinct GNSS samples", f"{counts.total_distinct_gnss_samples:,}"
+            )
         if counts.decode_backlog:
             with ui.row().classes("items-center gap-2 mt-2"):
                 ui.icon("warning", color="warning")
@@ -242,6 +245,15 @@ def _counts_section(
                     counts.latest_tcmd_responses_at,
                     source=(
                         "Step 5 · reassembled_tcmd_responses.parquet · "
+                        "file last-written time (rewritten whole on every "
+                        "run, so no per-row timestamp)"
+                    ),
+                )
+                _freshness_row(
+                    "Latest GNSS sample de-duplication run (step 6)",
+                    counts.latest_distinct_gnss_samples_at,
+                    source=(
+                        "Step 6 · distinct_gnss_samples.parquet · "
                         "file last-written time (rewritten whole on every "
                         "run, so no per-row timestamp)"
                     ),

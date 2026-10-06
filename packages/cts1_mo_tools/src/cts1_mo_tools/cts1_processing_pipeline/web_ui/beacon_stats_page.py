@@ -21,6 +21,9 @@ from nicegui import run, ui
 from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
     pipeline as step_3_pipeline,
 )
+from cts1_mo_tools.cts1_processing_pipeline.step_6_deduplicate_gnss_samples import (
+    pipeline as step_6_pipeline,
+)
 
 from . import data as beacon_data
 from .attitude_view import AttitudePlayer
@@ -43,7 +46,7 @@ REFRESH_INTERVAL_SEC = 30.0
 # browser to finish mounting its charts before giving up and hiding anyway.
 CHART_MOUNT_TIMEOUT_SEC = 15.0
 
-# Bucket width for the "SatNOGS Stats" packet-count histogram.
+# Bucket width for the "Packet Counts" histograms.
 PACKET_COUNT_WINDOW = timedelta(hours=6)
 
 # label -> hours
@@ -371,19 +374,35 @@ def _render_chart_group(title: str, options: list[dict[str, Any]]) -> None:
         container = ui.column().classes("w-full")
 
 
-def _chart_groups(path: Path, *, since: datetime | None) -> None:
+def _chart_groups(
+    path: Path, gnss_samples_path: Path, *, since: datetime | None
+) -> None:
     beacons = beacon_data.load_beacon_window(path, since=since)
     packet_counts = beacon_data.load_packet_counts_per_window(
         path, since=since, every=PACKET_COUNT_WINDOW
+    )
+    gnss_sample_counts = beacon_data.load_gnss_sample_counts_per_window(
+        gnss_samples_path, since=since, every=PACKET_COUNT_WINDOW
     )
 
     for title, specs in BEACON_CHART_GROUPS:
         _render_chart_group(title, _chart_options(specs, beacons))
 
-    histogram = packet_counts_histogram_option(
-        packet_counts, title="Packets Received per 6h Window, by Packet Type"
-    )
-    _render_chart_group("SatNOGS Stats", [histogram] if histogram else [])
+    histograms = [
+        packet_counts_histogram_option(
+            packet_counts, title="Packets Received per 6h Window, by Packet Type"
+        ),
+        packet_counts_histogram_option(
+            gnss_sample_counts,
+            title=(
+                "Distinct GNSS Samples per 6h Window (by First Received), "
+                "by Times Received"
+            ),
+            series_column="times_received",
+            y_axis_name="samples",
+        ),
+    ]
+    _render_chart_group("Packet Counts", [h for h in histograms if h is not None])
 
 
 def _chart_options(specs: list[ChartSpec], df: pl.DataFrame) -> list[dict[str, Any]]:
@@ -399,6 +418,7 @@ def _window_label_for_hours(hours: float) -> str:
 
 def build_beacon_stats_page(data_dir: Path, hours: float) -> None:
     parquet_path = data_dir / step_3_pipeline.OUTPUT_FILENAME
+    gnss_samples_path = data_dir / step_6_pipeline.OUTPUT_FILENAME
     state: dict[str, float] = {"hours": hours}
     ui_state: dict[str, bool] = {}
 
@@ -426,7 +446,7 @@ def build_beacon_stats_page(data_dir: Path, hours: float) -> None:
     @ui.refreshable
     def chart_section() -> None:
         since = datetime.now(UTC) - timedelta(hours=state["hours"])
-        _chart_groups(parquet_path, since=since)
+        _chart_groups(parquet_path, gnss_samples_path, since=since)
 
     def _on_window_change(label: str) -> None:
         state["hours"] = WINDOW_CHOICES[label]

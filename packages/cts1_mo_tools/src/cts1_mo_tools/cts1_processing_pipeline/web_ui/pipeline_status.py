@@ -2,7 +2,8 @@
 page: row counts and freshness timestamps at every stage (step 1's raw
 SatNOGS observations/packets/decoder runs, step 2's deduplicated distinct
 packets, step 3's fully decoded packets, step 4's detected satellite
-events, step 5's reassembled telecommand responses), plus a per-decoder-tool scoreboard.
+events, step 5's reassembled telecommand responses, step 6's distinct GNSS
+samples), plus a per-decoder-tool scoreboard.
 
 Pure data layer: no NiceGUI/rendering concerns live here, just polars -- see
 `data.py` for the analogous loader over step 3's final
@@ -15,6 +16,7 @@ __all__ = [
     "DECODED_PACKETS_FILENAME",
     "DECODER_RUNS_FILENAME",
     "DEFAULT_DATA_DIR",
+    "DISTINCT_GNSS_SAMPLES_FILENAME",
     "DISTINCT_PACKETS_FILENAME",
     "LISTING_HISTORY_FILENAME",
     "LISTING_WINDOWS_FILENAME",
@@ -58,6 +60,9 @@ from cts1_mo_tools.cts1_processing_pipeline.step_4_detect_satellite_events impor
 from cts1_mo_tools.cts1_processing_pipeline.step_5_reassemble_tcmd_responses import (
     pipeline as step_5_pipeline,
 )
+from cts1_mo_tools.cts1_processing_pipeline.step_6_deduplicate_gnss_samples import (
+    pipeline as step_6_pipeline,
+)
 
 if TYPE_CHECKING:
     from datetime import timedelta
@@ -76,6 +81,7 @@ DISTINCT_PACKETS_FILENAME = step_2_pipeline.OUTPUT_FILENAME
 DECODED_PACKETS_FILENAME = step_3_pipeline.OUTPUT_FILENAME
 SATELLITE_EVENTS_FILENAME = step_4_pipeline.OUTPUT_FILENAME
 TCMD_RESPONSES_FILENAME = step_5_pipeline.OUTPUT_FILENAME
+DISTINCT_GNSS_SAMPLES_FILENAME = step_6_pipeline.OUTPUT_FILENAME
 
 
 def _scan(path: Path) -> pl.LazyFrame | None:
@@ -133,6 +139,7 @@ class PipelineCounts:
     total_decoded_packets: int
     total_satellite_events: int
     total_tcmd_responses: int
+    total_distinct_gnss_samples: int
     latest_observation_end: datetime | None
     latest_packet_received_at: datetime | None
     latest_packet_ingested_at: datetime | None
@@ -140,6 +147,7 @@ class PipelineCounts:
     latest_decoded_at: datetime | None
     latest_satellite_events_at: datetime | None
     latest_tcmd_responses_at: datetime | None
+    latest_distinct_gnss_samples_at: datetime | None
 
     @property
     def decode_backlog(self) -> int:
@@ -161,6 +169,8 @@ def pipeline_counts(data_dir: Path = DEFAULT_DATA_DIR) -> PipelineCounts:
     satellite_events_lf = _scan(satellite_events_path)
     tcmd_responses_path = data_dir / TCMD_RESPONSES_FILENAME
     tcmd_responses_lf = _scan(tcmd_responses_path)
+    distinct_gnss_samples_path = data_dir / DISTINCT_GNSS_SAMPLES_FILENAME
+    distinct_gnss_samples_lf = _scan(distinct_gnss_samples_path)
 
     return PipelineCounts(
         total_observations=_row_count(raw_observations_lf),
@@ -169,6 +179,7 @@ def pipeline_counts(data_dir: Path = DEFAULT_DATA_DIR) -> PipelineCounts:
         total_decoded_packets=_row_count(decoded_packets_lf),
         total_satellite_events=_row_count(satellite_events_lf),
         total_tcmd_responses=_row_count(tcmd_responses_lf),
+        total_distinct_gnss_samples=_row_count(distinct_gnss_samples_lf),
         latest_observation_end=_max_datetime(raw_observations_lf, "end"),
         latest_packet_received_at=_max_datetime(raw_packets_lf, "received_at"),
         latest_packet_ingested_at=_max_datetime(raw_packets_lf, "ingested_at"),
@@ -176,6 +187,7 @@ def pipeline_counts(data_dir: Path = DEFAULT_DATA_DIR) -> PipelineCounts:
         latest_decoded_at=_file_mtime(decoded_packets_path),
         latest_satellite_events_at=_file_mtime(satellite_events_path),
         latest_tcmd_responses_at=_file_mtime(tcmd_responses_path),
+        latest_distinct_gnss_samples_at=_file_mtime(distinct_gnss_samples_path),
     )
 
 

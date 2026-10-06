@@ -453,23 +453,30 @@ def chart_option(spec: ChartSpec, df: pl.DataFrame) -> dict[str, Any] | None:
 
 
 def packet_counts_histogram_option(
-    counts: pl.DataFrame, *, title: str
+    counts: pl.DataFrame,
+    *,
+    title: str,
+    series_column: str = "packet_type",
+    y_axis_name: str = "packets",
 ) -> dict[str, Any] | None:
     """ECharts stacked-bar `option` of packet counts per time window, one
-    stacked series per `packet_type`, or None if there are no packets.
+    stacked series per distinct `series_column` value, or None if there are
+    no packets.
 
-    `counts` is `data.load_packet_counts_per_window`'s output. Windows where a
-    type has no packets are filled with 0 so every stack lines up.
+    `counts` is `data.load_packet_counts_per_window`'s output (or anything
+    shaped like it, e.g. `data.load_gnss_sample_counts_per_window`'s, with
+    its own `series_column`). Windows where a series has no packets are
+    filled with 0 so every stack lines up.
     """
     if counts.height == 0:
         return None
 
     windows = counts["window_start"].unique().sort()
-    packet_types = counts["packet_type"].unique().sort().to_list()
+    packet_types = counts[series_column].unique().sort().to_list()
     lookup = {
         (ts, pt): n
         for ts, pt, n in counts.select(
-            "window_start", "packet_type", "count"
+            "window_start", series_column, "count"
         ).iter_rows()
     }
 
@@ -492,7 +499,7 @@ def packet_counts_histogram_option(
         "tooltip": {"trigger": "axis", "axisPointer": {"type": "shadow"}},
         "legend": {"show": True, "top": 26, "type": "scroll"},
         "xAxis": {"type": "time"},
-        "yAxis": {"type": "value", "name": "packets", "minInterval": 1},
+        "yAxis": {"type": "value", "name": y_axis_name, "minInterval": 1},
         "dataZoom": [{"type": "inside"}],
         "series": series,
     }
