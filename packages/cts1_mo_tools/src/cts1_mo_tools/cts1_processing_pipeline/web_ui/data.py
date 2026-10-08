@@ -189,7 +189,7 @@ def _filter_to_ranges(
 def load_bulk_file_downlink_packets(
     path: Path = DEFAULT_PARQUET_PATH,
     *,
-    ranges: Sequence[tuple[datetime, datetime]] = (),
+    ranges: tuple[tuple[datetime, datetime], ...] = (),
 ) -> pl.DataFrame:
     """`BULK_FILE_DOWNLINK` packets restricted to the union of `ranges`,
     ordered by `bulk_file_offset` (the order file-reassembly cares about,
@@ -215,7 +215,7 @@ def load_bulk_file_downlink_packets(
 def load_reassembled_tcmd_responses(
     path: Path = DEFAULT_REASSEMBLED_TCMD_PATH,
     *,
-    ranges: Sequence[tuple[datetime, datetime]] = (),
+    ranges: tuple[tuple[datetime, datetime], ...] = (),
 ) -> pl.DataFrame | None:
     """Step 5's reassembled telecommand responses (one row per response,
     multi-packet ones already joined back together) whose
@@ -238,7 +238,7 @@ def latest_beacons(
     path: Path = DEFAULT_PARQUET_PATH,
     n: int = 10,
     *,
-    packet_types: Sequence[str] = BEACON_PACKET_TYPES,
+    packet_types: tuple[str, ...] = BEACON_PACKET_TYPES,
 ) -> pl.DataFrame:
     """The `n` most recently received beacon packets, newest first.
 
