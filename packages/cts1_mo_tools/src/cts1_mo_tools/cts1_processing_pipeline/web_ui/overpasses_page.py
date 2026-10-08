@@ -1,6 +1,6 @@
-"""The "Overpasses" page: upcoming passes of the satellite over the uplink
-ground station (RAO by default), predicted from SatNOGS DB's latest TLE --
-see `overpasses` for the data layer.
+"""The "Overpasses" page: recent and upcoming passes of the satellite over
+the uplink ground station (RAO by default), predicted from SatNOGS DB's latest
+TLE -- see `overpasses` for the data layer.
 
 Each pass can be ticked to get a browser notification shortly before (and
 at) its AOS. Notifications are sent from this page, so it has to stay open
@@ -28,6 +28,7 @@ from . import overpasses
 from .layout import page_shell
 
 DEFAULT_DAYS_AHEAD = 2.0
+DEFAULT_DAYS_BACK = 1.0
 COUNTDOWN_REFRESH_INTERVAL_SEC = 1.0
 
 DEFAULT_NOTIFY_LEAD_MIN = 5.0
@@ -44,6 +45,28 @@ _NOTIFY_MATCH_TOLERANCE = timedelta(minutes=5)
 _NOTIFY_FIRE_WINDOW = timedelta(minutes=1)
 # Ticked passes this long past their AOS are forgotten.
 _NOTIFY_FORGET_AFTER = timedelta(days=1)
+
+# Row tints for each pass status, translucent so they work in dark mode too,
+# plus an accent bar down the row's left edge.
+_ROW_CSS = """
+    .overpass-row-done > td { opacity: 0.55; }
+    .overpass-row-done { background: rgba(128, 128, 128, 0.10); }
+    .overpass-row-done > td:first-child { box-shadow: inset 4px 0 0 #9e9e9e; }
+    .overpass-row-in-progress { background: rgba(33, 186, 69, 0.20); }
+    .overpass-row-in-progress > td { font-weight: 600; }
+    .overpass-row-in-progress > td:first-child {
+        box-shadow: inset 4px 0 0 #21ba45;
+    }
+    .overpass-row-upcoming { background: rgba(25, 118, 210, 0.07); }
+    .overpass-row-upcoming > td:first-child { box-shadow: inset 4px 0 0 #1976d2; }
+"""
+_ROW_CLASS_FN = """
+    row => ({
+        'In progress': 'overpass-row-in-progress',
+        'Upcoming': 'overpass-row-upcoming',
+        'Done': 'overpass-row-done',
+    })[row.status] || ''
+"""
 
 _UTC_DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 _LOCAL_DATETIME_FORMAT = "%a %Y-%m-%d %H:%M:%S"
@@ -239,7 +262,9 @@ def _passes_table(
             f"{station.latitude_deg:.4f}°, {station.longitude_deg:.4f}°, "
             f"{station.altitude_m:.0f} m -- AOS/LOS are when "
             f"{prediction.tle.name} crosses the horizon (or the minimum "
-            "elevation set above)."
+            "elevation set above). Past passes are back-predicted from the "
+            "same TLE, so get less accurate the further they are from its "
+            "epoch."
         ).classes("text-caption text-grey")
 
         if not prediction.passes:
@@ -283,6 +308,7 @@ def _passes_table(
             row_key="index",
             pagination=0,
         ).classes("w-full")
+        table.props(f":table-row-class-fn={json.dumps(_ROW_CLASS_FN.strip())}")
         table.add_slot(
             "body-cell-status",
             r"""
@@ -315,9 +341,20 @@ def _passes_table(
         table.on(
             "notify_toggle", on_notify_toggle, js_handler=_NOTIFY_TOGGLE_JS_HANDLER
         )
-        ui.label(f"{len(prediction.passes):,} pass(es).").classes(
-            "text-caption text-grey mt-2"
-        )
+        n_done = sum(_pass_status(p, now) == "Done" for p in prediction.passes)
+        with ui.row().classes("items-center gap-4 mt-2 text-caption text-grey"):
+            ui.label(
+                f"{len(prediction.passes):,} pass(es): {n_done:,} past, "
+                f"{len(prediction.passes) - n_done:,} in progress or upcoming."
+            )
+            for color, label in [
+                ("grey", "Past"),
+                ("positive", "In progress"),
+                ("primary", "Upcoming"),
+            ]:
+                with ui.row().classes("items-center gap-1"):
+                    ui.icon("square", color=color, size="xs")
+                    ui.label(label)
     return table
 
 
@@ -403,6 +440,7 @@ def build_overpasses_page() -> None:  # noqa: C901, PLR0915
     tables: dict[str, ui.table | None] = {"passes": None}
     sent_notifications: set[tuple[datetime, str]] = set()
     app.storage.user.setdefault(_NOTIFY_LEAD_STORAGE_KEY, DEFAULT_NOTIFY_LEAD_MIN)
+    ui.add_css(_ROW_CSS)
 
     with page_shell():
         with ui.row().classes("w-full items-center justify-between"):
@@ -439,6 +477,9 @@ def build_overpasses_page() -> None:  # noqa: C901, PLR0915
                     value=default.timezone,
                     with_input=True,
                 ).classes("w-56")
+                days_back = ui.number(
+                    "Days back", value=DEFAULT_DAYS_BACK, min=0, max=14, step=1
+                ).classes("w-28")
                 days_ahead = ui.number(
                     "Days ahead", value=DEFAULT_DAYS_AHEAD, min=0.1, max=14, step=1
                 ).classes("w-28")
@@ -576,8 +617,9 @@ def build_overpasses_page() -> None:  # noqa: C901, PLR0915
             altitude_m=float(altitude.value),
             timezone=timezone.value,
         )
-        start = datetime.now(UTC)
-        end = start + timedelta(days=float(days_ahead.value or DEFAULT_DAYS_AHEAD))
+        now = datetime.now(UTC)
+        start = now - timedelta(days=float(days_back.value or 0.0))
+        end = now + timedelta(days=float(days_ahead.value or DEFAULT_DAYS_AHEAD))
 
         results.clear()
         with results, ui.row().classes("items-center gap-2 p-2"):
