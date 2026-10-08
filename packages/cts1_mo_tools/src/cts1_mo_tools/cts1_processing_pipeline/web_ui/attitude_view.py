@@ -33,13 +33,13 @@ from __future__ import annotations
 __all__ = ["AttitudePlayer", "AttitudeView", "Pacing"]
 
 import bisect
-import json
 import math
 import time
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
+import orjson
 from nicegui import run, ui
 
 from . import data as beacon_data
@@ -339,9 +339,10 @@ class AttitudeView:
                 changed[obj.id] = text
         if not changed:
             return
+        changed_json = orjson.dumps(changed).decode()
         self._scene.client.run_javascript(
             f"const scene = getElement({self._scene.id});"
-            f"for (const [id, text] of Object.entries({json.dumps(changed)})) {{"
+            f"for (const [id, text] of Object.entries({changed_json})) {{"
             "  const obj = scene?.objects?.get(id);"
             "  if (obj?.element) obj.element.textContent = text;"
             "}"
