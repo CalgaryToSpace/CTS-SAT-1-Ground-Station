@@ -127,6 +127,20 @@ def _duration_str(delta: timedelta) -> str:
     return f"{minutes}m {seconds}s"
 
 
+def _pass_status(p: overpasses.Overpass, now: datetime) -> str:
+    if p.aos <= now < p.los:
+        return "In progress"
+    if p.los <= now:
+        return "Done"
+    return "Upcoming"
+
+
+def _time_until_aos_str(p: overpasses.Overpass, now: datetime) -> str:
+    if p.aos <= now:
+        return "—"
+    return _duration_str(p.aos - now)
+
+
 def _direction_str(azimuth_deg: float) -> str:
     return f"{overpasses.compass_direction(azimuth_deg)} ({azimuth_deg:.0f}°)"
 
@@ -194,13 +208,8 @@ def _pass_rows(
             "index": i,
             "notify": _matching_notify_aos(p.aos, notify_aos) is not None,
             "aos_iso": p.aos.isoformat(),
-            "status": (
-                "In progress"
-                if p.aos <= now < p.los
-                else "Done"
-                if p.los <= now
-                else "Upcoming"
-            ),
+            "status": _pass_status(p, now),
+            "time_until_aos": _time_until_aos_str(p, now),
             "aos_utc": p.aos.strftime(_UTC_DATETIME_FORMAT),
             "los_utc": p.los.strftime(_UTC_DATETIME_FORMAT),
             "aos_local": p.aos.astimezone(tz).strftime(_LOCAL_DATETIME_FORMAT),
@@ -243,6 +252,12 @@ def _passes_table(
             {"name": "index", "label": "#", "field": "index", "align": "right"},
             {"name": "notify", "label": "Notify", "field": "notify"},
             {"name": "status", "label": "Status", "field": "status"},
+            {
+                "name": "time_until_aos",
+                "label": "Time Until AOS",
+                "field": "time_until_aos",
+                "align": "right",
+            },
             {"name": "aos_local", "label": f"AOS ({tz.key})", "field": "aos_local"},
             {"name": "los_local", "label": f"LOS ({tz.key})", "field": "los_local"},
             {"name": "aos_utc", "label": "AOS (UTC)", "field": "aos_utc"},
@@ -518,10 +533,28 @@ def build_overpasses_page() -> None:  # noqa: C901, PLR0915
             sent_notifications.add(key)
             _send_notification(prediction, p, kind)
 
+    def _refresh_pass_countdowns(prediction: _Prediction) -> None:
+        table = tables["passes"]
+        if table is None:
+            return
+        now = datetime.now(UTC)
+        changed = False
+        for row, p in zip(table.rows, prediction.passes, strict=True):
+            fresh = {
+                "status": _pass_status(p, now),
+                "time_until_aos": _time_until_aos_str(p, now),
+            }
+            if any(row[k] != v for k, v in fresh.items()):
+                row.update(fresh)
+                changed = True
+        if changed:
+            table.update()
+
     def _update_status() -> None:
         prediction = state["prediction"]
         if prediction is not None:
             status_label.text = _next_pass_summary(prediction)
+            _refresh_pass_countdowns(prediction)
         _check_notifications()
 
     async def _predict() -> None:
