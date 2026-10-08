@@ -33,6 +33,7 @@ from __future__ import annotations
 __all__ = ["AttitudePlayer", "AttitudeView", "Pacing"]
 
 import bisect
+import json
 import math
 import time
 from datetime import UTC, datetime, timedelta
@@ -152,6 +153,13 @@ def _arrow(
     return arrow
 
 
+# The rate arrow's head is a fixed size; only its shaft stretches with the
+# rate (`_rate_arrow_length` never drops below ~2.2, so `_arrow`'s
+# `min(0.3, length * 0.3)` head length is always 0.3 anyway).
+_RATE_ARROW_RADIUS = 0.04
+_RATE_HEAD_LENGTH = 0.3
+
+
 def _rate_arrow_length(rate_norm_deg_per_sec: float) -> float:
     """Log-scaled so both a slow drift (~0.1 deg/s) and a tumble (~tens of
     deg/s) read sensibly without the arrow leaving the view. The floor is
@@ -209,6 +217,7 @@ class AttitudeView:
                     self._scene
                 ):
                     self._build_static()
+                    self._build_dynamic()
                 with ui.column().classes("gap-2"):
                     self._no_attitude = ui.label(
                         "No attitude estimate -- shown at zero attitude."
@@ -228,7 +237,6 @@ class AttitudeView:
                         "Drag to orbit the camera."
                     ).classes("text-caption text-grey max-w-xs")
         self._scene.move_camera(3.4, -4.6, 2.6, 0.3, 0, -0.2, duration=0)
-        self._dynamic: Object3D | None = None
 
     def _on_expand(self, e: events.ValueChangeEventArguments) -> None:
         """Re-measure the scene whenever the panel opens.
@@ -290,6 +298,55 @@ class AttitudeView:
             ):
                 _arrow(scene, direction, length, _AXIS_COLORS[axis], radius=0.02)
 
+    def _build_dynamic(self) -> None:
+        """The per-frame objects, built once and re-posed by `update`.
+
+        Re-creating them per frame (as an earlier version did) leaks: the
+        scene's client-side `delete` never disposes three.js geometries or
+        materials, so a long playback piles up GPU memory and gets steadily
+        choppier, besides the churn of ~10 create/delete messages a frame.
+        """
+        scene = self._scene
+        with self._body:
+            tips = {"x": (2.8, 0, 0), "y": (0, 1.6, 0), "z": (0, 0, 1.6)}
+            self._axis_labels = {
+                axis: scene.text("", _LABEL_STYLE).move(*tip)
+                for axis, tip in tips.items()
+            }
+            # A unit-length shaft stretched along +Y by `_shaft`'s scale, with
+            # the head moved to its tip; `_rate_arrow` points the lot.
+            with scene.group() as self._rate_arrow:
+                with scene.group() as self._shaft:
+                    scene.cylinder(
+                        _RATE_ARROW_RADIUS, _RATE_ARROW_RADIUS, 1.0, radial_segments=12
+                    ).move(0, 0.5, 0).material(_RATE_COLOR)
+                self._head = scene.cylinder(
+                    0, _RATE_ARROW_RADIUS * 3, _RATE_HEAD_LENGTH, radial_segments=16
+                ).material(_RATE_COLOR)
+            self._rate_label = scene.text("", _LABEL_STYLE)
+        self._label_text: dict[str, str] = {}
+
+    def _set_label_texts(self, texts: dict[Object3D, str]) -> None:
+        """Change scene text labels in place. `ui.scene` has no API for this,
+        so poke the CSS2D elements directly, and update each object's args
+        so a reconnecting client (`init_objects`) gets the current text.
+        """
+        changed: dict[str, str] = {}
+        for obj, text in texts.items():
+            if self._label_text.get(obj.id) != text:
+                self._label_text[obj.id] = text
+                obj.args[0] = text
+                changed[obj.id] = text
+        if not changed:
+            return
+        self._scene.client.run_javascript(
+            f"const scene = getElement({self._scene.id});"
+            f"for (const [id, text] of Object.entries({json.dumps(changed)})) {{"
+            "  const obj = scene?.objects?.get(id);"
+            "  if (obj?.element) obj.element.textContent = text;"
+            "}"
+        )
+
     def update(self, row: dict[str, Any] | None, caption: str) -> None:
         """Re-pose the model from an extended-beacon `row` (None or missing
         attitude fields leaves it at zero attitude, with a note).
@@ -312,26 +369,31 @@ class AttitudeView:
             else scene_from_body(0.0, 0.0, 0.0)
         )
 
-        # Build the new rate arrow/labels before removing the old ones, so
-        # playback doesn't flicker between frames.
-        previous = self._dynamic
-        with self._scene, self._body, self._scene.group() as self._dynamic:
-            tips = {"x": (2.8, 0, 0), "y": (0, 1.6, 0), "z": (0, 0, 1.6)}
-            for (axis, tip), rate in zip(tips.items(), rates, strict=True):
-                self._scene.text(
-                    f"{axis.upper()}  ω{axis} {_fmt(rate, '°/s')}", _LABEL_STYLE
-                ).move(*tip)
-            if None not in rates:
-                omega: Vector = (rates[0], rates[1], rates[2])  # type: ignore[assignment]
-                norm = math.sqrt(sum(c * c for c in omega))
-                if norm > 0.01:  # noqa: PLR2004
-                    length = _rate_arrow_length(norm)
-                    _arrow(self._scene, omega, length, _RATE_COLOR, radius=0.04)
-                    direction = [c / norm * (length + 0.25) for c in omega]
-                    self._scene.text(f"ω {norm:.2f}°/s", _LABEL_STYLE).move(*direction)
-
-        if previous is not None:
-            previous.delete()
+        texts: dict[Object3D, str] = {
+            label: f"{axis.upper()}  ω{axis} {_fmt(rate, '°/s')}"
+            for (axis, label), rate in zip(
+                self._axis_labels.items(), rates, strict=True
+            )
+        }
+        norm = (
+            math.sqrt(sum(c * c for c in rates))  # type: ignore[operator]
+            if None not in rates
+            else 0.0
+        )
+        show_rate = norm > 0.01  # noqa: PLR2004
+        if show_rate:
+            omega: Vector = (rates[0], rates[1], rates[2])  # type: ignore[assignment]
+            length = _rate_arrow_length(norm)
+            shaft_length = length - _RATE_HEAD_LENGTH
+            self._rate_arrow.rotate_R(_align_y_to(omega))
+            self._shaft.scale(1, shaft_length, 1)
+            self._head.move(0, shaft_length + _RATE_HEAD_LENGTH / 2, 0)
+            self._rate_label.move(*(c / norm * (length + 0.25) for c in omega))
+            texts[self._rate_label] = f"ω {norm:.2f}°/s"
+        if self._rate_arrow.visible_ != show_rate:
+            self._rate_arrow.visible(show_rate)
+            self._rate_label.visible(show_rate)
+        self._set_label_texts(texts)
 
         self._no_attitude.set_visibility(not has_attitude)
         for name, value in (
