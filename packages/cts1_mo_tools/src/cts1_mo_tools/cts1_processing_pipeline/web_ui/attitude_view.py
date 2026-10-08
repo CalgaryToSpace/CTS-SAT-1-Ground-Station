@@ -522,7 +522,8 @@ class AttitudePlayer:
         """Blocking: the frames in the last `hours`, and whether they're the
         fallback (newest extended beacon ever) because the window was empty.
         """
-        since = datetime.now(UTC) - timedelta(hours=hours)
+        now = beacon_data.round_down_datetime(datetime.now(UTC), timedelta(minutes=5))
+        since = now - timedelta(hours=hours)
         frames = beacon_data.load_attitude_window(self._path, since=since).to_dicts()
         if frames:
             return frames, False
