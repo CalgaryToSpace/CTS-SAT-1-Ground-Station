@@ -963,7 +963,7 @@ def _reassembler_results(
         return
 
     tcmd_responses = beacon_data.load_reassembled_tcmd_responses(
-        data_dir / step_5_pipeline.OUTPUT_FILENAME, ranges=ranges
+        data_dir / step_5_pipeline.OUTPUT_FILENAME, ranges=tuple(ranges)
     )
     candidates = (
         find_header_candidates(tcmd_responses) if tcmd_responses is not None else []
@@ -984,7 +984,7 @@ def _reassembler_results(
 
     best = _best_named_candidate(candidates)
     chunks = beacon_data.load_bulk_file_downlink_packets(
-        data_dir / step_3_pipeline.OUTPUT_FILENAME, ranges=ranges
+        data_dir / step_3_pipeline.OUTPUT_FILENAME, ranges=tuple(ranges)
     )
 
     with ui.card().classes("w-full"):

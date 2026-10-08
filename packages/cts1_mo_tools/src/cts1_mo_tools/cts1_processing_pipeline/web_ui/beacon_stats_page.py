@@ -425,7 +425,8 @@ def build_beacon_stats_page(data_dir: Path, hours: float) -> None:
 
     @ui.refreshable
     def chart_section() -> None:
-        since = datetime.now(UTC) - timedelta(hours=state["hours"])
+        now = beacon_data.round_down_datetime(datetime.now(UTC), timedelta(minutes=5))
+        since = now - timedelta(hours=state["hours"])
         _chart_groups(parquet_path, since=since)
 
     def _on_window_change(label: str) -> None:

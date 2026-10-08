@@ -23,11 +23,14 @@ __all__ = [
     "load_bulk_file_downlink_packets",
     "load_packet_counts_per_window",
     "load_reassembled_tcmd_responses",
+    "round_down_datetime",
 ]
 
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 import polars as pl
+from cachetools import TTLCache, cached
 
 from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
     pipeline as step_3_pipeline,
@@ -38,7 +41,6 @@ from cts1_mo_tools.cts1_processing_pipeline.step_5_reassemble_tcmd_responses imp
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from datetime import datetime, timedelta
     from pathlib import Path
 
 DEFAULT_PARQUET_PATH = (
@@ -62,6 +64,17 @@ ATTITUDE_COLUMNS = (
 # Carried alongside each attitude frame, but not what makes a row a frame.
 ATTITUDE_MODE_COLUMNS = ("adcs_attitude_estimation_mode", "adcs_control_mode")
 
+# Cached loader results expire after this long, so new data shows up.
+_CACHE_TTL_SECONDS = 30
+
+
+def round_down_datetime(dt: datetime, step: timedelta) -> datetime:
+    """Round `dt` down to a multiple of `step` (counted from midnight), e.g.
+    to the nearest 5 minutes -- so a `since` computed from "now" stays the
+    same across repeat loads, and they hit the loaders' cache.
+    """
+    return dt - (dt - datetime.min.replace(tzinfo=dt.tzinfo)) % step
+
 
 def _scan(path: Path) -> pl.LazyFrame | None:
     """Lazily open `path`, or None if the pipeline hasn't produced it yet."""
@@ -70,6 +83,7 @@ def _scan(path: Path) -> pl.LazyFrame | None:
     return pl.scan_parquet(path)
 
 
+@cached(TTLCache(maxsize=3, ttl=_CACHE_TTL_SECONDS))
 def load_packet_counts_per_window(
     path: Path = DEFAULT_PARQUET_PATH,
     *,
@@ -108,6 +122,7 @@ def load_packet_counts_per_window(
     )
 
 
+@cached(TTLCache(maxsize=3, ttl=_CACHE_TTL_SECONDS))
 def load_beacon_window(
     path: Path = DEFAULT_PARQUET_PATH, *, since: datetime | None = None
 ) -> pl.DataFrame:
@@ -126,6 +141,7 @@ def load_beacon_window(
     return lf.sort("received_at").collect()
 
 
+@cached(TTLCache(maxsize=3, ttl=_CACHE_TTL_SECONDS))
 def load_attitude_window(
     path: Path = DEFAULT_PARQUET_PATH, *, since: datetime | None = None
 ) -> pl.DataFrame:
@@ -169,10 +185,11 @@ def _filter_to_ranges(
     return lf.filter(in_any_range)
 
 
+@cached(TTLCache(maxsize=3, ttl=_CACHE_TTL_SECONDS))
 def load_bulk_file_downlink_packets(
     path: Path = DEFAULT_PARQUET_PATH,
     *,
-    ranges: Sequence[tuple[datetime, datetime]] = (),
+    ranges: tuple[tuple[datetime, datetime], ...] = (),
 ) -> pl.DataFrame:
     """`BULK_FILE_DOWNLINK` packets restricted to the union of `ranges`,
     ordered by `bulk_file_offset` (the order file-reassembly cares about,
@@ -194,10 +211,11 @@ def load_bulk_file_downlink_packets(
     return lf.sort("bulk_file_offset", "received_at").collect()
 
 
+@cached(TTLCache(maxsize=3, ttl=_CACHE_TTL_SECONDS))
 def load_reassembled_tcmd_responses(
     path: Path = DEFAULT_REASSEMBLED_TCMD_PATH,
     *,
-    ranges: Sequence[tuple[datetime, datetime]] = (),
+    ranges: tuple[tuple[datetime, datetime], ...] = (),
 ) -> pl.DataFrame | None:
     """Step 5's reassembled telecommand responses (one row per response,
     multi-packet ones already joined back together) whose
@@ -215,11 +233,12 @@ def load_reassembled_tcmd_responses(
     return lf.sort("first_received_at").collect()
 
 
+@cached(TTLCache(maxsize=3, ttl=_CACHE_TTL_SECONDS))
 def latest_beacons(
     path: Path = DEFAULT_PARQUET_PATH,
     n: int = 10,
     *,
-    packet_types: Sequence[str] = BEACON_PACKET_TYPES,
+    packet_types: tuple[str, ...] = BEACON_PACKET_TYPES,
 ) -> pl.DataFrame:
     """The `n` most recently received beacon packets, newest first.
 
