@@ -45,7 +45,8 @@ _NOTIFY_FIRE_WINDOW = timedelta(minutes=1)
 # Ticked passes this long past their AOS are forgotten.
 _NOTIFY_FORGET_AFTER = timedelta(days=1)
 
-_DATETIME_FORMAT = "%a %Y-%m-%d %H:%M:%S"
+_UTC_DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+_LOCAL_DATETIME_FORMAT = "%a %Y-%m-%d %H:%M:%S"
 
 # Evaluated in the browser; yields "granted"/"denied"/"default", or
 # "insecure"/"unsupported" if the browser won't do notifications here at all.
@@ -200,10 +201,10 @@ def _pass_rows(
                 if p.los <= now
                 else "Upcoming"
             ),
-            "aos_utc": f"{p.aos:{_DATETIME_FORMAT}}",
-            "los_utc": f"{p.los:{_DATETIME_FORMAT}}",
-            "aos_local": f"{p.aos.astimezone(tz):{_DATETIME_FORMAT}}",
-            "los_local": f"{p.los.astimezone(tz):{_DATETIME_FORMAT}}",
+            "aos_utc": p.aos.strftime(_UTC_DATETIME_FORMAT),
+            "los_utc": p.los.strftime(_UTC_DATETIME_FORMAT),
+            "aos_local": p.aos.astimezone(tz).strftime(_LOCAL_DATETIME_FORMAT),
+            "los_local": p.los.astimezone(tz).strftime(_LOCAL_DATETIME_FORMAT),
             "duration": _duration_str(p.duration),
             "max_elevation": f"{p.max_elevation_deg:.1f}°",
             "direction": (
