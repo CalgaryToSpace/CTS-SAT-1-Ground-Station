@@ -90,6 +90,18 @@ _DECODER_VERSION_COMMAND = {
 # satnogs_client_live_data has no local versioned tool -- it downloads packets
 # already decoded by SatNOGS's own (continuously-deployed) infrastructure.
 _SATNOGS_CLIENT_LIVE_DATA_VERSION_HARDCODE = "SatNOGS Rolling Release"
+_AUDIO_DECODERS = (
+    "askew_demod_from_file",
+    "sso_rx_replay",
+    "gr_satellites_pdu",
+    "gr_satellites_kiss",
+)
+_WAV_DECODERS = ("gr_satellites_pdu", "gr_satellites_kiss")
+
+
+def _describe_error(context: str, exc: BaseException) -> str:
+    """A one-line summary of `exc` for `decoder_runs.error` (shortened there)."""
+    return f"{context}: {type(exc).__name__}: {exc}"
 
 
 def _resolve_decoder_versions(tools: frozenset[str]) -> dict[str, str | None]:
@@ -140,33 +152,40 @@ def _process_audio(  # noqa: C901, PLR0912
     obs: dict[str, Any],
     temp_dir: Path | None,
     tools: frozenset[str],
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
     """Download one observation's audio and run the enabled audio decoders on it.
 
     askew_demod_from_file, sso_rx_replay, gr_satellites --hexdump, and
     gr_satellites --kiss_out all now finish in a couple of seconds, so they
     all run at normal (small pool) concurrency, sharing one temp dir that's
     cleaned up before returning. Only the decoders named in `tools` run.
+
+    Returns the decoded rows, and what went wrong for each decoder that
+    failed (a failed download or WAV conversion fails every decoder that
+    needed it).
     """
     obs_id = obs["id"]
     audio_url = obs["payload"]
     rows: list[dict[str, Any]] = []
+    errors: dict[str, str] = {}
     needs_wav = "gr_satellites_pdu" in tools or "gr_satellites_kiss" in tools
 
     with tempfile.TemporaryDirectory(prefix="cts1_pipeline_", dir=temp_dir) as tmp_name:
         try:
             ogg_path = download_audio(audio_url, Path(tmp_name))
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             logger.exception(f"Failed to download audio for observation {obs_id}")
-            return rows
+            error = _describe_error("audio download", exc)
+            return rows, {d: error for d in _AUDIO_DECODERS if d in tools}
 
         if "askew_demod_from_file" in tools:
             try:
                 askew_rows = run_askew_demod_from_file(ogg_path)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
                 logger.exception(
                     f"askew_demod_from_file decode failed for observation {obs_id}"
                 )
+                errors["askew_demod_from_file"] = _describe_error("decode", exc)
                 askew_rows = []
             for row in askew_rows:
                 rows.append(  # noqa: PERF401
@@ -199,21 +218,24 @@ def _process_audio(  # noqa: C901, PLR0912
                 )
 
         if not needs_wav:
-            return rows
+            return rows, errors
 
         try:
             wav_path = convert_ogg_to_wav(ogg_path)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             logger.exception(f"WAV conversion failed for observation {obs_id}")
-            return rows
+            error = _describe_error("WAV conversion", exc)
+            errors.update({d: error for d in _WAV_DECODERS if d in tools})
+            return rows, errors
 
         if "gr_satellites_pdu" in tools:
             try:
                 gr_rows = run_gr_satellites_pdu(wav_path, satcfg=DEFAULT_SATCFG_PATH)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
                 logger.exception(
                     f"gr_satellites_pdu decode failed for observation {obs_id}"
                 )
+                errors["gr_satellites_pdu"] = _describe_error("decode", exc)
                 gr_rows = []
             for row in gr_rows:
                 rows.append(  # noqa: PERF401
@@ -231,10 +253,11 @@ def _process_audio(  # noqa: C901, PLR0912
         if "gr_satellites_kiss" in tools:
             try:
                 kiss_rows = run_gr_satellites_kiss(wav_path, satcfg=DEFAULT_SATCFG_PATH)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
                 logger.exception(
                     f"gr_satellites_kiss decode failed for observation {obs_id}"
                 )
+                errors["gr_satellites_kiss"] = _describe_error("decode", exc)
                 kiss_rows = []
             for row in kiss_rows:
                 rows.append(  # noqa: PERF401
@@ -251,10 +274,12 @@ def _process_audio(  # noqa: C901, PLR0912
                     }
                 )
 
-    return rows
+    return rows, errors
 
 
-def _process_demod(obs: dict[str, Any], tools: frozenset[str]) -> list[dict[str, Any]]:
+def _process_demod(
+    obs: dict[str, Any], tools: frozenset[str]
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
     """Download every already-demodulated packet SatNOGS has for this observation.
 
     Unlike the audio decoders, this needs no download of its own audio and
@@ -262,23 +287,29 @@ def _process_demod(obs: dict[str, Any], tools: frozenset[str]) -> list[dict[str,
     downloaded via a thread pool nested inside this (already-pooled) call
     (see `run_satnogs_client_live_data`). A no-op unless "satnogs_client_live_data" is
     in `tools`.
+
+    Returns the downloaded rows, and what went wrong, if anything, keyed by
+    "satnogs_client_live_data".
     """
     if "satnogs_client_live_data" not in tools:
-        return []
+        return [], {}
 
     obs_id = obs["id"]
     audio_url = obs.get("payload")
     rows: list[dict[str, Any]] = []
+    errors: dict[str, str] = {}
 
     try:
-        demod_rows = run_satnogs_client_live_data(
+        demod_rows, error = run_satnogs_client_live_data(
             obs["demoddata"],
             observation_id=obs_id,
             max_workers=DEMOD_DOWNLOAD_WORKERS,
         )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         logger.exception(f"satnogs_client_live_data failed for observation {obs_id}")
-        demod_rows = []
+        demod_rows, error = [], _describe_error("download", exc)
+    if error is not None:
+        errors["satnogs_client_live_data"] = error
 
     for row in demod_rows:
         time_in_file_ms = (row["received_at"] - obs["start"]).total_seconds() * 1000
@@ -295,33 +326,41 @@ def _process_demod(obs: dict[str, Any], tools: frozenset[str]) -> list[dict[str,
             }
         )
 
-    return rows
+    return rows, errors
 
 
 def _process_fast(
     obs: dict[str, Any],
     temp_dir: Path | None,
     tools: frozenset[str],
-) -> list[dict[str, Any]]:
-    """Run every enabled decoder for one observation: audio ones plus demod."""
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    """Run every enabled decoder for one observation: audio ones plus demod.
+
+    Returns the decoded rows, and what went wrong per failed decoder.
+    """
     rows: list[dict[str, Any]] = []
+    errors: dict[str, str] = {}
     if obs.get("payload"):
-        rows.extend(_process_audio(obs, temp_dir, tools))
+        audio_rows, audio_errors = _process_audio(obs, temp_dir, tools)
+        rows.extend(audio_rows)
+        errors.update(audio_errors)
     if obs.get("demoddata"):
-        rows.extend(_process_demod(obs, tools))
-    return rows
+        demod_rows, demod_errors = _process_demod(obs, tools)
+        rows.extend(demod_rows)
+        errors.update(demod_errors)
+    return rows, errors
 
 
 def _process_fast_timed(
     obs: dict[str, Any],
     temp_dir: Path | None,
     tools: frozenset[str],
-) -> tuple[list[dict[str, Any]], int]:
+) -> tuple[list[dict[str, Any]], dict[str, str], int]:
     """Run `_process_fast` and report how long it took, in milliseconds."""
     started_at = time.monotonic()
-    rows = _process_fast(obs, temp_dir, tools)
+    rows, errors = _process_fast(obs, temp_dir, tools)
     runtime_ms = round((time.monotonic() - started_at) * 1000)
-    return rows, runtime_ms
+    return rows, errors, runtime_ms
 
 
 def _select_candidates(
@@ -500,7 +539,7 @@ def run(  # noqa: C901, PLR0913, PLR0915
             for future in concurrent.futures.as_completed(futures):
                 obs = futures[future]
                 try:
-                    rows, runtime_ms = future.result()
+                    rows, errors, runtime_ms = future.result()
                 except Exception:  # noqa: BLE001
                     # Every decoder already swallows its own failures, so this
                     # is something unexpected: leave the observation unrecorded
@@ -517,7 +556,11 @@ def run(  # noqa: C901, PLR0913, PLR0915
                     )
                     db.append_packets(con, df)
                 db.record_decoder_runs(
-                    con, obs["id"], decoder_versions, runtime_ms=runtime_ms
+                    con,
+                    obs["id"],
+                    decoder_versions,
+                    runtime_ms=runtime_ms,
+                    errors=errors,
                 )
                 total_decoded += 1
                 logger.info(

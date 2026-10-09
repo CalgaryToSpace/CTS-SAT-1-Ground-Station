@@ -81,13 +81,9 @@ def parse_demod_filename_time(url: str) -> datetime | None:
     return base + timedelta(milliseconds=g_offset_ms + seq * _SEQ_STEP_MS)
 
 
-def _download_one(url: str) -> bytes | None:
-    try:
-        resp = requests.get(url, timeout=30)
-        resp.raise_for_status()
-    except requests.RequestException:
-        logger.warning(f"satnogs_client_live_data: failed to download {url}")
-        return None
+def _download_one(url: str) -> bytes:
+    resp = requests.get(url, timeout=30)
+    resp.raise_for_status()
     return resp.content
 
 
@@ -134,7 +130,7 @@ def run_satnogs_client_live_data(
     *,
     observation_id: int,
     max_workers: int = resource_limits.DEFAULT_DEMOD_DOWNLOAD_WORKERS,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], str | None]:
     """Download every `payload_demod` URL, one row per packet.
 
     Spins up its own thread pool sized for a single observation's demoddata
@@ -153,12 +149,14 @@ def run_satnogs_client_live_data(
 
     Returns:
         One dict per successfully downloaded packet whose filename carried a
-        parseable timestamp.
+        parseable timestamp, and a summary of the downloads that failed
+        (e.g. a 503 from SatNOGS), or None if none did.
     """
     timestamped_urls = _timestamped_urls(demoddata, observation_id=observation_id)
     rows: list[dict[str, Any]] = []
+    failures: list[str] = []
     if not timestamped_urls:
-        return rows
+        return rows, None
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
@@ -167,8 +165,13 @@ def run_satnogs_client_live_data(
         }
         for future in concurrent.futures.as_completed(futures):
             url, received_at = futures[future]
-            data = future.result()
-            if data is None:
+            try:
+                data = future.result()
+            except requests.RequestException as exc:
+                logger.warning(
+                    f"satnogs_client_live_data: failed to download {url}: {exc}"
+                )
+                failures.append(f"{type(exc).__name__}: {exc}")
                 continue
             rows.append(
                 {
@@ -184,4 +187,10 @@ def run_satnogs_client_live_data(
         f"satnogs_client_live_data: {len(rows)}/{len(timestamped_urls)} packet(s) "
         "downloaded"
     )
-    return rows
+    if not failures:
+        return rows, None
+    error = (
+        f"{len(failures)}/{len(timestamped_urls)} packet download(s) failed, "
+        f"first: {failures[0]}"
+    )
+    return rows, error
