@@ -1,8 +1,17 @@
+from datetime import UTC, datetime
+from pathlib import Path
+
+import duckdb
 import polars as pl
 import pytest
+import requests
+from cts1_mo_tools.cts1_processing_pipeline import landing_db
 from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate import (
     db,
     decode_satnogs_client_live_data,
+)
+from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate import (
+    pipeline as step_1_pipeline,
 )
 from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate.decode_askew_demod import (  # noqa: E501
     parse_askew_line,
@@ -306,7 +315,7 @@ def test_run_satnogs_client_live_data_discards_pngs_and_untimestamped(
         decode_satnogs_client_live_data, "_download_one", fake_download_one
     )
 
-    rows = decode_satnogs_client_live_data.run_satnogs_client_live_data(
+    rows, error = decode_satnogs_client_live_data.run_satnogs_client_live_data(
         [
             {"payload_demod": _DEMOD_URL_BASE},
             {"payload_demod": _DEMOD_URL_BASE + ".png"},
@@ -317,6 +326,7 @@ def test_run_satnogs_client_live_data_discards_pngs_and_untimestamped(
     )
 
     assert requested == [_DEMOD_URL_BASE]
+    assert error is None
     assert len(rows) == 1
     assert rows[0]["satnogs_demod_url"] == _DEMOD_URL_BASE
     assert rows[0]["received_at"].isoformat() == "2026-08-12T19:36:50+00:00"
@@ -332,13 +342,41 @@ def _run_one_demod_packet(
     monkeypatch.setattr(
         decode_satnogs_client_live_data, "_download_one", fake_download_one
     )
-    rows = decode_satnogs_client_live_data.run_satnogs_client_live_data(
+    rows, error = decode_satnogs_client_live_data.run_satnogs_client_live_data(
         [{"payload_demod": _DEMOD_URL_BASE}],
         observation_id=14759295,
         max_workers=1,
     )
+    assert error is None
     assert len(rows) == 1
     return rows[0]
+
+
+def test_run_satnogs_client_live_data_reports_failed_downloads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 503 on one packet drops just that packet and is summarised."""
+
+    def fake_download_one(url: str) -> bytes:
+        if url.endswith("_1"):
+            msg = "503 Server Error: Service Unavailable"
+            raise requests.HTTPError(msg)
+        return b"\x01"
+
+    monkeypatch.setattr(
+        decode_satnogs_client_live_data, "_download_one", fake_download_one
+    )
+    rows, error = decode_satnogs_client_live_data.run_satnogs_client_live_data(
+        [{"payload_demod": _DEMOD_URL_BASE}, {"payload_demod": _DEMOD_URL_BASE + "_1"}],
+        observation_id=14759295,
+        max_workers=1,
+    )
+
+    assert [row["satnogs_demod_url"] for row in rows] == [_DEMOD_URL_BASE]
+    assert error == (
+        "1/2 packet download(s) failed, first: HTTPError: "
+        "503 Server Error: Service Unavailable"
+    )
 
 
 def test_run_satnogs_client_live_data_tier_good_when_crc_verifies(
@@ -374,3 +412,93 @@ def test_format_counts_orders_quality_tiers_best_first() -> None:
 def test_format_counts_returns_none_for_missing_column() -> None:
     df = pl.DataFrame({"decoder": ["askew_demod_from_file"]})
     assert db.format_counts(df, "quality_tier") is None
+
+
+# ---------------------------------------------------------------------------
+# decoder_runs.error
+# ---------------------------------------------------------------------------
+
+
+def _decoder_run_errors(con: duckdb.DuckDBPyConnection) -> dict[str, str | None]:
+    rows = con.execute(
+        "SELECT decoder, error FROM decoder_runs ORDER BY decoder"
+    ).fetchall()
+    return {str(decoder): error for decoder, error in rows}
+
+
+def test_record_decoder_runs_stores_shortened_errors(tmp_path: Path) -> None:
+    long_error = "audio download: HTTPError: 503 Server Error:\n" + "x" * 200
+    with landing_db.connect(tmp_path / "test.duckdb") as con:
+        db.record_decoder_runs(
+            con,
+            1,
+            {"askew_demod_from_file": "v1", "sso_rx_replay": "v2"},
+            runtime_ms=5,
+            errors={"askew_demod_from_file": long_error},
+        )
+        errors = _decoder_run_errors(con)
+
+    assert errors["sso_rx_replay"] is None
+    stored = errors["askew_demod_from_file"]
+    assert stored is not None
+    assert len(stored) == db.ERROR_MAX_LENGTH
+    assert stored.startswith("audio download: HTTPError: 503 Server Error: xxx")
+    assert stored.endswith("...")
+
+
+def test_record_decoder_runs_rerun_clears_error(tmp_path: Path) -> None:
+    with landing_db.connect(tmp_path / "test.duckdb") as con:
+        db.record_decoder_runs(
+            con,
+            1,
+            {"sso_rx_replay": "v1"},
+            runtime_ms=5,
+            errors={"sso_rx_replay": "boom"},
+        )
+        db.record_decoder_runs(con, 1, {"sso_rx_replay": "v1"}, runtime_ms=5)
+        assert _decoder_run_errors(con) == {"sso_rx_replay": None}
+
+
+def test_record_decoder_runs_adds_error_column_to_old_table(tmp_path: Path) -> None:
+    with landing_db.connect(tmp_path / "test.duckdb") as con:
+        con.execute(
+            "CREATE TABLE decoder_runs (observation_id BIGINT NOT NULL, "
+            "decoder VARCHAR NOT NULL, run_at TIMESTAMPTZ NOT NULL, "
+            "version VARCHAR NOT NULL, runtime_ms INTEGER NOT NULL, "
+            "PRIMARY KEY (observation_id, decoder))"
+        )
+        db.record_decoder_runs(
+            con,
+            1,
+            {"sso_rx_replay": "v1"},
+            runtime_ms=5,
+            errors={"sso_rx_replay": "boom"},
+        )
+        assert _decoder_run_errors(con) == {"sso_rx_replay": "boom"}
+
+
+def test_process_audio_download_failure_errors_every_audio_decoder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def fake_download_audio(_url: str, _dest_dir: Path) -> Path:
+        msg = "503 Server Error: Service Unavailable"
+        raise requests.HTTPError(msg)
+
+    monkeypatch.setattr(step_1_pipeline, "download_audio", fake_download_audio)
+    obs = {
+        "id": 1,
+        "payload": "https://example.com/a.ogg",
+        "start": datetime(2026, 9, 1, tzinfo=UTC),
+        "end": datetime(2026, 9, 1, tzinfo=UTC),
+    }
+    tools = frozenset(
+        {"askew_demod_from_file", "gr_satellites_pdu", "satnogs_client_live_data"}
+    )
+
+    rows, errors = step_1_pipeline._process_audio(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        obs, tmp_path, tools
+    )
+
+    assert rows == []
+    expected = "audio download: HTTPError: 503 Server Error: Service Unavailable"
+    assert errors == {"askew_demod_from_file": expected, "gr_satellites_pdu": expected}

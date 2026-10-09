@@ -11,7 +11,8 @@ time):
     version and how long the decode took (`runtime_ms`) at the time.
     Recorded unconditionally -- even when a decoder finds no packets -- so
     an observation/decoder pair with no output isn't retried on every
-    subsequent run.
+    subsequent run. `error` is a short (`ERROR_MAX_LENGTH`) summary of what
+    went wrong (e.g. a 503 downloading the audio), or NULL if nothing did.
 
 Step 1's input, `raw_observations`, belongs to step 0 (see
 `step_0_list_observations.db`); `load_observations` reads it back.
@@ -21,6 +22,7 @@ from __future__ import annotations
 
 __all__ = [
     "DECODER_RUNS_TABLE",
+    "ERROR_MAX_LENGTH",
     "QUALITY_TIER_ORDER",
     "RAW_PACKETS_TABLE",
     "already_decoded_pairs",
@@ -57,6 +59,8 @@ if TYPE_CHECKING:
 
 RAW_PACKETS_TABLE = "raw_packets"
 DECODER_RUNS_TABLE = "decoder_runs"
+# Longest `decoder_runs.error` kept; anything longer is cut short with "...".
+ERROR_MAX_LENGTH = 100
 
 # Quality tiers, best first; unknown tiers sort after these, alphabetically.
 # "crc_absent_assumed_good" is satnogs_client_live_data-only -- FEC already ran, but
@@ -119,12 +123,23 @@ def append_packets(con: duckdb.DuckDBPyConnection, df: pl.DataFrame) -> None:
     logger.info(f"{RAW_PACKETS_TABLE}: appended {len(df)} row(s){suffix}")
 
 
+def _shorten_error(error: str | None) -> str | None:
+    """`error` on one line, cut to at most `ERROR_MAX_LENGTH` characters."""
+    if error is None:
+        return None
+    error = " ".join(error.split())
+    if len(error) <= ERROR_MAX_LENGTH:
+        return error
+    return error[: ERROR_MAX_LENGTH - 3] + "..."
+
+
 def record_decoder_runs(
     con: duckdb.DuckDBPyConnection,
     observation_id: int,
     decoder_versions: Mapping[str, str | None],
     *,
     runtime_ms: int | None = None,
+    errors: Mapping[str, str] | None = None,
 ) -> None:
     """Record that each decoder in `decoder_versions` has been run.
 
@@ -137,11 +152,16 @@ def record_decoder_runs(
     together as a single unit of work, so the same value is stamped onto
     each of their rows.
 
+    `errors` maps a decoder name to what went wrong running it, stored
+    shortened to `ERROR_MAX_LENGTH` characters; a decoder absent from it
+    gets a NULL `error`.
+
     Upserted by (observation_id, decoder): rerunning a pair (e.g. via
-    --force-rerun-decoders) just bumps `run_at`/`version`/`runtime_ms`
-    rather than adding a duplicate row.
+    --force-rerun-decoders) just bumps `run_at`/`version`/`runtime_ms`/
+    `error` rather than adding a duplicate row.
     """
     run_at = datetime.now(UTC)
+    errors = errors or {}
     rows = [
         {
             "observation_id": observation_id,
@@ -149,13 +169,16 @@ def record_decoder_runs(
             "run_at": run_at,
             "version": version,
             "runtime_ms": runtime_ms,
+            "error": _shorten_error(errors.get(decoder)),
         }
         for decoder, version in decoder_versions.items()
     ]
     if not rows:
         return
 
-    df = pl.DataFrame(rows)
+    # Typed explicitly: a batch where nothing failed is all-NULL, which
+    # polars would otherwise infer as its Null type.
+    df = pl.DataFrame(rows, schema_overrides={"error": pl.String})
     con.register("_incoming_decoder_runs", df)
     try:
         if not table_exists(con, DECODER_RUNS_TABLE):
@@ -166,6 +189,7 @@ def record_decoder_runs(
                 f"run_at TIMESTAMPTZ NOT NULL, "
                 f"version VARCHAR NOT NULL, "
                 f"runtime_ms INTEGER NOT NULL, "
+                f"error VARCHAR, "
                 f"PRIMARY KEY (observation_id, decoder))"
             )
         else:
@@ -175,7 +199,7 @@ def record_decoder_runs(
             f"SELECT * FROM _incoming_decoder_runs "
             f"ON CONFLICT (observation_id, decoder) "
             f"DO UPDATE SET run_at = excluded.run_at, version = excluded.version, "
-            f"runtime_ms = excluded.runtime_ms"
+            f"runtime_ms = excluded.runtime_ms, error = excluded.error"
         )
     finally:
         con.unregister("_incoming_decoder_runs")
