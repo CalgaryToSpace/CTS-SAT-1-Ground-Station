@@ -161,14 +161,14 @@ def format_command(
     command: str,
     tssent: datetime,
     tsexec: datetime,
-    resp: str,
+    resp_fname: str,
 ) -> str:
-    command = command.strip("!")
+    command = command.strip().rstrip("!").strip()
 
     line = f"{command}@tssent={epoch_ms(tssent)}@tsexec={epoch_ms(tsexec)}"
 
-    if resp:
-        line += f"@resp_fname={resp}"
+    if resp_fname:
+        line += f"@resp_fname={resp_fname}"
 
     return line + "!"
 
