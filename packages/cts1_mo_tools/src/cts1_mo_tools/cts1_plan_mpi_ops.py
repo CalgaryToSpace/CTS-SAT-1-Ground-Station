@@ -71,7 +71,7 @@ class Args:
     tle_file: Path | None = None
     """Optional local TLE file to use instead of fetching from CelesTrak."""
 
-    mpi_filename_format: str = "%Y-%m-%d_%H%M%SZ.mpi"
+    mpi_filename_format: str = "mpi_data/%Y-%m-%d_%H%M%SZ.mpi"
     """strftime format of the MPI filename passed to mpi_enable_active_mode."""
 
     output_csv: Path | None = None
