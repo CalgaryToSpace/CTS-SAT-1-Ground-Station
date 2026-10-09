@@ -477,6 +477,14 @@ def build_summary_comment(rows: list[dict[str, Any]]) -> str:
     return output_comment
 
 
+def default_agenda_filename(uplink_start: datetime) -> str:
+    """Default output file path if not provided, using Start UTC time (local time)."""
+
+    uplink_start_local = uplink_start.astimezone(ZoneInfo("America/Edmonton"))
+
+    return uplink_start_local.strftime("%Y-%m-%d-T%H%ML_agenda.txt")
+
+
 # ---------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------
@@ -515,14 +523,12 @@ def spreadsheet_file_to_agenda_file(
 
     # Default output file path if not provided, using Start UTC time.
     if output_file is None:
-        output_file = (
-            Path("packages/cts1_mo_tools/src/cts1_mo_tools/cts1_agenda_files")
-            / f"""{
-                mission_start.astimezone(ZoneInfo("America/Edmonton")).strftime(
-                    "%Y-%m-%dT%H%ML_agenda.txt"
-                )
-            }"""
-        )
+        output_file = Path(
+            "packages/cts1_mo_tools/src/cts1_mo_tools/cts1_agenda_files"
+        ) / default_agenda_filename(mission_start)
+    elif Path(output_file).is_dir():
+        # If the output file is a directory, use the default filename.
+        output_file = Path(output_file) / default_agenda_filename(mission_start)
 
     agenda = build_agenda(mission_date, mission_start, rows)
 
