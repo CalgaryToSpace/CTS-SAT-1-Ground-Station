@@ -1,3 +1,5 @@
+import subprocess
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -7,6 +9,7 @@ import pytest
 import requests
 from cts1_mo_tools.cts1_processing_pipeline import landing_db
 from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate import (
+    _subprocess_registry,
     db,
     decode_satnogs_client_live_data,
 )
@@ -502,3 +505,48 @@ def test_process_audio_download_failure_errors_every_audio_decoder(
     assert rows == []
     expected = "audio download: HTTPError: 503 Server Error: Service Unavailable"
     assert errors == {"askew_demod_from_file": expected, "gr_satellites_pdu": expected}
+
+
+def test_process_audio_records_tool_exit_codes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Each tool exiting non-zero (e.g. on an empty WAV) is recorded per decoder."""
+
+    def fake_download_audio(_url: str, dest_dir: Path) -> Path:
+        ogg_path = dest_dir / "a.ogg"
+        ogg_path.write_bytes(b"")
+        return ogg_path
+
+    def fake_run_tracked(
+        cmd: Sequence[str], *, check: bool = False, text: bool = False
+    ) -> subprocess.CompletedProcess[str]:
+        del check, text
+        return subprocess.CompletedProcess(
+            cmd, 1, "", "RuntimeError: WAV file does not contain any samples."
+        )
+
+    monkeypatch.setattr(step_1_pipeline, "download_audio", fake_download_audio)
+
+    def fake_convert_ogg_to_wav(ogg_path: Path) -> Path:
+        return ogg_path
+
+    monkeypatch.setattr(step_1_pipeline, "convert_ogg_to_wav", fake_convert_ogg_to_wav)
+    monkeypatch.setattr(_subprocess_registry, "run_tracked", fake_run_tracked)
+    obs = {
+        "id": 1,
+        "payload": "https://example.com/a.ogg",
+        "start": datetime(2026, 9, 1, tzinfo=UTC),
+        "end": datetime(2026, 9, 1, tzinfo=UTC),
+    }
+
+    rows, errors = step_1_pipeline._process_audio(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+        obs, tmp_path, frozenset(step_1_pipeline.DECODERS)
+    )
+
+    assert rows == []
+    assert errors == {
+        "askew_demod_from_file": "askew_demod_from_file exited with code 1",
+        "sso_rx_replay": "sso_rx_replay exited with code 1",
+        "gr_satellites_pdu": "gr_satellites exited with code 1",
+        "gr_satellites_kiss": "gr_satellites exited with code 1",
+    }

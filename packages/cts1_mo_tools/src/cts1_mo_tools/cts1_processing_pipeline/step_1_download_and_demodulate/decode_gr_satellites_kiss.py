@@ -118,6 +118,9 @@ def run_gr_satellites_kiss(
 
     Returns:
         One dict per decoded PDU, with a file-relative `time_in_file_ms`.
+
+    Raises:
+        ToolExitError: If gr_satellites exits non-zero.
     """
     with tempfile.NamedTemporaryFile(suffix=".kiss", delete=False) as tmp:
         kiss_path = Path(tmp.name)
@@ -145,7 +148,9 @@ def run_gr_satellites_kiss(
                 f"gr_satellites_kiss exited {proc.returncode} on "
                 f"{wav_path}: {proc.stderr}"
             )
-            return []
+            raise _subprocess_registry.ToolExitError(
+                tool="gr_satellites", returncode=proc.returncode
+            )
 
         data = kiss_path.read_bytes()
     finally:
