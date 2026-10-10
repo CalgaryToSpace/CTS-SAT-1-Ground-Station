@@ -53,14 +53,25 @@ def run_askew_demod_from_file(audio_path: Path) -> list[dict[str, Any]]:
         audio_path: Path to a local .ogg/.wav recording.
 
     Returns:
-        One dict per decoded frame. stderr is ignored (not surfaced even on
-        a non-zero exit -- a bad/unreadable file just yields no rows).
+        One dict per decoded frame.
+
+    Raises:
+        ToolExitError: If the tool exits non-zero, which it does on a
+            bad/unreadable file (a readable one with no frames exits 0).
     """
     proc = _subprocess_registry.run_tracked(
         ["askew_demod_from_file", "--output-filter=believable", str(audio_path)],
         check=False,
         text=True,
     )
+    if proc.returncode != 0:
+        logger.warning(
+            f"askew_demod_from_file exited {proc.returncode} on {audio_path}: "
+            f"{proc.stderr}"
+        )
+        raise _subprocess_registry.ToolExitError(
+            tool="askew_demod_from_file", returncode=proc.returncode
+        )
 
     rows = [row for line in proc.stdout.splitlines() if (row := parse_askew_line(line))]
     logger.debug(f"askew_demod_from_file: {len(rows)} frame(s) for {audio_path}")

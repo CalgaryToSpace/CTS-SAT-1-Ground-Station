@@ -9,7 +9,7 @@ call here registers its child in a shared, lock-protected set so
 `terminate_all()` can do exactly that.
 """
 
-__all__ = ["run_tracked", "terminate_all"]
+__all__ = ["ToolExitError", "run_tracked", "terminate_all"]
 
 import contextlib
 import subprocess
@@ -17,6 +17,20 @@ import threading
 import time
 from collections.abc import Sequence
 from typing import Any
+
+
+class ToolExitError(RuntimeError):
+    """A decoder's external tool exited unsuccessfully on its input.
+
+    The message only names the tool and its exit code, short enough for
+    `decoder_runs.error`; the wrapper raising it logs the full stderr.
+    """
+
+    def __init__(self, tool: str, returncode: int) -> None:
+        super().__init__(f"{tool} exited with code {returncode}")
+        self.tool = tool
+        self.returncode = returncode
+
 
 _lock = threading.Lock()
 _active: set[subprocess.Popen[Any]] = set()

@@ -98,6 +98,10 @@ def run_sso_rx_replay(
 
     Returns:
         One dict per forensics-report JSON line (frames, no-decode, or error).
+
+    Raises:
+        ToolExitError: If sso_rx_replay exits non-zero without reporting
+            any frames -- e.g. it couldn't read the audio at all.
     """
     proc = _subprocess_registry.run_tracked(
         [
@@ -118,5 +122,9 @@ def run_sso_rx_replay(
     rows = [
         row for line in proc.stdout.splitlines() if (row := parse_forensics_line(line))
     ]
+    if proc.returncode != 0 and not rows:
+        raise _subprocess_registry.ToolExitError(
+            tool="sso_rx_replay", returncode=proc.returncode
+        )
     logger.debug(f"sso_rx_replay: {len(rows)} report line(s) for {report_filename}")
     return rows

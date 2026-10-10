@@ -39,6 +39,7 @@ from cts1_mo_tools.cts1_processing_pipeline import landing_db, resource_limits
 from cts1_mo_tools.cts1_processing_pipeline.common import parse_start_filter
 
 from . import db
+from ._subprocess_registry import ToolExitError
 from .audio import convert_ogg_to_wav, download_audio
 from .decode_askew_demod import run_askew_demod_from_file
 from .decode_gr_satellites import DEFAULT_SATCFG_PATH, run_gr_satellites_pdu
@@ -47,6 +48,8 @@ from .decode_satnogs_client_live_data import run_satnogs_client_live_data
 from .decode_sso_rx_replay import run_sso_rx_replay
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     import duckdb
 
 # See `landing_db` for why every step shares one `data_dir`.
@@ -104,6 +107,25 @@ def _describe_error(context: str, exc: BaseException) -> str:
     return f"{context}: {type(exc).__name__}: {exc}"
 
 
+def _run_decoder(
+    decoder: str,
+    obs_id: int,
+    errors: dict[str, str],
+    run: Callable[[], list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """`run()`'s rows, or none if it raised -- recording why in `errors`."""
+    try:
+        return run()
+    except ToolExitError as exc:
+        # The wrapper already logged the tool's full stderr.
+        logger.warning(f"{decoder} failed for observation {obs_id}: {exc}")
+        errors[decoder] = str(exc)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(f"{decoder} decode failed for observation {obs_id}")
+        errors[decoder] = _describe_error("decode", exc)
+    return []
+
+
 def _resolve_decoder_versions(tools: frozenset[str]) -> dict[str, str | None]:
     """Run `<tool> --version` once per distinct command, first line only.
 
@@ -148,7 +170,7 @@ def _received_at(obs: dict[str, Any], *, time_in_file_ms: float | None) -> datet
     return obs["end"]
 
 
-def _process_audio(  # noqa: C901, PLR0912
+def _process_audio(  # noqa: C901
     obs: dict[str, Any],
     temp_dir: Path | None,
     tools: frozenset[str],
@@ -179,14 +201,12 @@ def _process_audio(  # noqa: C901, PLR0912
             return rows, {d: error for d in _AUDIO_DECODERS if d in tools}
 
         if "askew_demod_from_file" in tools:
-            try:
-                askew_rows = run_askew_demod_from_file(ogg_path)
-            except Exception as exc:  # noqa: BLE001
-                logger.exception(
-                    f"askew_demod_from_file decode failed for observation {obs_id}"
-                )
-                errors["askew_demod_from_file"] = _describe_error("decode", exc)
-                askew_rows = []
+            askew_rows = _run_decoder(
+                "askew_demod_from_file",
+                obs_id,
+                errors,
+                lambda: run_askew_demod_from_file(ogg_path),
+            )
             for row in askew_rows:
                 rows.append(  # noqa: PERF401
                     {
@@ -202,7 +222,12 @@ def _process_audio(  # noqa: C901, PLR0912
                 )
 
         if "sso_rx_replay" in tools:
-            sso_rows = run_sso_rx_replay(ogg_path, report_filename=ogg_path.name)
+            sso_rows = _run_decoder(
+                "sso_rx_replay",
+                obs_id,
+                errors,
+                lambda: run_sso_rx_replay(ogg_path, report_filename=ogg_path.name),
+            )
             for row in sso_rows:
                 rows.append(  # noqa: PERF401
                     {
@@ -229,14 +254,12 @@ def _process_audio(  # noqa: C901, PLR0912
             return rows, errors
 
         if "gr_satellites_pdu" in tools:
-            try:
-                gr_rows = run_gr_satellites_pdu(wav_path, satcfg=DEFAULT_SATCFG_PATH)
-            except Exception as exc:  # noqa: BLE001
-                logger.exception(
-                    f"gr_satellites_pdu decode failed for observation {obs_id}"
-                )
-                errors["gr_satellites_pdu"] = _describe_error("decode", exc)
-                gr_rows = []
+            gr_rows = _run_decoder(
+                "gr_satellites_pdu",
+                obs_id,
+                errors,
+                lambda: run_gr_satellites_pdu(wav_path, satcfg=DEFAULT_SATCFG_PATH),
+            )
             for row in gr_rows:
                 rows.append(  # noqa: PERF401
                     {
@@ -251,14 +274,12 @@ def _process_audio(  # noqa: C901, PLR0912
                 )
 
         if "gr_satellites_kiss" in tools:
-            try:
-                kiss_rows = run_gr_satellites_kiss(wav_path, satcfg=DEFAULT_SATCFG_PATH)
-            except Exception as exc:  # noqa: BLE001
-                logger.exception(
-                    f"gr_satellites_kiss decode failed for observation {obs_id}"
-                )
-                errors["gr_satellites_kiss"] = _describe_error("decode", exc)
-                kiss_rows = []
+            kiss_rows = _run_decoder(
+                "gr_satellites_kiss",
+                obs_id,
+                errors,
+                lambda: run_gr_satellites_kiss(wav_path, satcfg=DEFAULT_SATCFG_PATH),
+            )
             for row in kiss_rows:
                 rows.append(  # noqa: PERF401
                     {

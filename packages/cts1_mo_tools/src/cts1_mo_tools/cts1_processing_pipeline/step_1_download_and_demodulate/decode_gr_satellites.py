@@ -73,6 +73,9 @@ def run_gr_satellites_pdu(
 
     Returns:
         One dict per decoded PDU.
+
+    Raises:
+        ToolExitError: If gr_satellites exits non-zero.
     """
     proc = _subprocess_registry.run_tracked(
         [
@@ -89,7 +92,9 @@ def run_gr_satellites_pdu(
         logger.warning(
             f"gr_satellites_pdu exited {proc.returncode} on {wav_path}: {proc.stderr}"
         )
-        return []
+        raise _subprocess_registry.ToolExitError(
+            tool="gr_satellites", returncode=proc.returncode
+        )
 
     rows = parse_hexdump_stdout(proc.stdout)
     logger.debug(f"gr_satellites_pdu: {len(rows)} PDU(s) for {wav_path}")
