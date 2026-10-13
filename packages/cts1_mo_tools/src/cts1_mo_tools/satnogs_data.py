@@ -12,6 +12,7 @@ import requests
 from loguru import logger
 
 SATNOGS_BASE = "https://network.satnogs.org/api"
+SATNOGS_DB_BASE = "https://db.satnogs.org/api"
 _LINK_NEXT_RE = re.compile(r'<([^>]+)>;\s*rel="next"')
 _SATNOGS_API_DATETIME_REQUEST_FORMAT = "%Y-%m-%dT%H:%M:%S"
 _MAX_RETRIES: Final = 6
@@ -202,3 +203,14 @@ def fetch_all_observations(  # noqa: PLR0913
             f"  status={status!r}: {obs_count} observation(s) across "
             f"{page_count} page(s)"
         )
+
+
+def fetch_launch_date(norad_cat_id: str) -> datetime:
+    """When the satellite launched, per SatNOGS DB."""
+    r = requests.get(
+        f"{SATNOGS_DB_BASE}/satellites/",
+        params={"norad_cat_id": norad_cat_id, "format": "json"},
+        timeout=_REQUEST_TIMEOUT_SEC,
+    )
+    r.raise_for_status()
+    return datetime.fromisoformat(r.json()[0]["launched"])
