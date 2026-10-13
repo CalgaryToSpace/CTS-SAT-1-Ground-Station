@@ -3,10 +3,9 @@
 The daemon only ever covers `start` onwards (24 hours by default). With
 idle backfill enabled, it also spends the time it would otherwise sleep
 between requeries running steps 0 and 1 over the history before that, back
-to `step_0_list_observations.pipeline.DEFAULT_HISTORY_START` (just before
-the satellite's first SatNOGS observation) -- one step-0 listing window
-(12h) at a time, newest first, so it can stop between chunks to honour a
-web UI trigger request or the next scheduled requery.
+to `LAUNCH_MARGIN` before the satellite's launch date per SatNOGS DB -- one
+step-0 listing window (12h) at a time, newest first, so it can stop between
+chunks to honour a web UI trigger request or the next scheduled requery.
 
 A window is a chunk worth backfilling when either:
 
@@ -38,6 +37,7 @@ from __future__ import annotations
 
 __all__ = [
     "ENV_VAR",
+    "LAUNCH_MARGIN",
     "LISTING_REQUESTS_PER_HOUR_LIMIT",
     "IdleBackfill",
     "enabled_by_env",
@@ -45,7 +45,7 @@ __all__ = [
 
 import os
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Final
 
 from loguru import logger
@@ -70,6 +70,9 @@ _TRUTHY = frozenset({"1", "true", "yes", "on"})
 # SatNOGS's 240 listing requests/hour, less 50 kept for the regular requeries.
 LISTING_REQUESTS_PER_HOUR_LIMIT: Final = 240 - 50
 
+# How far before the satellite's launch date backfill reaches.
+LAUNCH_MARGIN: Final = timedelta(days=3)
+
 
 def enabled_by_env() -> bool:
     """Whether `ENV_VAR` asks for idle backfill (1/true/yes/on)."""
@@ -84,16 +87,17 @@ class IdleBackfill:
     `until` is the daemon's resolved `start`: the regular runs cover
     everything from there on, so backfill covers the windows before it
     (the window it falls in included, since step 1's regular runs only
-    decode that window from `until` onwards).
+    decode that window from `until` onwards). `since` is where it reaches
+    back to.
     """
 
     norad_id: str
     data_dir: Path
     until: datetime
+    since: datetime
     workers: int
     temp_dir: Path | None
     tools: tuple[str, ...] | None
-    since: datetime = step_0_pipeline.DEFAULT_HISTORY_START
     _attempted: set[datetime] = field(default_factory=set[datetime])
     _announced_caught_up: bool = False
 

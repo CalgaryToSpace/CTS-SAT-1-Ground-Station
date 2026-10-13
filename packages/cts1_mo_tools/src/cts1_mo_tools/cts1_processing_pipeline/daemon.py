@@ -25,8 +25,9 @@ they're files rather than anything cleverer -- are described in
 
 With idle backfill enabled (`idle_backfill`, or the `CTS1_IDLE_BACKFILL`
 environment variable), the daemon spends that sleep running steps 0 and 1
-over the history before `start` instead, back to the satellite's first
-observations, one 12h chunk at a time -- see `idle_backfill`.
+over the history before `start` instead, back to a few days before the
+satellite's SatNOGS DB launch date, one 12h chunk at a time -- see
+`idle_backfill`.
 
 Invoked via the top-level CLI's `daemon` subcommand -- see
 `cts1_mo_tools.cts1_processing_pipeline.cli`.
@@ -42,10 +43,12 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
+from cts1_mo_tools import satnogs_data
+
 from . import daemon_signals, resource_limits
 from .common import parse_start_filter
 from .daemon_signals import DaemonState, StatusReporter
-from .idle_backfill import IdleBackfill
+from .idle_backfill import LAUNCH_MARGIN, IdleBackfill
 from .step_0_list_observations import pipeline as step_0_pipeline
 from .step_1_download_and_demodulate import pipeline as step_1_pipeline
 from .step_2_deduplicate_packets import pipeline as step_2_pipeline
@@ -257,6 +260,7 @@ def run(  # noqa: PLR0913
             norad_id=norad_id,
             data_dir=data_dir,
             until=datetime.fromisoformat(start_at),
+            since=satnogs_data.fetch_launch_date(norad_id) - LAUNCH_MARGIN,
             workers=workers,
             temp_dir=temp_dir,
             tools=tools,

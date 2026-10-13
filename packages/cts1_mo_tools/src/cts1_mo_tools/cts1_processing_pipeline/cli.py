@@ -172,9 +172,9 @@ class DaemonArgs:
 
     idle_backfill: bool = False
     """While waiting between runs, list and decode (steps 0 and 1) the
-    history before --start, back to the satellite's first observations,
-    one 12h window at a time. Also enabled by setting CTS1_IDLE_BACKFILL=1
-    in the environment."""
+    history before --start, back to a few days before the satellite's
+    launch date per SatNOGS DB, one 12h window at a time. Also enabled by
+    setting CTS1_IDLE_BACKFILL=1 in the environment."""
 
 
 # Add further steps as additional
