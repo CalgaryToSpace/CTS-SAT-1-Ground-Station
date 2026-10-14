@@ -15,6 +15,7 @@ import math
 import sqlite3
 import struct
 import zlib
+from collections import Counter
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
@@ -1537,6 +1538,18 @@ _PACKET_DECODERS = {
     0x30: decode_gnss_bestxyzb_sample_packet,
 }
 
+# Map packet_type byte → minimum payload size (post-CSP bytes) its decoder
+# accepts. Lets `_decode_distinct_payloads` skip (and count, rather than log
+# one-by-one) truncated packets up front.
+_PACKET_MIN_PAYLOAD_SIZES = {
+    0x01: BEACON_TOTAL_STRUCT_SIZE,
+    0x03: 1,
+    0x04: TCMD_RESPONSE_HEADER_SIZE,
+    0x10: BULK_DOWNLINK_HEADER_SIZE,
+    0x20: BEACON_EXTENDED_TOTAL_STRUCT_SIZE,
+    0x30: GNSS_DOWNLINK_HEADER_SIZE + NOVATEL_HEADER_SIZE + BESTXYZ_BODY_SIZE,
+}
+
 
 def decode_packet_safe(hex_str: str) -> dict[str, Any] | None:
     """Attempt to decode any supported packet type.
@@ -1549,6 +1562,16 @@ def decode_packet_safe(hex_str: str) -> dict[str, Any] | None:
     except ValueError:
         return None
     return decode_raw_packet_safe(raw)
+
+
+def is_packet_too_short(raw: bytes) -> bool:
+    """Whether `raw` (CSP header included) is too short for its packet type's
+    decoder, per `_PACKET_MIN_PAYLOAD_SIZES`. False for unknown types.
+    """
+    if len(raw) <= CSP_HEADER_SIZE:
+        return False
+    min_size = _PACKET_MIN_PAYLOAD_SIZES.get(raw[CSP_HEADER_SIZE], 0)
+    return len(raw) - CSP_HEADER_SIZE < min_size
 
 
 def decode_raw_packet_safe(
@@ -1781,14 +1804,28 @@ def _decode_distinct_payloads(hex_payloads: pl.Series) -> pl.DataFrame:
     )
 
     chunks: list[pl.DataFrame] = []
+    too_short_counts: Counter[str] = Counter()
     for chunk in payloads.iter_slices(_DECODE_CHUNK_SIZE):
         rows: list[dict[str, Any]] = []
         for hex_val, raw_bytes, crc_valid in chunk.iter_rows():
+            # Skip truncated packets entirely (leaving their decoded columns
+            # null), so they're logged once in total below, rather than once
+            # each by `decode_raw_packet_safe`.
+            if is_packet_too_short(raw_bytes):
+                too_short_counts[e(PACKET_TYPE_MAP, raw_bytes[CSP_HEADER_SIZE])] += 1
+                continue
             decoded = decode_raw_packet_safe(raw_bytes, crc_valid=crc_valid)
             if decoded:
                 rows.append({"hex_payload": hex_val, **decoded})
         if rows:
             chunks.append(pl.DataFrame(rows, infer_schema_length=None))
+
+    if too_short_counts:
+        logger.warning(
+            f"Skipped decoding {too_short_counts.total():,} of {len(payloads):,} "
+            "distinct packet(s) too short for their packet type: "
+            + ", ".join(f"{name}={n:,}" for name, n in too_short_counts.most_common())
+        )
 
     if not chunks:
         return pl.DataFrame()
