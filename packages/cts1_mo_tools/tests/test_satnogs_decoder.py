@@ -6,6 +6,8 @@ from typing import Any
 import polars as pl
 import pytest
 from cts1_mo_tools.cts1_decode_satnogs_packets import (
+    _PACKET_DECODERS,  # pyright: ignore[reportPrivateUsage]
+    _PACKET_MIN_PAYLOAD_SIZES,  # pyright: ignore[reportPrivateUsage]
     ADCS_ENABLED_BITS,
     ADCS_ERROR_BITS,
     ADCS_FLAG_BITS,
@@ -41,6 +43,7 @@ from cts1_mo_tools.cts1_decode_satnogs_packets import (
     decode_to_df,
     e,
     ecef_to_geodetic,
+    is_packet_too_short,
     novatel_crc32,
 )
 
@@ -1347,6 +1350,31 @@ class TestDecodeGnssBestxyzbSample:
 
 
 # ---------------------------------------------------------------------------
+# Tests for is_packet_too_short (pre-filter for decode_to_df)
+# ---------------------------------------------------------------------------
+
+
+class TestIsPacketTooShort:
+    @pytest.mark.parametrize("packet_type", sorted(_PACKET_MIN_PAYLOAD_SIZES))
+    def test_agrees_with_decoder(self, packet_type: int) -> None:
+        """One byte under the minimum is too short (and the decoder agrees);
+        exactly the minimum isn't.
+        """
+        min_size = _PACKET_MIN_PAYLOAD_SIZES[packet_type]
+        exact = bytes([packet_type]) + b"\x00" * (min_size - 1)
+        assert not is_packet_too_short(DUMMY_CSP + exact)
+        short = exact[:-1]
+        if short:  # Can't be shorter than the packet_type byte itself.
+            assert is_packet_too_short(DUMMY_CSP + short)
+            with pytest.raises(ValueError):  # noqa: PT011
+                _PACKET_DECODERS[packet_type](short, DUMMY_CSP + short)
+
+    def test_unknown_type_and_header_only(self) -> None:
+        assert not is_packet_too_short(DUMMY_CSP + b"\xff")
+        assert not is_packet_too_short(DUMMY_CSP)
+
+
+# ---------------------------------------------------------------------------
 # Tests for decode_to_df (vectorized hex parsing + CRC check)
 # ---------------------------------------------------------------------------
 
@@ -1398,3 +1426,11 @@ class TestDecodeToDf:
             }
             assert {k: row[k] for k in expected} == expected
             assert all(row[k] is None for k in decoded_cols - expected.keys())
+
+    def test_too_short_packet_is_skipped(self) -> None:
+        """A truncated packet keeps its row, but with nothing decoded."""
+        truncated = (DUMMY_CSP + _make_beacon_payload()[:50]).hex()
+        valid = (DUMMY_CSP + _make_beacon_payload()).hex()
+        result = self._decode([truncated, valid])
+        assert result["hex_payload"].to_list() == [truncated, valid]
+        assert result["packet_type"].to_list() == [None, "BEACON_BASIC"]
