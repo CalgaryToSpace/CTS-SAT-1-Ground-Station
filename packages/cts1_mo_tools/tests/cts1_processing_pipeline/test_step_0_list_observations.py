@@ -292,32 +292,31 @@ def test_run_skips_settled_windows_on_the_next_run(
     assert (tmp_path / "observation_listing_history.parquet").exists()
 
 
-@pytest.mark.parametrize("sort_chunk_rows", [None, 3, 7, 100])
-def test_parquet_export_is_sorted_whether_chunked_or_not(
-    con: Any, tmp_path: Path, sort_chunk_rows: int | None
-) -> None:
-    # Inserted out of order, with ties on the first sort key, so each chunk
-    # boundary has to land mid-group for the order to come out right.
+def test_parquet_export_sorts_only_when_asked(con: Any, tmp_path: Path) -> None:
     con.execute(
-        "CREATE TABLE t AS SELECT (i * 7) % 5 AS a, (i * 3) % 20 AS b, "
-        "repeat('x', i) AS wide FROM range(20) AS r(i)"
+        "CREATE TABLE t AS SELECT (i * 7919) % 10000 AS a FROM range(10000) AS r(i)"
     )
-    out_path = tmp_path / "t.parquet"
+    sorted_path, unsorted_path = tmp_path / "sorted.parquet", tmp_path / "t.parquet"
 
+    landing_db.export_table_to_parquet(con, "t", sorted_path, order_by_columns=["a"])
     landing_db.export_table_to_parquet(
-        con,
-        "t",
-        out_path,
-        order_by_columns=["a", "b"],
-        sort_chunk_rows=sort_chunk_rows,
+        con, "t", unsorted_path, order_by_columns=None, row_group_size=2048
     )
 
-    exported = con.execute(
-        "SELECT a, b, wide FROM read_parquet(?)", [str(out_path)]
-    ).fetchall()
-    expected = con.execute("SELECT a, b, wide FROM t ORDER BY a, b").fetchall()
-    assert exported == expected
-    assert not out_path.with_suffix(".tmp").exists()
+    def read(path: Path) -> list[int]:
+        rows = con.execute("SELECT a FROM read_parquet(?)", [str(path)]).fetchall()
+        return [a for (a,) in rows]
+
+    table_order = [a for (a,) in con.execute("SELECT a FROM t").fetchall()]
+    assert read(sorted_path) == sorted(table_order)
+    assert read(unsorted_path) == table_order
+    # DuckDB writes row groups in whole 2048-row vectors, so this is the
+    # smallest cap it honors exactly.
+    row_groups = con.execute(
+        "SELECT count(DISTINCT row_group_id) FROM parquet_metadata(?)",
+        [str(unsorted_path)],
+    ).fetchone()
+    assert row_groups == (5,)
 
 
 # ---------------------------------------------------------------------------
