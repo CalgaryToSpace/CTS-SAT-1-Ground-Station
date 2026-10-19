@@ -292,6 +292,34 @@ def test_run_skips_settled_windows_on_the_next_run(
     assert (tmp_path / "observation_listing_history.parquet").exists()
 
 
+@pytest.mark.parametrize("sort_chunk_rows", [None, 3, 7, 100])
+def test_parquet_export_is_sorted_whether_chunked_or_not(
+    con: Any, tmp_path: Path, sort_chunk_rows: int | None
+) -> None:
+    # Inserted out of order, with ties on the first sort key, so each chunk
+    # boundary has to land mid-group for the order to come out right.
+    con.execute(
+        "CREATE TABLE t AS SELECT (i * 7) % 5 AS a, (i * 3) % 20 AS b, "
+        "repeat('x', i) AS wide FROM range(20) AS r(i)"
+    )
+    out_path = tmp_path / "t.parquet"
+
+    landing_db.export_table_to_parquet(
+        con,
+        "t",
+        out_path,
+        order_by_columns=["a", "b"],
+        sort_chunk_rows=sort_chunk_rows,
+    )
+
+    exported = con.execute(
+        "SELECT a, b, wide FROM read_parquet(?)", [str(out_path)]
+    ).fetchall()
+    expected = con.execute("SELECT a, b, wide FROM t ORDER BY a, b").fetchall()
+    assert exported == expected
+    assert not out_path.with_suffix(".tmp").exists()
+
+
 # ---------------------------------------------------------------------------
 # Step 1 reading step 0's listing back out.
 # ---------------------------------------------------------------------------

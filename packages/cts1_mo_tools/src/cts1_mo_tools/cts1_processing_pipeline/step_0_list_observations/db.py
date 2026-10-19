@@ -54,6 +54,12 @@ RAW_OBSERVATIONS_TABLE = "raw_observations"
 LISTING_HISTORY_TABLE = "observation_listing_history"
 LISTING_WINDOWS_TABLE = "observation_listing_windows"
 
+# raw_observations rows average a few KB (mostly `demoddata`, which runs to
+# hundreds of KB on a busy pass), so a chunk this size is tens of MB --
+# comfortably inside even the 500MB DuckDB floor. See
+# `landing_db.export_table_to_parquet`.
+RAW_OBSERVATIONS_SORT_CHUNK_ROWS = 5000
+
 
 @dataclass(frozen=True, slots=True)
 class ListingRecord:
@@ -242,4 +248,9 @@ def export_parquets(con: duckdb.DuckDBPyConnection, db_path: Path) -> None:
                 table=table,
                 out_path=out_dir / f"{table}.parquet",
                 order_by_columns=order_by_columns,
+                sort_chunk_rows=(
+                    RAW_OBSERVATIONS_SORT_CHUNK_ROWS
+                    if table == RAW_OBSERVATIONS_TABLE
+                    else None
+                ),
             )
