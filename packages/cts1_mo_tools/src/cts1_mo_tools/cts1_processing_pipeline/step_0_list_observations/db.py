@@ -54,11 +54,10 @@ RAW_OBSERVATIONS_TABLE = "raw_observations"
 LISTING_HISTORY_TABLE = "observation_listing_history"
 LISTING_WINDOWS_TABLE = "observation_listing_windows"
 
-# raw_observations rows average a few KB (mostly `demoddata`, which runs to
-# hundreds of KB on a busy pass), so a chunk this size is tens of MB --
-# comfortably inside even the 500MB DuckDB floor. See
-# `landing_db.export_table_to_parquet`.
-RAW_OBSERVATIONS_SORT_CHUNK_ROWS = 5000
+# raw_observations rows average a few KB (mostly `demoddata`), so a row
+# group this size is tens of MB per column at most -- comfortably inside
+# even the 500MB DuckDB floor. See `landing_db.export_table_to_parquet`.
+RAW_OBSERVATIONS_ROW_GROUP_SIZE = 5000
 
 
 @dataclass(frozen=True, slots=True)
@@ -237,7 +236,10 @@ def export_parquets(con: duckdb.DuckDBPyConnection, db_path: Path) -> None:
     """Copy step 0's tables out to Parquet files next to db_path."""
     out_dir = db_path.parent
     order_by = {
-        RAW_OBSERVATIONS_TABLE: ["id"],
+        # Unsorted: `demoddata` runs to hundreds of KB per row, too wide to
+        # sort within DuckDB's memory limit -- and nothing downstream reads
+        # this table in id order anyway.
+        RAW_OBSERVATIONS_TABLE: None,
         LISTING_HISTORY_TABLE: ["started_at", "window_start"],
         LISTING_WINDOWS_TABLE: ["window_start"],
     }
@@ -248,8 +250,8 @@ def export_parquets(con: duckdb.DuckDBPyConnection, db_path: Path) -> None:
                 table=table,
                 out_path=out_dir / f"{table}.parquet",
                 order_by_columns=order_by_columns,
-                sort_chunk_rows=(
-                    RAW_OBSERVATIONS_SORT_CHUNK_ROWS
+                row_group_size=(
+                    RAW_OBSERVATIONS_ROW_GROUP_SIZE
                     if table == RAW_OBSERVATIONS_TABLE
                     else None
                 ),

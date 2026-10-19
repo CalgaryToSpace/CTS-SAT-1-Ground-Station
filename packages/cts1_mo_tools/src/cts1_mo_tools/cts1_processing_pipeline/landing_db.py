@@ -162,61 +162,13 @@ def insert_with_type_repair(
         con.execute(insert_sql)
 
 
-def _copy_to_parquet(
-    con: duckdb.DuckDBPyConnection, select_sql: str, out_path: Path
-) -> None:
-    con.execute(
-        f"COPY ({select_sql}) TO {quote_literal(str(out_path))} (FORMAT PARQUET)"
-    )
-
-
-def _copy_to_parquet_in_sorted_chunks(
-    con: duckdb.DuckDBPyConnection,
-    table: str,
-    out_path: Path,
-    *,
-    order_by_str: str,
-    chunk_rows: int,
-) -> None:
-    """The chunked half of `export_table_to_parquet` -- see its docstring.
-
-    Each row's position in the sorted order is computed once, from just the
-    sort keys and `rowid`, into a temp table; each chunk then joins its
-    slice of positions back to the full rows and sorts only those. The
-    chunks are UNION ALL'd into one COPY, which (with DuckDB's default
-    `preserve_insertion_order`) writes them out in order.
-    """
-    keys_table = quote_ident(f"_sort_keys_{table}")
-    con.execute(
-        f"CREATE OR REPLACE TEMP TABLE {keys_table} AS "  # noqa: S608
-        f"SELECT rowid AS _rid, row_number() OVER (ORDER BY {order_by_str}) - 1 "
-        f"AS _pos FROM {quote_ident(table)}"
-    )
-    try:
-        row = con.execute(f"SELECT count(*) FROM {keys_table}").fetchone()  # noqa: S608
-        assert row is not None
-        total_rows = int(row[0])
-        chunks = [
-            f"(SELECT t.* FROM {quote_ident(table)} AS t "  # noqa: S608
-            f"JOIN {keys_table} AS k ON t.rowid = k._rid "
-            f"WHERE k._pos >= {lo} AND k._pos < {lo + chunk_rows} "
-            f"ORDER BY k._pos)"
-            # At least one chunk, even if empty, so the COPY still has a
-            # query (and so writes the table's schema).
-            for lo in range(0, max(total_rows, 1), chunk_rows)
-        ]
-        _copy_to_parquet(con, " UNION ALL ".join(chunks), out_path)
-    finally:
-        con.execute(f"DROP TABLE IF EXISTS {keys_table}")
-
-
 def export_table_to_parquet(
     con: duckdb.DuckDBPyConnection,
     table: str,
     out_path: Path,
     *,
-    order_by_columns: list[str],
-    sort_chunk_rows: int | None = None,
+    order_by_columns: list[str] | None,
+    row_group_size: int | None = None,
 ) -> None:
     """Write `table` to `out_path`, sorted, via a temp file + rename.
 
@@ -224,29 +176,32 @@ def export_table_to_parquet(
     downstream; the rename means a reader (the web UI, a later step) never
     catches a half-written file.
 
-    `sort_chunk_rows` is for tables whose rows are too wide for DuckDB to
-    sort whole within its memory limit (`raw_observations`, whose
-    `demoddata` runs to hundreds of KB per row): a plain `ORDER BY` there
-    runs out of memory rather than spilling. With it set, only the narrow
-    sort keys are sorted up front, and the full rows are then written in
-    sorted chunks of that many rows, so peak memory scales with the chunk
-    rather than the table. Each chunk rescans the table, so leave it None
-    for narrow tables, which sort fine in one go.
+    `order_by_columns=None` skips the sort, writing rows in table order --
+    for tables too wide to sort within DuckDB's memory limit, where a full
+    `ORDER BY` runs out of memory rather than spilling. `row_group_size`
+    caps rows per parquet row group (DuckDB's default is 122,880): the
+    writer buffers each column of a row group as one contiguous
+    allocation, which a wide table's default-sized row groups can't fit.
     """
-    order_by_str = ", ".join([f"{quote_ident(col)} ASC" for col in order_by_columns])
-    select_sql = f"SELECT * FROM {quote_ident(table)} ORDER BY {order_by_str}"  # noqa: S608
+    order_by_sql = ""
+    if order_by_columns is not None:
+        order_by_sql = "ORDER BY " + ", ".join(
+            [f"{quote_ident(col)} ASC" for col in order_by_columns]
+        )
+    options = "FORMAT PARQUET"
+    if row_group_size is not None:
+        options += f", ROW_GROUP_SIZE {row_group_size}"
 
     write_out_path = out_path.with_suffix(".tmp")
-    if sort_chunk_rows is None:
-        _copy_to_parquet(con, select_sql, write_out_path)
-    else:
-        _copy_to_parquet_in_sorted_chunks(
-            con,
-            table,
-            write_out_path,
-            order_by_str=order_by_str,
-            chunk_rows=sort_chunk_rows,
-        )
+    con.execute(
+        f"""
+            COPY (
+                SELECT * FROM {quote_ident(table)}
+                {order_by_sql}
+            )
+            TO {quote_literal(str(write_out_path))} ({options})
+        """  # noqa: S608
+    )
 
     write_out_path.replace(out_path)
 
