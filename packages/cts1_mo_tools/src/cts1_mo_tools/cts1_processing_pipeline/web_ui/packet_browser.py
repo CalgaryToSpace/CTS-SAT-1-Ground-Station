@@ -184,7 +184,9 @@ def _with_reassembled_tcmd(decoded: pl.LazyFrame, path: Path) -> pl.LazyFrame:
 
     combined = pl.concat(
         [
-            decoded.filter(pl.col("packet_type") != "TCMD_RESPONSE").drop(
+            # ne_missing keeps undecoded (null packet_type) packets, which a
+            # plain `!=` would evaluate to null and so filter out.
+            decoded.filter(pl.col("packet_type").ne_missing("TCMD_RESPONSE")).drop(
                 dropped, strict=False
             ),
             reassembled,
@@ -224,12 +226,16 @@ def _apply_filters(lf: pl.LazyFrame, filters: PacketBrowserFilters) -> pl.LazyFr
 def packet_type_options(path: Path) -> list[str]:
     """Every distinct `packet_type` in the file, sorted -- for the filter
     dropdown's choices.
+
+    Undecoded packets (null `packet_type`) are left out.
     """
     lf = _scan(path)
     if lf is None:
         return []
     return sorted(
-        lf.select(pl.col("packet_type").unique()).collect()["packet_type"].to_list()
+        lf.select(pl.col("packet_type").drop_nulls().unique())
+        .collect()["packet_type"]
+        .to_list()
     )
 
 

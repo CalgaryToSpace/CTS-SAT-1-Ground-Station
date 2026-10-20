@@ -26,7 +26,7 @@ def _row(  # noqa: PLR0913
     *,
     packet_id: str,
     seconds: float,
-    packet_type: str = "TCMD_RESPONSE",
+    packet_type: str | None = "TCMD_RESPONSE",
     text: str | None = None,
     seq_num: int | None = None,
     max_seq_num: int | None = None,
@@ -152,3 +152,23 @@ def test_availability_reflects_step_5_output(tmp_path: Path) -> None:
         "LOG_MESSAGE",
         "TCMD_RESPONSE",
     ]
+
+
+def test_undecoded_packets_are_handled(tmp_path: Path) -> None:
+    """Step 3 leaves `packet_type` null for packets it couldn't decode."""
+    path = _write_data_dir(tmp_path)
+    pl.concat(
+        [
+            pl.read_parquet(path),
+            pl.DataFrame([_row(packet_id="undecoded", seconds=30, packet_type=None)]),
+        ],
+        how="diagonal_relaxed",
+    ).write_parquet(path)
+
+    assert packet_browser.packet_type_options(path) == [
+        "LOG_MESSAGE",
+        "TCMD_RESPONSE",
+    ]
+    assert load_page(path, _RAW, offset=0).total_rows == 5
+    # log + 2 reassembled responses + the undecoded packet
+    assert load_page(path, _REASSEMBLED, offset=0).total_rows == 4
