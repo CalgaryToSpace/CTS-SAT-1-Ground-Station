@@ -11,11 +11,15 @@ only grows over the mission's lifetime.
 from __future__ import annotations
 
 __all__ = [
+    "ADCS_POWER_CONTROL_CHANNELS",
     "ATTITUDE_COLUMNS",
     "ATTITUDE_MODE_COLUMNS",
     "BEACON_PACKET_TYPES",
     "DEFAULT_PARQUET_PATH",
     "DEFAULT_REASSEMBLED_TCMD_PATH",
+    "adcs_channel_states",
+    "adcs_error_states",
+    "eps_channel_states",
     "latest_beacons",
     "latest_local_max_pending_tcmd_count",
     "load_attitude_window",
@@ -33,7 +37,12 @@ from typing import TYPE_CHECKING
 import polars as pl
 from cachetools import TTLCache, cached
 
-from cts1_mo_tools.cts1_decode_satnogs_packets import PACKET_TYPE_ENUM
+from cts1_mo_tools.cts1_decode_satnogs_packets import (
+    ADCS_ERROR_BITS,
+    ADCS_FLAG_BITS,
+    EPS_CHANNEL_MAP,
+    PACKET_TYPE_ENUM,
+)
 from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
     pipeline as step_3_pipeline,
 )
@@ -65,6 +74,27 @@ ATTITUDE_COLUMNS = (
 )
 # Carried alongside each attitude frame, but not what makes a row a frame.
 ATTITUDE_MODE_COLUMNS = ("adcs_attitude_estimation_mode", "adcs_control_mode")
+
+# A channel whose name ends in this isn't wired to anything, so it's hidden
+# unless it's actually been switched on.
+_UNUSED_CHANNEL_SUFFIX = "_UNUSED"
+
+# The ADCS components the power-control telecommand switches, in its argument
+# order (CubeControl signal, CubeControl motor, CubeSense 1/2, CubeStar,
+# CubeWheel 1/2/3, Motor, GPS) -- named as in `ADCS_ENABLED_BITS`. That also
+# reports `GPS_LNA_POWER`, which the telecommand doesn't control, so it's left out.
+ADCS_POWER_CONTROL_CHANNELS = (
+    "CUBECONTROL_SIGNAL",
+    "CUBECONTROL_MOTOR",
+    "CUBESENSE1",
+    "CUBESENSE2",
+    "CUBESTAR",
+    "CUBEWHEEL1",
+    "CUBEWHEEL2",
+    "CUBEWHEEL3",
+    "MOTOR_DRIVER",
+    "GPS_RECEIVER",
+)
 
 # Cached loader results expire after this long, so new data shows up.
 _CACHE_TTL_SECONDS = 30
@@ -324,3 +354,109 @@ def latest_local_max_pending_tcmd_count(
     ).item()
     row = df.row(peak_idx, named=True)
     return int(row["pending_queued_tcmd_count"]), row["received_at"]
+
+
+def _drop_never_on(states: pl.DataFrame, columns: Sequence[str]) -> pl.DataFrame:
+    """Drop those of `columns` that are never True in `states`."""
+    return states.drop([c for c in columns if not states[c].any()])
+
+
+def _json_list_states(
+    beacons: pl.DataFrame, column: str, names: Sequence[str]
+) -> pl.DataFrame:
+    """`received_at` plus one bool column per `names` entry, in that order,
+    True where `column`'s JSON list of names (e.g. `adcs_powered_list`)
+    includes it. Rows where `column` is null are dropped.
+    """
+    if column not in beacons.columns:
+        return pl.DataFrame()
+    return (
+        beacons.select("received_at", column)
+        .drop_nulls()
+        .select(
+            "received_at",
+            *(
+                pl.col(column)
+                .cast(pl.String)
+                .str.contains(f'"{name}"', literal=True)
+                .alias(name)
+                for name in names
+            ),
+        )
+    )
+
+
+def eps_channel_states(beacons: pl.DataFrame) -> pl.DataFrame:
+    """`received_at` plus one bool column per EPS power channel (named as in
+    `EPS_CHANNEL_MAP`, in bit order), True where the channel is enabled.
+
+    Decoded from `eps_enabled_channels_bitfield` rather than the
+    `eps_enabled_channels_list` JSON, since the list collapses the three
+    stack channels into one "STACK_X3" entry. One row per beacon (BASIC or
+    EXTENDED) that reported the bitfield, in `beacons`' order. `*_UNUSED`
+    channels are left out unless one was on at some point in `beacons`.
+    """
+    column = "eps_enabled_channels_bitfield"
+    if column not in beacons.columns:
+        return pl.DataFrame()
+    bits = (
+        pl.col(column)
+        .cast(pl.String)
+        .str.strip_prefix("0x")
+        .str.to_integer(base=16, strict=False)
+        .cast(pl.UInt32)
+    )
+    states = beacons.select("received_at", bits.alias(column)).drop_nulls()
+    states = states.select(
+        "received_at",
+        *(
+            ((pl.col(column) & (1 << bit_num)) != 0).alias(name)
+            for bit_num, name in EPS_CHANNEL_MAP.items()
+        ),
+    )
+    return _drop_never_on(
+        states, [c for c in states.columns if c.endswith(_UNUSED_CHANNEL_SUFFIX)]
+    )
+
+
+def adcs_channel_states(beacons: pl.DataFrame) -> pl.DataFrame:
+    """`received_at` plus one bool column per `ADCS_POWER_CONTROL_CHANNELS`
+    entry, in that order, True where the component is on.
+
+    Decoded from `adcs_powered_list`, which only `BEACON_EXTENDED` packets
+    carry -- so there's one row per extended beacon in `beacons`, in order.
+    """
+    return _json_list_states(beacons, "adcs_powered_list", ADCS_POWER_CONTROL_CHANNELS)
+
+
+def adcs_error_states(beacons: pl.DataFrame) -> pl.DataFrame:
+    """`received_at` plus one bool column per ADCS error (`adcs_errors`) or
+    overcurrent detection (`adcs_flags`), True where it's set -- one row per
+    extended beacon in `beacons`. Columns are in bit order, so each camera's
+    errors and overcurrents sit together.
+
+    Only those set at some point in `beacons` are kept: there are 24 of
+    them, and almost all are clear almost all the time.
+    """
+    by_bit = sorted(
+        (bit_num, column, name)
+        for column, bits in (
+            ("adcs_errors", ADCS_ERROR_BITS),
+            ("adcs_flags", ADCS_FLAG_BITS),
+        )
+        for bit_num, name in bits
+    )
+    if not {"adcs_errors", "adcs_flags"} <= set(beacons.columns):
+        return pl.DataFrame()
+    states = beacons.filter(pl.col("adcs_errors").is_not_null()).select(
+        "received_at",
+        *(
+            pl.col(column)
+            .cast(pl.String)
+            .str.contains(f'"{name}"', literal=True)
+            .fill_null(value=False)
+            .alias(name)
+            for _, column, name in by_bit
+        ),
+    )
+    return _drop_never_on(states, [name for _, _, name in by_bit])

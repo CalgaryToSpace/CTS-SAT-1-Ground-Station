@@ -27,6 +27,7 @@ from . import uplinks
 from .attitude_view import AttitudePlayer
 from .charts import (
     BEACON_CHART_GROUPS,
+    channel_states_option,
     chart_option,
     packet_counts_histogram_option,
 )
@@ -94,7 +95,6 @@ class _LiveData:
     latest_extended: pl.DataFrame
     local_max_pending: tuple[int, datetime] | None
     latest_uplink: uplinks.FinishedUplink | None
-    recent: pl.DataFrame
 
 
 def _load_live_data(path: Path) -> _LiveData:
@@ -106,7 +106,6 @@ def _load_live_data(path: Path) -> _LiveData:
         ),
         local_max_pending=beacon_data.latest_local_max_pending_tcmd_count(path),
         latest_uplink=uplinks.latest_finished_uplink(path, window=timedelta(hours=24)),
-        recent=beacon_data.latest_beacons(path, n=10),
     )
 
 
@@ -148,6 +147,39 @@ def _latest_uplink_stats(
             f"{latest_uplink.tcmd_count_after} = {'?' if delta is None else delta}",
         ),
     ]
+
+
+def _channel_chips(title: str, states: pl.DataFrame) -> None:
+    """One labelled row of on/off chips, from `states`' newest row (see
+    `beacon_data.eps_channel_states`). Says so when there's no reading yet.
+    """
+    with ui.column().classes("gap-1"):
+        ui.label(title).classes("text-base font-medium")
+        if states.is_empty():
+            ui.label("No reading yet.").classes("text-caption text-grey")
+            return
+        row = states.drop("received_at").row(-1, named=True)
+        with ui.row().classes("gap-1 flex-wrap"):
+            for name, on in row.items():
+                ui.chip(
+                    name,
+                    icon="power" if on else "power_off",
+                    color="positive" if on else "grey-4",
+                    text_color="white" if on else "grey-8",
+                ).props("dense square")
+
+
+def _power_channels_card(latest: pl.DataFrame, latest_extended: pl.DataFrame) -> None:
+    """Which EPS power channels (every beacon) and ADCS components (extended
+    beacons only) are currently on -- each from the newest beacon carrying it.
+    """
+    with ui.card().classes("w-full"):
+        ui.label("Power Channels").classes("text-lg font-bold")
+        with ui.row().classes("w-full gap-x-8 gap-y-2 flex-wrap"):
+            _channel_chips("EPS Channels", beacon_data.eps_channel_states(latest))
+            _channel_chips(
+                "ADCS Powered", beacon_data.adcs_channel_states(latest_extended)
+            )
 
 
 def _latest_beacon_card(
@@ -259,60 +291,6 @@ def _latest_extended_beacon_card(latest: pl.DataFrame) -> None:
                     ui.label(str(value)).classes("text-base font-medium")
 
 
-def _recent_beacons_table(recent: pl.DataFrame, ui_state: dict[str, bool]) -> None:
-    """Collapsed by default. This is rebuilt by the 30s `live_status`
-    refresh, so whether it's open lives in `ui_state` (per page load)
-    rather than on the widget -- otherwise it'd snap shut every refresh.
-    """
-
-    def _on_toggle(e: events.ValueChangeEventArguments) -> None:
-        ui_state["recent_beacons_open"] = bool(e.value)
-
-    with ui.expansion(
-        "Recent Beacons",
-        value=ui_state.get("recent_beacons_open", False),
-        on_value_change=_on_toggle,
-    ).classes("w-full border rounded"):
-        if recent.is_empty():
-            ui.label("Nothing to show yet.")
-            return
-
-        columns = [
-            {"name": "received_at", "label": "Received", "field": "received_at"},
-            {"name": "packet_type", "label": "Type", "field": "packet_type"},
-            {"name": "uptime_sec", "label": "Uptime", "field": "uptime_sec"},
-            {
-                "name": "eps_battery_percent",
-                "label": "Battery %",
-                "field": "eps_battery_percent",
-            },
-            {
-                "name": "obc_adc_battery_percent",
-                "label": "OBC ADC Battery %",
-                "field": "obc_adc_battery_percent",
-            },
-            {
-                "name": "obc_temperature_C",
-                "label": "OBC Temp (°C)",
-                "field": "obc_temperature_C",
-            },
-            {"name": "rssi_db", "label": "RSSI (dB)", "field": "rssi_db"},
-        ]
-        rows = [
-            {
-                "received_at": f"{r['received_at']:%Y-%m-%d %H:%M:%S}",
-                "packet_type": r["packet_type"],
-                "uptime_sec": _format_uptime(r.get("uptime_sec")),
-                "eps_battery_percent": r.get("eps_battery_percent"),
-                "obc_adc_battery_percent": r.get("obc_adc_battery_percent"),
-                "obc_temperature_C": r.get("obc_temperature_C"),
-                "rssi_db": r.get("rssi_db"),
-            }
-            for r in recent.to_dicts()
-        ]
-        ui.table(columns=columns, rows=rows, row_key="received_at").classes("w-full")
-
-
 def _open_fullscreen_chart(option: dict[str, Any]) -> None:
     """Show `option` in a maximized dialog. The dialog (and its ECharts
     instance) is built on click and deleted on close, so charts nobody
@@ -412,8 +390,26 @@ def _chart_groups(path: Path, *, since: datetime | None) -> None:
         path, since=since, every=PACKET_COUNT_WINDOW
     )
 
+    power_channels = [
+        option
+        for title, states in (
+            ("EPS Power Channels", beacon_data.eps_channel_states(beacons)),
+            ("ADCS Powered", beacon_data.adcs_channel_states(beacons)),
+        )
+        if (option := channel_states_option(states, title=title)) is not None
+    ]
+    _render_chart_group("Power Channels", power_channels)
+
     for title, specs in BEACON_CHART_GROUPS:
         _render_chart_group(title, _chart_options(specs, beacons))
+
+    # Right after the loop, so it sits with the ADCS groups that end it.
+    adcs_errors = channel_states_option(
+        beacon_data.adcs_error_states(beacons),
+        title="ADCS Errors & Overcurrents Seen in Window",
+        alert=True,
+    )
+    _render_chart_group("ADCS Errors", [adcs_errors] if adcs_errors else [])
 
     histogram = packet_counts_histogram_option(
         packet_counts, title="Packets Received per 6h Window, by Packet Type"
@@ -435,7 +431,6 @@ def _window_label_for_hours(hours: float) -> str:
 def build_beacon_stats_page(data_dir: Path, hours: float) -> None:
     parquet_path = data_dir / step_3_pipeline.OUTPUT_FILENAME
     state: dict[str, float] = {"hours": hours}
-    ui_state: dict[str, bool] = {}
 
     # Split in two so the 30s auto-refresh only ever touches the cheap,
     # DOM-only status widgets -- the chart section (the expensive part,
@@ -453,10 +448,7 @@ def build_beacon_stats_page(data_dir: Path, hours: float) -> None:
             return
         _latest_beacon_card(live.latest, live.local_max_pending, live.latest_uplink)
         _latest_extended_beacon_card(live.latest_extended)
-
-    @ui.refreshable
-    def recent_status(live: _LiveData) -> None:
-        _recent_beacons_table(live.recent, ui_state)
+        _power_channels_card(live.latest, live.latest_extended)
 
     @ui.refreshable
     def chart_section() -> None:
@@ -492,7 +484,6 @@ def build_beacon_stats_page(data_dir: Path, hours: float) -> None:
             "Last 24h",
             lambda t: f"{t:%Y-%m-%d %H:%M:%S} UTC ({_age_str(t)})",
         )
-        recent_status(initial_live)
         chart_section()
 
     async def _refresh_live() -> None:
@@ -502,7 +493,6 @@ def build_beacon_stats_page(data_dir: Path, hours: float) -> None:
         if live is None:  # Only when the server's shutting down.
             return
         live_status.refresh(live)
-        recent_status.refresh(live)
         await attitude_player.reload_async()
 
     ui.timer(REFRESH_INTERVAL_SEC, _refresh_live)

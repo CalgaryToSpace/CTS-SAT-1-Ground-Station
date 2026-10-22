@@ -13,6 +13,7 @@ from __future__ import annotations
 __all__ = [
     "BEACON_CHART_GROUPS",
     "ChartSpec",
+    "channel_states_option",
     "chart_option",
     "packet_counts_histogram_option",
 ]
@@ -58,6 +59,14 @@ class ChartSpec:
         return column
 
 
+# `channel_states_option` marks: a saturated green for "on", drawn taller than
+# the faint grey "off" marks, so the "on" spans stand out sharply.
+_CHANNEL_ON_COLOR = "#15A34A"
+_CHANNEL_OFF_COLOR = "#E0E0E0"
+# ...and red instead, when "on" means something's wrong (`alert=True`).
+_CHANNEL_ALERT_COLOR = "#DC2626"
+
+
 # -- Beacon telemetry (BEACON_BASIC / BEACON_EXTENDED rows only) -------------
 
 BEACON_CHART_GROUPS: list[tuple[str, list[ChartSpec]]] = [
@@ -86,7 +95,7 @@ BEACON_CHART_GROUPS: list[tuple[str, list[ChartSpec]]] = [
         [
             ChartSpec("OBC Temperature", ["obc_temperature_C"], unit="°C"),
             ChartSpec(
-                "OBC Active Oscillator (extended)",
+                "OBC Active Oscillator",
                 ["obc_active_oscillator_MHz"],
                 unit="MHz",
             ),
@@ -99,13 +108,13 @@ BEACON_CHART_GROUPS: list[tuple[str, list[ChartSpec]]] = [
         [
             ChartSpec("Battery Voltage", ["eps_battery_voltage_V"], unit="V"),
             ChartSpec(
-                "OBC ADC Battery Voltage (extended)",
+                "OBC ADC Battery Voltage",
                 ["obc_adc_battery_voltage_V"],
                 unit="V",
             ),
             ChartSpec("Battery Percent", ["eps_battery_percent"], unit="%"),
             ChartSpec(
-                "OBC ADC Battery Percent (extended)",
+                "OBC ADC Battery Percent",
                 ["obc_adc_battery_percent"],
                 unit="%",
             ),
@@ -142,7 +151,7 @@ BEACON_CHART_GROUPS: list[tuple[str, list[ChartSpec]]] = [
                 labels=["input", "output"],
             ),
             ChartSpec(
-                "Net Battery / Distributed Power, Average (extended)",
+                "Net Battery / Distributed Power, Average",
                 [
                     "eps_total_avg_net_battery_power_W",
                     "eps_total_avg_power_distributed_W",
@@ -153,7 +162,7 @@ BEACON_CHART_GROUPS: list[tuple[str, list[ChartSpec]]] = [
         ],
     ),
     (
-        "EPS Solar Channels (extended)",
+        "EPS Solar Channels",
         [
             ChartSpec(
                 "MPPT Input Voltage",
@@ -220,7 +229,7 @@ BEACON_CHART_GROUPS: list[tuple[str, list[ChartSpec]]] = [
                 categorical=True,
             ),
             ChartSpec(
-                "MPI Last Temperature (extended)",
+                "MPI Last Temperature",
                 ["mpi_last_temperature_C"],
                 unit="°C",
                 valid_min=-90.0,
@@ -239,7 +248,7 @@ BEACON_CHART_GROUPS: list[tuple[str, list[ChartSpec]]] = [
         ],
     ),
     (
-        "ADCS Attitude (extended)",
+        "ADCS Attitude",
         [
             ChartSpec(
                 "Estimated Attitude",
@@ -282,7 +291,7 @@ BEACON_CHART_GROUPS: list[tuple[str, list[ChartSpec]]] = [
         ],
     ),
     (
-        "ADCS Sensors (extended)",
+        "ADCS Sensors",
         [
             ChartSpec(
                 "Magnetic Field",
@@ -495,4 +504,67 @@ def packet_counts_histogram_option(
         "yAxis": {"type": "value", "name": "packets", "minInterval": 1},
         "dataZoom": [{"type": "inside"}],
         "series": series,
+    }
+
+
+def channel_states_option(
+    states: pl.DataFrame, *, title: str, alert: bool = False
+) -> dict[str, Any] | None:
+    """ECharts `option` showing which channels/flags were on over time, or
+    None if `states` has no rows (or no channels).
+
+    `states` is `received_at` plus one bool column per channel (see
+    `data.eps_channel_states` / `data.adcs_channel_states` /
+    `data.adcs_error_states`). Each channel is a row on a category y-axis
+    (first column at the top), with a mark per beacon: green where the
+    channel was on, grey where it was off. Gaps are stretches with no beacon
+    at all. `alert=True` is for error flags: red "set" marks instead of
+    green "on" ones.
+    """
+    channels = [c for c in states.columns if c != "received_at"]
+    if states.is_empty() or not channels:
+        return None
+
+    long = states.unpivot(
+        index="received_at", on=channels, variable_name="channel", value_name="on"
+    )
+
+    def _points(*, on: bool) -> list[list[Any]]:
+        sub = long.filter(pl.col("on") == on)
+        return [
+            [ts.isoformat(), channel]
+            for ts, channel in zip(sub["received_at"], sub["channel"], strict=True)
+        ]
+
+    return {
+        "animation": False,
+        "title": {"text": title, "textStyle": {"fontSize": 14}},
+        "grid": {"left": 190, "right": 20, "top": 50, "bottom": 30},
+        "tooltip": {"trigger": "item"},
+        "legend": {"show": True, "top": 26},
+        "xAxis": {"type": "time"},
+        # Category axes run bottom-up, so reverse to put the first channel on top.
+        "yAxis": {"type": "category", "data": channels[::-1]},
+        "dataZoom": [{"type": "inside"}],
+        "series": [
+            {
+                "name": name,
+                "type": "scatter",
+                "symbol": "rect",
+                "symbolSize": [4, height],
+                "data": _points(on=on),
+                "color": color,
+                "large": True,
+                "largeThreshold": 2000,
+            }
+            for name, on, color, height in (
+                (
+                    "set" if alert else "on",
+                    True,
+                    _CHANNEL_ALERT_COLOR if alert else _CHANNEL_ON_COLOR,
+                    14,
+                ),
+                ("clear" if alert else "off", False, _CHANNEL_OFF_COLOR, 8),
+            )
+        ],
     }
