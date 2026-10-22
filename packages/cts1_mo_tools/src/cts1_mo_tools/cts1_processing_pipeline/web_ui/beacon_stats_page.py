@@ -135,13 +135,18 @@ def _latest_uplink_stats(
             ("TCMDs in Latest Uplink", "?"),
         ]
     finished_at = latest_uplink.uplink_finished_at
+    before = latest_uplink.tcmd_count_before
     delta = latest_uplink.tcmd_count_delta
     return [
         (
             "Latest Uplink Finished",
             f"{finished_at:%Y-%m-%d %H:%M:%S} UTC ({_age_str(finished_at)})",
         ),
-        ("TCMDs in Latest Uplink", "?" if delta is None else delta),
+        (
+            "TCMDs in Latest Uplink",
+            f"{'?' if before is None else before} → "
+            f"{latest_uplink.tcmd_count_after} = {'?' if delta is None else delta}",
+        ),
     ]
 
 
