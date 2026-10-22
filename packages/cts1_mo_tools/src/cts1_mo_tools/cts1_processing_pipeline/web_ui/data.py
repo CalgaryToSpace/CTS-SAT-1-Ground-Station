@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING
 import polars as pl
 from cachetools import TTLCache, cached
 
+from cts1_mo_tools.cts1_decode_satnogs_packets import PACKET_TYPE_ENUM
 from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
     pipeline as step_3_pipeline,
 )
@@ -127,7 +128,7 @@ def load_packet_counts_per_window(
         return pl.DataFrame(
             schema={
                 "window_start": pl.Datetime("us", "UTC"),
-                "packet_type": pl.String,
+                "packet_type": PACKET_TYPE_ENUM,
                 "count": pl.UInt32,
             }
         )

@@ -188,7 +188,10 @@ def export_table_to_parquet(
         order_by_sql = "ORDER BY " + ", ".join(
             [f"{quote_ident(col)} ASC" for col in order_by_columns]
         )
-    options = "FORMAT PARQUET"
+    # zstd rather than DuckDB's default snappy: well under half the file size
+    # (e.g. raw_packets: 421MB -> ~160MB), matching what polars writes for
+    # the later steps' outputs.
+    options = "FORMAT PARQUET, COMPRESSION ZSTD"
     if row_group_size is not None:
         options += f", ROW_GROUP_SIZE {row_group_size}"
 

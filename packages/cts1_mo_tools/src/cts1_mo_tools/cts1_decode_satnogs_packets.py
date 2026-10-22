@@ -359,6 +359,10 @@ PACKET_TYPE_MAP = {
     0x30: "GNSS_BESTXYZB_SAMPLE",
 }
 PACKET_TYPE_MAP_INV = {v: k for k, v in PACKET_TYPE_MAP.items()}
+# Every value `packet_type` can take: "UNKNOWN" is `decode_raw_packet_safe`'s
+# fallback for a type byte it doesn't recognize. Sorted, so sorting by the
+# column orders it the same as the plain strings it replaces.
+PACKET_TYPE_ENUM = pl.Enum([*sorted(PACKET_TYPE_MAP.values()), "UNKNOWN"])
 RF_SWITCH_CONTROL_MODE_MAP = {
     0: "TOGGLE_BEFORE_EVERY_BEACON",
     1: "FORCE_ANT1",
@@ -1860,6 +1864,10 @@ def decode_to_df(
             df_decoded = df_decoded.with_columns(
                 pl.lit(None, dtype=pl.String).alias(required_col)
             )
+    if "packet_type" in df_decoded.columns:
+        df_decoded = df_decoded.with_columns(
+            pl.col("packet_type").cast(PACKET_TYPE_ENUM)
+        )
 
     df = df.join(
         df_decoded,

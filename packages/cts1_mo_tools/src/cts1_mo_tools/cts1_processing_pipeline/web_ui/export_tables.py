@@ -38,7 +38,7 @@ from typing import TYPE_CHECKING, Literal, assert_never
 import polars as pl
 import xlsxwriter  # pyright: ignore[reportMissingTypeStubs]
 
-from cts1_mo_tools.cts1_decode_satnogs_packets import PACKET_TYPE_MAP
+from cts1_mo_tools.cts1_decode_satnogs_packets import PACKET_TYPE_ENUM
 from cts1_mo_tools.cts1_processing_pipeline.common import (
     connect_duckdb,
     drop_timezones_for_excel,
@@ -59,9 +59,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from datetime import datetime
 
-# "UNKNOWN" is the decoder's own fallback name for a packet type byte it
-# doesn't recognize -- see `cts1_decode_satnogs_packets.decode_packet_safe`.
-PACKET_TYPES: tuple[str, ...] = (*sorted(PACKET_TYPE_MAP.values()), "UNKNOWN")
+PACKET_TYPES: tuple[str, ...] = tuple(PACKET_TYPE_ENUM.categories)
 
 
 @dataclass(frozen=True, slots=True)

@@ -79,6 +79,12 @@ DEMOD_DECODER = "satnogs_client_live_data"
 # cluster's authoritative received_at/decoders when both are present.
 BASELINE_DECODERS = (ASKEW_DECODER, SSO_DECODER)
 
+# Only a baseline decoder can be a cluster's `received_at_source`; a leftover
+# cluster's is "estimated" instead -- see `_aggregate_clusters`. In trust
+# order, highest first.
+RECEIVED_AT_SOURCE_ENUM = pl.Enum([*BASELINE_DECODERS, "estimated"])
+CSP_CRC_SOURCE_ENUM = pl.Enum(["computed", "decoded"])
+
 # CTS-SAT-1's CSP header, as the leading bytes of every genuine `data_hex`.
 CTS1_CSP_HEADER_HEX = "c2a28a00"
 
@@ -140,11 +146,13 @@ def _complete_missing_crc(packets: pl.LazyFrame) -> pl.LazyFrame:
                 # True by construction.
                 pl.lit(value=True, dtype=pl.Boolean)
             ),
-            csp_crc_source=pl.lit("computed"),
+            csp_crc_source=pl.lit("computed", dtype=CSP_CRC_SOURCE_ENUM),
         )
         .drop("temp_data_binary")
     )
-    complete = packets.filter(~needs_crc).with_columns(csp_crc_source=pl.lit("decoded"))
+    complete = packets.filter(~needs_crc).with_columns(
+        csp_crc_source=pl.lit("decoded", dtype=CSP_CRC_SOURCE_ENUM)
+    )
     return pl.concat([complete, incomplete], how="vertical_relaxed")
 
 
@@ -357,9 +365,9 @@ def _aggregate_clusters(rows: pl.LazyFrame) -> pl.LazyFrame:
         )
         .with_columns(
             received_at=if_baseline.then("_baseline_at").otherwise("_earliest_at"),
-            received_at_source=if_baseline.then("received_at_source").otherwise(
-                pl.lit("estimated")
-            ),
+            received_at_source=if_baseline.then("received_at_source")
+            .otherwise(pl.lit("estimated"))
+            .cast(RECEIVED_AT_SOURCE_ENUM),
             rssi_db=if_baseline.then("rssi_db"),
             rs_corrected_error_count=if_baseline.then("rs_corrected_error_count"),
             rs_correctable=if_baseline.then("rs_correctable"),
