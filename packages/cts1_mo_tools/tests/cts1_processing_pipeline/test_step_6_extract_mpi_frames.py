@@ -8,6 +8,7 @@ from cts1_mo_tools.cts1_processing_pipeline.step_6_extract_mpi_frames.pipeline i
     MPI_BUFFER_LEN,
     MPI_SYNC,
     compute_mpi_frames,
+    compute_mpi_frames_with_outcomes,
     mpi_crc16,
 )
 
@@ -75,14 +76,19 @@ class _Recording:
         seed: int = 0,
         source: str = "E",
         stream_skew: int = 2,
+        stale_frames: int = 0,
     ) -> None:
         rng = random.Random(seed)  # noqa: S311
         frame_count = (blocks * MPI_BUFFER_LEN) // _FRAME_LEN + 2
+        # Left in the buffer by the previous recording (a firmware bug).
+        stale = b"".join(_frame(1640 + i, rng) for i in range(stale_frames))
         # The MPI stream doesn't start on a frame boundary.
-        self.stream = bytes(stream_skew) + b"".join(
-            _frame(i, rng) for i in range(frame_count)
+        self.stream = (
+            stale
+            + bytes(stream_skew)
+            + b"".join(_frame(i, rng) for i in range(frame_count))
         )
-        self.stream_skew = stream_skew
+        self.stream_skew = len(stale) + stream_skew
         header_epoch = _epoch_ms(recorded_at)
         self.timestamps = [
             (
@@ -113,9 +119,9 @@ class _Recording:
             for i, s in enumerate(range(0, len(frames), _FRAME_LEN))
         }
 
-    def expected_frames(self) -> dict[int, datetime]:
+    def expected_frames(self, *, first_block: bool = True) -> dict[int, datetime]:
         """frame counter -> expected collected_at, for every frame that
-        should come out (all those ending after the first block).
+        should come out (with or without those in the first block).
         """
         expected: dict[int, datetime] = {}
         counter = 0
@@ -123,16 +129,18 @@ class _Recording:
         while start + _FRAME_LEN <= self.blocks * MPI_BUFFER_LEN:
             end = start + _FRAME_LEN
             block = (end - 1) // MPI_BUFFER_LEN
-            if block >= 1:
-                ep_a = self.timestamps[block - 1][1]
+            if block >= 1 or first_block:
                 ep_b = self.timestamps[block][1]
-                fraction = (end - block * MPI_BUFFER_LEN) / MPI_BUFFER_LEN
+                fraction = (MPI_BUFFER_LEN - end % MPI_BUFFER_LEN) % MPI_BUFFER_LEN
                 expected[counter] = _EPOCH + timedelta(
-                    milliseconds=ep_a + fraction * (ep_b - ep_a)
+                    milliseconds=ep_b - fraction / MPI_BUFFER_LEN * _BLOCK_MS
                 )
             counter += 1
             start = end
         return expected
+
+    def frames_in_first_block(self) -> int:
+        return (MPI_BUFFER_LEN - self.stream_skew) // _FRAME_LEN
 
 
 _packet_counter = 0
@@ -192,15 +200,34 @@ def test_empty_input_returns_empty_with_expected_schema() -> None:
     assert result.schema["pixels"] == pl.String
 
 
-def test_full_downlink_recovers_and_times_every_frame_after_first_block() -> None:
+def _outcomes(table: pl.DataFrame) -> dict[str, int]:
+    return dict(zip(table["outcome"], table["frames"], strict=True))
+
+
+def test_full_downlink_recovers_and_times_every_frame() -> None:
     recording = _Recording()
-    result = compute_mpi_frames(pl.DataFrame(_downlink(recording)))
+    result, outcomes = compute_mpi_frames_with_outcomes(
+        pl.DataFrame(_downlink(recording))
+    )
     expected = recording.expected_frames()
 
     assert sorted(result["frame_counter"]) == sorted(expected)
     assert result.schema == compute_mpi_frames(pl.DataFrame()).schema
     _assert_times_match(result, expected)
-    assert set(result["anchor_span_blocks"]) == {1}
+    # The first block has no timestamp before it, so is extrapolated
+    # backwards from the one after it.
+    extrapolated = result.filter(pl.col("timing_method") == "extrapolated")
+    assert extrapolated.height == recording.frames_in_first_block()
+    assert extrapolated["anchor_span_blocks"].is_null().all()
+    assert extrapolated["anchor_before_at"].is_null().all()
+    assert set(
+        result.filter(pl.col("timing_method") == "interpolated")["anchor_span_blocks"]
+    ) == {1}
+    assert _outcomes(outcomes) == {
+        "kept: interpolated between two timestamps": result.height
+        - extrapolated.height,
+        "kept: extrapolated from one timestamp": extrapolated.height,
+    }
     assert set(result["time_sync_source"]) == {"E"}
     # The synthetic timestamps were synced 1s into uptime, so time since
     # sync always trails uptime by exactly that.
@@ -228,7 +255,14 @@ def test_frames_split_by_a_timestamp_are_carved_back_together() -> None:
 
 def test_unsynced_timestamps_yield_nothing() -> None:
     recording = _Recording(source="N")
-    assert compute_mpi_frames(pl.DataFrame(_downlink(recording))).height == 0
+    result, outcomes = compute_mpi_frames_with_outcomes(
+        pl.DataFrame(_downlink(recording))
+    )
+    assert result.height == 0
+    assert set(outcomes["outcome"]) == {
+        "lost: clock unsynced, or resynced, at its timestamp(s)"
+    }
+    assert outcomes["percent"].to_list() == [100.0]
 
 
 def test_missing_middle_timestamp_interpolates_across_two_blocks() -> None:
@@ -247,6 +281,62 @@ def test_missing_middle_timestamp_interpolates_across_two_blocks() -> None:
     # Linear interpolation over two equal blocks lands on the same times as
     # one block at a time, given the synthetic timestamps are evenly spaced.
     _assert_times_match(result, recording.expected_frames())
+
+
+def test_two_missing_timestamps_interpolate_across_three_blocks() -> None:
+    recording = _Recording(blocks=5)
+    skip = frozenset(
+        _chunk_offset_containing(json_offset + delta)
+        for json_offset in recording.timestamp_offsets[1:3]
+        for delta in (0, 140)
+    )
+    result = compute_mpi_frames(pl.DataFrame(_downlink(recording, skip_offsets=skip)))
+
+    three_block = result.filter(pl.col("anchor_span_blocks") == 3)
+    assert three_block.height > 2 * MPI_BUFFER_LEN // _FRAME_LEN
+    _assert_times_match(result, recording.expected_frames())
+
+
+def test_frames_beyond_a_downlink_gap_are_extrapolated() -> None:
+    recording = _Recording()
+    # Too many chunks missing in a row to link across: the third block's
+    # data is split between two separately-reassembled pieces, each
+    # holding only one of its timestamps.
+    gap_start = recording.timestamp_offsets[1] + 8_000
+    skip = frozenset(
+        _chunk_offset_containing(gap_start) + _PACKET_DATA_LEN * k for k in range(10)
+    )
+    result, outcomes = compute_mpi_frames_with_outcomes(
+        pl.DataFrame(_downlink(recording, skip_offsets=skip))
+    )
+
+    third_block = result.filter(
+        pl.col("file_offset").is_between(
+            recording.timestamp_offsets[1],
+            recording.timestamp_offsets[2] - _FRAME_LEN,
+        )
+    )
+    assert set(third_block["timing_method"]) == {"extrapolated"}
+    # Both sides of the gap: after the earlier timestamp and before the later.
+    assert third_block["anchor_before_at"].null_count() > 0
+    assert third_block["anchor_after_at"].null_count() > 0
+    _assert_times_match(result, recording.expected_frames())
+    assert all(outcome.startswith("kept") for outcome in outcomes["outcome"])
+
+
+def test_stale_first_block_is_dropped() -> None:
+    recording = _Recording(stale_frames=20)
+    result, outcomes = compute_mpi_frames_with_outcomes(
+        pl.DataFrame(_downlink(recording))
+    )
+
+    expected = recording.expected_frames(first_block=False)
+    assert sorted(result["frame_counter"]) == sorted(expected)
+    _assert_times_match(result, expected)
+    assert (
+        _outcomes(outcomes)["lost: stale first block of a recording (firmware bug)"]
+        == 20 + recording.frames_in_first_block()
+    )
 
 
 def test_missing_chunks_lose_only_their_own_frames() -> None:
@@ -271,9 +361,11 @@ def test_corrupt_frame_drops_its_whole_span() -> None:
             data = bytearray.fromhex(row["bulk_data_hex"])
             data[target - row["bulk_file_offset"]] ^= 0x01
             row["bulk_data_hex"] = data.hex()
-    result = compute_mpi_frames(pl.DataFrame(rows))
-    spans = set(result["anchor_before_at"])
-    assert len(spans) == recording.blocks - 2
+    result, outcomes = compute_mpi_frames_with_outcomes(pl.DataFrame(rows))
+    interpolated = result.filter(pl.col("timing_method") == "interpolated")
+    assert interpolated["anchor_before_at"].n_unique() == recording.blocks - 2
+    # Nor is it extrapolated into, its timestamps having been received.
+    assert _outcomes(outcomes)["lost: CRC/frame counter mismatch in its block(s)"] > 0
 
 
 def test_repeated_downlinks_dont_duplicate_frames() -> None:

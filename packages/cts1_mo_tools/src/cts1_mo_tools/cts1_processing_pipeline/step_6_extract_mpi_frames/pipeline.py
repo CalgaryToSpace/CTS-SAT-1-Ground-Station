@@ -55,16 +55,16 @@ which chunks belong together. This step does it from the content:
      two of a component's chunks disagree on is treated as never received.
   3. Anchors: the JSON timestamps found in each component. Two
      consecutive timestamps form an anchor span when the data between
-     them is exactly 20480 bytes (one block), or 2 x 20480 plus a
-     plausible JSON length (two blocks whose middle timestamp was never
-     received -- its position is still pinned exactly by the 20480-byte
-     structure). Both timestamps must share a real time-sync source (not
-     `N`, never synced), and their `timestamp_ms` and `uptime_ms` must
-     advance by the same amount (no time resync between them). The block
-     right after a `mpi_start` header is never a span: its header is
-     written before the MPI's 5s power-on delay, and the firmware doesn't
-     reset its buffer index between recordings, so that block can start
-     with stale data from the previous recording.
+     them is exactly 20480 bytes (one block), or up to `_MAX_SPAN_BLOCKS`
+     x 20480 plus a plausible JSON length per never-received timestamp in
+     between. Each missing timestamp starts exactly 20480 bytes after the
+     last; with more than one missing, every split of their total length
+     that fits whatever bytes of them were received is tried, and the
+     span is only kept if exactly one split gives consistent frames (or
+     all of those that do agree on every frame). Both timestamps must
+     share a real time-sync source (not `N`, never synced), and their
+     `timestamp_ms` and `uptime_ms` must advance by the same amount (no
+     time resync between them).
   4. Frames: every frame whose last byte falls inside an anchor span, with
      all its bytes received, is parsed. A span is dropped as a whole if
      any of its frames fails its CRC, or if its frames' counters don't
@@ -73,15 +73,31 @@ which chunks belong together. This step does it from the content:
      lost onboard). Spans whose per-block duration is more than
      `BLOCK_DURATION_TOLERANCE` off from the component's median are
      dropped too.
-  5. Timing: a frame's `collected_at` is linearly interpolated between its
-     span's two timestamps, by where its last byte falls within the
-     span's MPI data -- i.e. roughly when the frame finished arriving at
-     the OBC. The timestamps themselves are taken right after each buffer
-     is written to flash, so they (and every frame time) lag the true
-     buffer-full time by that write's latency (on the order of 100ms).
+  5. Timing (`timing_method` "interpolated"): a frame's `collected_at` is
+     linearly interpolated between its span's two timestamps, by where its
+     last byte falls within the span's MPI data -- i.e. roughly when the
+     frame finished arriving at the OBC. The timestamps themselves are
+     taken right after each buffer is written to flash, so they (and every
+     frame time) lag the true buffer-full time by that write's latency (on
+     the order of 100ms, with jitter of a few tens of ms).
+  6. Extrapolation (`timing_method` "extrapolated"): a block next to a
+     synced timestamp but with nothing received on its other side (most
+     often where the received data runs out) is timed from that one
+     timestamp, at the MPI data rate measured as the median over every
+     anchor span with the same frame length and integration period. Its
+     frames get the same all-or-nothing consistency check as a span's.
+     This includes the first block of a recording, which can't make a
+     span (its header is written before the MPI's 5s power-on delay): the
+     firmware doesn't reset its buffer index between recordings, so that
+     block can start with stale frames from the previous recording, which
+     fail the counter check and drop the block. Not extrapolated: a block
+     whose other timestamp was received but rejected (unsynced, resynced,
+     odd duration, inconsistent frames), as the timestamps are suspect.
 
-The same frame recovered from more than one component is kept once,
-preferring the narrowest anchor span. Like steps 2-5, this step is
+The same frame recovered more than once is kept once, preferring
+interpolated over extrapolated, then the narrowest anchor span. Every
+distinct CRC-valid frame received but not kept is tallied by why (see
+`compute_mpi_frames_with_outcomes`). Like steps 2-5, this step is
 parquet-in-parquet-out and reprocesses from scratch on every run.
 """
 
@@ -97,6 +113,7 @@ __all__ = [
     "OVERLAP_LINK_MIN_BYTES",
     "STRONG_LINK_MIN_LEADING_BYTES",
     "compute_mpi_frames",
+    "compute_mpi_frames_with_outcomes",
     "mpi_crc16",
     "run",
 ]
@@ -105,7 +122,7 @@ import binascii
 import json
 import re
 import statistics
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -156,13 +173,33 @@ _RECEIVED_TOGETHER_SECONDS_PER_BRIDGED_CHUNK = 1.0
 _RECEIVED_TOGETHER_MIN_SECONDS = -1.0  # Allows for decoders' 1s-granularity.
 
 # Anchor span sanity checks -- see the module docstring.
-_MAX_SPAN_BLOCKS = 2
+_MAX_SPAN_BLOCKS = 3
 _MISSING_TIMESTAMP_LEN_RANGE = (100, 200)
 _UNSYNCED_TIME_SOURCE = "N"
 _MAX_RESYNC_DRIFT_MS = 2
 _BLOCK_DURATION_RANGE_MS = (1_000, 60_000)
 BLOCK_DURATION_TOLERANCE = 0.10
 _MIN_SPANS_FOR_MEDIAN = 3
+
+# How a kept frame was timed (`timing_method`).
+_INTERPOLATED = "interpolated"
+_EXTRAPOLATED = "extrapolated"
+# What became of a received frame -- see `compute_mpi_frames_with_outcomes`.
+_KEPT_INTERPOLATED = "kept: interpolated between two timestamps"
+_KEPT_EXTRAPOLATED = "kept: extrapolated from one timestamp"
+_LOST_NO_TIMESTAMP = "lost: no timestamp received in its piece of the file"
+_LOST_TOO_FAR = "lost: no usable timestamp within one block"
+_LOST_STALE_FIRST_BLOCK = "lost: stale first block of a recording (firmware bug)"
+_LOST_LAYOUT = "lost: too many timestamps missing in a row to place them"
+_LOST_UNSYNCED = "lost: clock unsynced, or resynced, at its timestamp(s)"
+_LOST_DURATION = "lost: unusual block duration between its timestamps"
+_LOST_INCONSISTENT = "lost: CRC/frame counter mismatch in its block(s)"
+_LOST_NO_RATE = "lost: no data rate measured for its frame length/integration period"
+# A pair of timestamps that made an anchor span.
+_TIMED = "timed"
+# Pairs of timestamps whose blocks can still be extrapolated into: ones
+# that aren't both timestamps, or are too far apart to make a span.
+_OPEN_PAIR_OUTCOMES = (None, _LOST_LAYOUT)
 
 # Inner dome voltage conversion, from the MPI's data packet definition.
 _INNER_DOME_ADC_MASK = 0x3FF
@@ -182,6 +219,9 @@ _LOOKS_LIKE_MPI_RE = re.compile(
     re.escape(MPI_SYNC) + rb'|\{"(?:mpi_start|uptime_ms|data_lost_bytes)"'
 )
 
+# What can sit between a JSON marker's braces: printable ASCII.
+_MARKER_INNER_BYTES = frozenset(range(0x20, 0x7F)) - set(b"{}")
+
 _BIT_REVERSED_BYTES = bytes(int(f"{i:08b}"[::-1], 2) for i in range(256))
 
 _OUTPUT_SCHEMA = {
@@ -189,7 +229,8 @@ _OUTPUT_SCHEMA = {
     "obc_uptime_ms": pl.Int64,
     "ms_since_time_sync": pl.Int64,
     "time_sync_source": pl.String,
-    "anchor_span_blocks": pl.Int64,
+    "timing_method": pl.String,  # "interpolated" or "extrapolated"
+    "anchor_span_blocks": pl.Int64,  # Null when extrapolated.
     "anchor_before_at": pl.Datetime("us", "UTC"),
     "anchor_after_at": pl.Datetime("us", "UTC"),
     "frame_counter": pl.Int64,
@@ -596,7 +637,11 @@ class _Marker:
 
     @property
     def is_timestamp(self) -> bool:
-        return "uptime_ms" in self.fields and "mpi_start" not in self.fields
+        return "uptime_ms" in self.fields and not self.is_header
+
+    @property
+    def is_header(self) -> bool:
+        return "mpi_start" in self.fields
 
 
 def _find_markers(component: _Component) -> list[_Marker]:
@@ -618,7 +663,7 @@ def _find_markers(component: _Component) -> list[_Marker]:
 @dataclass(slots=True, frozen=True)
 class _AnchorSpan:
     """Two timestamp markers bracketing `blocks` x 20480 bytes of MPI data,
-    plus the file offsets of any never-received timestamp between them.
+    plus the file offsets of any never-received timestamps between them.
     """
 
     before: _Marker
@@ -630,6 +675,10 @@ class _AnchorSpan:
     @property
     def duration_ms(self) -> int:
         return self.after.fields["uptime_ms"] - self.before.fields["uptime_ms"]
+
+    @property
+    def ms_per_byte(self) -> float:
+        return self.duration_ms / (self.blocks * MPI_BUFFER_LEN)
 
 
 def _timestamp_fields(marker: _Marker) -> tuple[int, int, str, int] | None:
@@ -657,110 +706,145 @@ def _timestamp_fields(marker: _Marker) -> tuple[int, int, str, int] | None:
     return uptime, epoch_ms, m["source"], epoch_ms - int(m["sync_epoch"])
 
 
+def _synced_source(marker: _Marker) -> str | None:
+    """The time-sync source of a well-formed, synced timestamp."""
+    fields = _timestamp_fields(marker) if marker.is_timestamp else None
+    if fields is None or fields[2] == _UNSYNCED_TIME_SOURCE:
+        return None
+    return fields[2]
+
+
 def _span_sync_source(before: _Marker, after: _Marker) -> str | None:
     """The time-sync source both timestamps were taken under, if they're a
     usable pair: well-formed, synced, and with no time resync between them.
     """
-    if not (before.is_timestamp and after.is_timestamp):
+    source = _synced_source(before)
+    if source is None or _synced_source(after) != source:
         return None
-    before_ts, after_ts = _timestamp_fields(before), _timestamp_fields(after)
-    if before_ts is None or after_ts is None:
-        return None
-    (up_a, epoch_a, source_a, _), (up_b, epoch_b, source_b, _) = before_ts, after_ts
-    if source_a != source_b or source_a == _UNSYNCED_TIME_SOURCE:
-        return None
+    up_a, epoch_a = before.fields["uptime_ms"], before.fields["timestamp_ms"]
+    up_b, epoch_b = after.fields["uptime_ms"], after.fields["timestamp_ms"]
     if abs((epoch_b - epoch_a) - (up_b - up_a)) > _MAX_RESYNC_DRIFT_MS:
         return None
-    return source_a
+    return source
 
 
-def _span_layout(
-    component: _Component, before: _Marker, after: _Marker
-) -> tuple[int, tuple[tuple[int, int], ...]] | None:
-    """How many 20480-byte blocks lie between `before` and `after`, and the
-    file offsets of the never-received timestamps between those blocks --
-    or None if the gap between them doesn't fit that layout.
+def _could_be_missing_marker(component: _Component, start: int, end: int) -> bool:
+    """Whether whatever bytes of file offsets [start, end) were received
+    could be a JSON timestamp's: `{` first, `}` last, and printable ASCII
+    without braces in between.
     """
+    for pos in range(start, end):
+        idx = pos - component.base
+        if not (0 <= idx < len(component.have) and component.have[idx]):
+            continue
+        byte = component.data[idx]
+        if pos == start:
+            ok = byte == ord("{")
+        elif pos == end - 1:
+            ok = byte == ord("}")
+        else:
+            ok = byte in _MARKER_INNER_BYTES
+        if not ok:
+            return False
+    return True
+
+
+def _gap_layouts(
+    component: _Component, pos: int, missing: int, total: int
+) -> Iterator[tuple[tuple[int, int], ...]]:
+    """Every way to fit `missing` never-received timestamps, `total` bytes
+    long in all, the first at file offset `pos` and each next one
+    `MPI_BUFFER_LEN` bytes after the last -- as their [start, end) offsets.
+    """
+    if missing == 0:
+        if total == 0:
+            yield ()
+        return
+    min_len, max_len = _MISSING_TIMESTAMP_LEN_RANGE
+    for length in range(min_len, max_len + 1):
+        rest = total - length
+        if not min_len * (missing - 1) <= rest <= max_len * (missing - 1):
+            continue
+        if not _could_be_missing_marker(component, pos, pos + length):
+            continue
+        for tail in _gap_layouts(
+            component, pos + length + MPI_BUFFER_LEN, missing - 1, rest
+        ):
+            yield ((pos, pos + length), *tail)
+
+
+def _anchor_spans(
+    component: _Component, before: _Marker, after: _Marker
+) -> list[_AnchorSpan] | str:
+    """Every way consecutive timestamps `before` and `after` could bracket
+    whole blocks of MPI data (more than one when the missing timestamps
+    between them could sit in more than one place) -- or, when they can't,
+    why not (a `_LOST_*` outcome). See the module docstring.
+    """
+    sync_source = _span_sync_source(before, after)
+    if sync_source is None:
+        return _LOST_UNSYNCED
     gap = after.start - before.end
     min_len, max_len = _MISSING_TIMESTAMP_LEN_RANGE
     for blocks in range(1, _MAX_SPAN_BLOCKS + 1):
-        missing = blocks - 1
-        if not min_len * missing <= gap - blocks * MPI_BUFFER_LEN <= max_len * missing:
-            continue
-        if missing == 0:
-            return blocks, ()
-        gap_start = before.end + MPI_BUFFER_LEN
-        gap_end = after.start - MPI_BUFFER_LEN
-        # Whatever bytes of the missing timestamp did arrive must look like
-        # the start/end of one.
-        for pos, expected in ((gap_start, b"{"), (gap_end - 1, b"}")):
-            if (
-                component.has_all(pos, pos + 1)
-                and component.get(pos, pos + 1) != expected
-            ):
-                return None
-        return blocks, ((gap_start, gap_end),)
-    return None
-
-
-def _anchor_span(
-    component: _Component, before: _Marker, after: _Marker
-) -> _AnchorSpan | None:
-    """The span between consecutive markers `before` and `after`, or None
-    if they don't make a valid one -- see the module docstring.
-    """
-    sync_source = _span_sync_source(before, after)
-    layout = _span_layout(component, before, after)
-    if sync_source is None or layout is None:
-        return None
-    blocks, gaps = layout
-    span = _AnchorSpan(before, after, blocks, gaps, sync_source)
+        missing, total = blocks - 1, gap - blocks * MPI_BUFFER_LEN
+        if min_len * missing <= total <= max_len * missing:
+            break
+    else:
+        return _LOST_LAYOUT
     low, high = _BLOCK_DURATION_RANGE_MS
-    if not low <= span.duration_ms / blocks <= high:
-        return None
-    return span
+    duration_ms = after.fields["uptime_ms"] - before.fields["uptime_ms"]
+    if not low <= duration_ms / blocks <= high:
+        return _LOST_DURATION
+    spans = [
+        _AnchorSpan(before, after, blocks, gaps, sync_source)
+        for gaps in _gap_layouts(component, before.end + MPI_BUFFER_LEN, missing, total)
+    ]
+    return spans or _LOST_LAYOUT
 
 
-def _data_runs(span: _AnchorSpan) -> list[tuple[int, int]]:
-    """The file offset ranges [start, end) holding the span's MPI data, in
-    order -- led by the tail of the previous block, where a frame ending in
-    this span can begin.
+@dataclass(slots=True)
+class _Stream:
+    """MPI data pieced together from ranges of file offsets (i.e. with the
+    JSON markers between them left out). Bytes outside the component are
+    zeros that weren't received.
     """
-    runs = [(span.before.start - _MAX_FRAME_LEN, span.before.start)]
-    cursor = span.before.end
-    for gap_start, gap_end in span.gaps:
-        runs.append((cursor, gap_start))
-        cursor = gap_end
-    runs.append((cursor, span.after.start))
-    return runs
+
+    data: bytearray = field(default_factory=bytearray)
+    have: bytearray = field(default_factory=bytearray)
+    run_starts: list[int] = field(default_factory=list[int])  # Stream indexes.
+    run_offsets: list[int] = field(default_factory=list[int])  # File offsets.
+
+    def file_offset(self, index: int) -> int:
+        run = bisect_right(self.run_starts, index) - 1
+        return self.run_offsets[run] + index - self.run_starts[run]
+
+
+def _stream(component: _Component, runs: list[tuple[int, int]]) -> _Stream:
+    stream = _Stream()
+    lo, hi = component.base, component.base + len(component.data)
+    for start, end in runs:
+        stream.run_starts.append(len(stream.data))
+        stream.run_offsets.append(start)
+        inner_start = min(max(start, lo), end)
+        inner_end = max(min(end, hi), inner_start)
+        padding = bytes(inner_start - start)
+        stream.data += padding + component.data[inner_start - lo : inner_end - lo]
+        stream.have += padding + component.have[inner_start - lo : inner_end - lo]
+        stream.data += bytes(end - inner_end)
+        stream.have += bytes(end - inner_end)
+    return stream
 
 
 @dataclass(slots=True)
 class _FrameCandidate:
     stream_start: int
     frame: bytes
-    file_offsets: list[int]  # File offset of each byte of `frame`.
-
-
-def _span_stream(
-    component: _Component, span: _AnchorSpan
-) -> tuple[bytearray, bytearray, list[int], int]:
-    """The span's MPI data with the timestamps carved out: its bytes, which
-    of them were received, each one's file offset, and how many bytes of
-    the previous block lead the span itself.
-    """
-    runs = _data_runs(span)
-    stream = bytearray()
-    have = bytearray()
-    file_offsets: list[int] = []
-    for start, end in runs:
-        for pos in range(max(start, component.base), end):
-            idx = pos - component.base
-            stream.append(component.data[idx])
-            have.append(component.have[idx])
-            file_offsets.append(pos)
-    lead = runs[0][1] - max(runs[0][0], component.base)
-    return stream, have, file_offsets, lead
+    # Bytes of MPI data from the anchor timestamp to the frame's end
+    # (negative when the frame comes before it).
+    end_from_anchor: int
+    first_offset: int  # File offsets of the frame's first and last bytes.
+    last_offset: int
 
 
 def _frames_consistent(candidates: list[_FrameCandidate]) -> bool:
@@ -782,72 +866,269 @@ def _frames_consistent(candidates: list[_FrameCandidate]) -> bool:
     return True
 
 
-def _frames_in_span(
-    component: _Component, span: _AnchorSpan
+def _frames_in_region(
+    component: _Component,
+    runs: list[tuple[int, int]],
+    *,
+    region: tuple[int, int],
+    anchor_pos: int,
 ) -> list[_FrameCandidate] | None:
-    """Every fully-received frame ending inside `span` (`stream_start`
-    relative to the span's first data byte), or None if the span turns out
-    inconsistent -- see `_frames_consistent`.
+    """Every fully-received frame in the stream of `runs` whose end falls
+    in `region` (stream positions, (start, end]), measured from the anchor
+    timestamp's position `anchor_pos` -- or None if they turn out
+    inconsistent (see `_frames_consistent`).
     """
-    stream, have, file_offsets, lead = _span_stream(component, span)
-    span_end = lead + span.blocks * MPI_BUFFER_LEN
-
+    stream = _stream(component, runs)
     candidates: list[_FrameCandidate] = []
-    for m in re.finditer(re.escape(MPI_SYNC), stream):
+    for m in re.finditer(re.escape(MPI_SYNC), stream.data):
         start = m.start()
-        if not all(have[start : start + _FRAME_HEADER_LEN]):
+        if not all(stream.have[start : start + _FRAME_HEADER_LEN]):
             continue
-        frame_len = _frame_len_at(stream, start)
+        frame_len = _frame_len_at(stream.data, start)
         if frame_len is None:
             continue
         end = start + frame_len
-        if lead < end <= span_end and all(have[start:end]):
+        if region[0] < end <= region[1] and all(stream.have[start:end]):
             candidates.append(
                 _FrameCandidate(
                     stream_start=start,
-                    frame=bytes(stream[start:end]),
-                    file_offsets=file_offsets[start:end],
+                    frame=bytes(stream.data[start:end]),
+                    end_from_anchor=end - anchor_pos,
+                    first_offset=stream.file_offset(start),
+                    last_offset=stream.file_offset(end - 1),
                 )
             )
-
-    if not candidates:
-        return []
-    if not _frames_consistent(candidates):
+    if candidates and not _frames_consistent(candidates):
         return None
-    for c in candidates:
-        c.stream_start -= lead
     return candidates
 
 
+def _frames_in_span(
+    component: _Component, span: _AnchorSpan
+) -> list[_FrameCandidate] | None:
+    """Every fully-received frame ending inside `span` -- or None if they
+    turn out inconsistent. The stream is led by the tail of the previous
+    block, where a frame ending in this span can begin.
+    """
+    runs = [(span.before.start - _MAX_FRAME_LEN, span.before.start)]
+    cursor = span.before.end
+    for gap_start, gap_end in span.gaps:
+        runs.append((cursor, gap_start))
+        cursor = gap_end
+    runs.append((cursor, span.after.start))
+    lead = _MAX_FRAME_LEN
+    return _frames_in_region(
+        component,
+        runs,
+        region=(lead, lead + span.blocks * MPI_BUFFER_LEN),
+        anchor_pos=lead,
+    )
+
+
+def _frames_in_any_layout(
+    component: _Component, spans: list[_AnchorSpan]
+) -> tuple[_AnchorSpan, list[_FrameCandidate]] | str:
+    """The frames of the one way of placing the missing timestamps between
+    two timestamps (`spans`, one per way) whose frames are consistent --
+    or, if several are, of the first, so long as they all agree on every
+    frame and its position. Otherwise why not (a `_LOST_*` outcome).
+    """
+    consistent = [
+        (span, candidates)
+        for span in spans
+        if (candidates := _frames_in_span(component, span)) is not None
+    ]
+    if not consistent:
+        return _LOST_INCONSISTENT
+    placements = {
+        tuple((c.frame, c.end_from_anchor) for c in candidates)
+        for _, candidates in consistent
+    }
+    if len(placements) > 1:
+        return _LOST_LAYOUT
+    return consistent[0]
+
+
+def _timed_spans(
+    component: _Component, markers: list[_Marker]
+) -> tuple[list[tuple[_AnchorSpan, list[_FrameCandidate]]], dict[int, str]]:
+    """Every anchor span in `component` that holds up, with its frames; and
+    for every pair of consecutive timestamps (keyed by the first's file
+    offset), `_TIMED` or why its frames can't be timed by it (a `_LOST_*`
+    outcome).
+    """
+    outcomes: dict[int, str] = {}
+    pairs: list[list[_AnchorSpan]] = []
+    for before, after in pairwise(markers):
+        if not (before.is_timestamp and after.is_timestamp):
+            continue
+        spans = _anchor_spans(component, before, after)
+        if isinstance(spans, str):
+            outcomes[before.start] = spans
+        else:
+            pairs.append(spans)
+
+    per_block = [spans[0].duration_ms / spans[0].blocks for spans in pairs]
+    if len(per_block) >= _MIN_SPANS_FOR_MEDIAN:
+        median = statistics.median(per_block)
+        for spans, duration in zip(list(pairs), per_block, strict=True):
+            if abs(duration - median) > BLOCK_DURATION_TOLERANCE * median:
+                outcomes[spans[0].before.start] = _LOST_DURATION
+                pairs.remove(spans)
+
+    timed: list[tuple[_AnchorSpan, list[_FrameCandidate]]] = []
+    for spans in pairs:
+        result = _frames_in_any_layout(component, spans)
+        if isinstance(result, str):
+            outcomes[spans[0].before.start] = result
+        else:
+            outcomes[spans[0].before.start] = _TIMED
+            timed.append(result)
+    return timed, outcomes
+
+
+def _extrapolation_anchors(
+    markers: list[_Marker], pair_outcomes: dict[int, str]
+) -> Iterator[tuple[_Marker, int, bool]]:
+    """(timestamp, direction, whether it's the recording's first block) for
+    every block next to a timestamp that's bracketed by nothing else
+    received: direction 1 for the block after the timestamp, -1 for the
+    one before it. A block whose other timestamp was received but didn't
+    make a span with this one (other than for too many timestamps missing
+    in between) is left alone, as the timestamps themselves are suspect.
+    """
+    for i, marker in enumerate(markers):
+        if not marker.is_timestamp:
+            continue
+        prev = markers[i - 1] if i > 0 else None
+        nxt = markers[i + 1] if i + 1 < len(markers) else None
+        if nxt is None or (
+            nxt.start > marker.end + MPI_BUFFER_LEN
+            and pair_outcomes.get(marker.start) in _OPEN_PAIR_OUTCOMES
+        ):
+            yield marker, 1, False
+        if prev is None or (
+            prev.end < marker.start - MPI_BUFFER_LEN
+            and pair_outcomes.get(prev.start) in _OPEN_PAIR_OUTCOMES
+        ):
+            yield marker, -1, False
+        elif prev.is_header and prev.end == marker.start - MPI_BUFFER_LEN:
+            yield marker, -1, True
+
+
+def _extrapolation_region(anchor: _Marker, direction: int) -> tuple[int, int]:
+    """The file offsets [start, end) of the block next to `anchor`."""
+    if direction > 0:
+        return anchor.end, anchor.end + MPI_BUFFER_LEN
+    return anchor.start - MPI_BUFFER_LEN, anchor.start
+
+
+def _frame_config(frame: bytes) -> tuple[int, int]:
+    """(frame length, integration period): what sets the MPI's data rate."""
+    return len(frame), int.from_bytes(frame[18:20], "big")
+
+
+@dataclass(slots=True, frozen=True)
+class _Timing:
+    """How a run of frames' collection times are worked out: from where
+    each one ends relative to an anchor timestamp, at a steady data rate.
+    """
+
+    method: str
+    anchor: _Marker
+    ms_per_byte: float
+    sync_source: str
+    span_blocks: int | None
+    before_at: datetime | None
+    after_at: datetime | None
+
+
+def _span_timing(span: _AnchorSpan) -> _Timing:
+    return _Timing(
+        method=_INTERPOLATED,
+        anchor=span.before,
+        ms_per_byte=span.ms_per_byte,
+        sync_source=span.sync_source,
+        span_blocks=span.blocks,
+        before_at=_epoch_ms_to_datetime(span.before.fields["timestamp_ms"]),
+        after_at=_epoch_ms_to_datetime(span.after.fields["timestamp_ms"]),
+    )
+
+
+def _extrapolated_rows(
+    component: _Component,
+    anchor: _Marker,
+    direction: int,
+    ms_per_byte_by_config: dict[tuple[int, int], float],
+) -> list[dict[str, Any]] | str:
+    """Output rows for the frames in the block next to `anchor` (see
+    `_extrapolation_anchors`), timed from it at the data rate measured
+    across all anchor spans -- or why they can't be (a `_LOST_*` outcome).
+    """
+    sync_source = _synced_source(anchor)
+    if sync_source is None:
+        return _LOST_UNSYNCED
+    if direction > 0:
+        # Led by the previous block's tail, as in `_frames_in_span`.
+        lead = _MAX_FRAME_LEN
+        runs = [
+            (anchor.start - lead, anchor.start),
+            (anchor.end, anchor.end + MPI_BUFFER_LEN),
+        ]
+        region, anchor_pos = (lead, lead + MPI_BUFFER_LEN), lead
+    else:
+        # A frame straddling the block's start would have the previous
+        # (never-received) timestamp wedged in it, so it isn't looked for.
+        runs = [(anchor.start - MPI_BUFFER_LEN, anchor.start)]
+        region, anchor_pos = (0, MPI_BUFFER_LEN), MPI_BUFFER_LEN
+    candidates = _frames_in_region(
+        component, runs, region=region, anchor_pos=anchor_pos
+    )
+    if candidates is None:
+        return _LOST_INCONSISTENT
+    if not candidates:
+        return []
+    ms_per_byte = ms_per_byte_by_config.get(_frame_config(candidates[0].frame))
+    if ms_per_byte is None:
+        return _LOST_NO_RATE
+    anchor_at = _epoch_ms_to_datetime(anchor.fields["timestamp_ms"])
+    timing = _Timing(
+        method=_EXTRAPOLATED,
+        anchor=anchor,
+        ms_per_byte=ms_per_byte,
+        sync_source=sync_source,
+        span_blocks=None,
+        before_at=anchor_at if direction > 0 else None,
+        after_at=None if direction > 0 else anchor_at,
+    )
+    return _frame_rows(component, timing, candidates)
+
+
 def _frame_rows(
-    component: _Component, span: _AnchorSpan, candidates: list[_FrameCandidate]
+    component: _Component, timing: _Timing, candidates: list[_FrameCandidate]
 ) -> list[dict[str, Any]]:
-    """Output rows for `span`'s frames, with interpolated times."""
-    up_a = span.before.fields["uptime_ms"]
-    before_ts = _timestamp_fields(span.before)
-    assert before_ts is not None  # Checked when the span was made.
-    since_sync_a = before_ts[3]
-    epoch_a = span.before.fields["timestamp_ms"]
-    epoch_b = span.after.fields["timestamp_ms"]
-    span_bytes = span.blocks * MPI_BUFFER_LEN
+    """Output rows for `candidates`, timed by `timing`."""
+    anchor_ts = _timestamp_fields(timing.anchor)
+    assert anchor_ts is not None  # Checked when the timing was made.
+    uptime, epoch_ms, _, since_sync = anchor_ts
     rows: list[dict[str, Any]] = []
     for c in candidates:
-        fraction = (c.stream_start + len(c.frame)) / span_bytes
-        offset_ms = fraction * span.duration_ms
-        covering = component.chunks_covering(c.file_offsets[0], c.file_offsets[-1] + 1)
+        offset_ms = c.end_from_anchor * timing.ms_per_byte
+        covering = component.chunks_covering(c.first_offset, c.last_offset + 1)
         sightings = [s for chunk in covering for s in chunk.sightings]
         received = [s.received_at for s in sightings if s.received_at is not None]
         rows.append(
             {
-                "collected_at": _epoch_ms_to_datetime(epoch_a + offset_ms),
-                "obc_uptime_ms": round(up_a + offset_ms),
-                "ms_since_time_sync": round(since_sync_a + offset_ms),
-                "time_sync_source": span.sync_source,
-                "anchor_span_blocks": span.blocks,
-                "anchor_before_at": _epoch_ms_to_datetime(epoch_a),
-                "anchor_after_at": _epoch_ms_to_datetime(epoch_b),
+                "collected_at": _epoch_ms_to_datetime(epoch_ms + offset_ms),
+                "obc_uptime_ms": round(uptime + offset_ms),
+                "ms_since_time_sync": round(since_sync + offset_ms),
+                "time_sync_source": timing.sync_source,
+                "timing_method": timing.method,
+                "anchor_span_blocks": timing.span_blocks,
+                "anchor_before_at": timing.before_at,
+                "anchor_after_at": timing.after_at,
                 **_parse_frame(c.frame),
-                "file_offset": c.file_offsets[0],
+                "file_offset": c.first_offset,
                 "first_received_at": min(received, default=None),
                 "last_received_at": max(received, default=None),
                 "times_received": min(
@@ -867,36 +1148,9 @@ def _epoch_ms_to_datetime(epoch_ms: float) -> datetime:
     return _EPOCH + timedelta(milliseconds=epoch_ms)
 
 
-def _spans_for_component(
-    component: _Component, tally: Counter[str]
-) -> list[_AnchorSpan]:
-    markers = _find_markers(component)
-    spans: list[_AnchorSpan] = []
-    for before, after in pairwise(markers):
-        span = _anchor_span(component, before, after)
-        if span is None:
-            if before.is_timestamp and after.is_timestamp:
-                tally["spans_rejected_anchors"] += 1
-            continue
-        spans.append(span)
-
-    per_block = [s.duration_ms / s.blocks for s in spans]
-    if len(per_block) >= _MIN_SPANS_FOR_MEDIAN:
-        median = statistics.median(per_block)
-        kept = [
-            s
-            for s, d in zip(spans, per_block, strict=True)
-            if abs(d - median) <= BLOCK_DURATION_TOLERANCE * median
-        ]
-        tally["spans_rejected_duration"] += len(spans) - len(kept)
-        spans = kept
-    return spans
-
-
 def compute_mpi_frames(decoded_packets: pl.DataFrame) -> pl.DataFrame:
     """Pure computation: `everything_decoded` -> one row per MPI frame
-    recovered from bulk file downlinks, with its interpolated collection
-    time.
+    recovered from bulk file downlinks, with its collection time.
 
     Args:
         decoded_packets: `everything_decoded.parquet`, as written by step 3.
@@ -906,10 +1160,20 @@ def compute_mpi_frames(decoded_packets: pl.DataFrame) -> pl.DataFrame:
         frames are recovered and timed, and `_OUTPUT_SCHEMA` for the
         columns.
     """
+    return compute_mpi_frames_with_outcomes(decoded_packets)[0]
+
+
+def compute_mpi_frames_with_outcomes(
+    decoded_packets: pl.DataFrame,
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """`compute_mpi_frames`, plus a table of what became of every distinct
+    CRC-valid frame received: how many were kept (and how they were
+    timed), and how many were dropped, for each reason.
+    """
     if decoded_packets.is_empty():
-        return pl.DataFrame(schema=_OUTPUT_SCHEMA)
-    rows, _tally = _compute_rows(decoded_packets)
-    return _rows_to_df(rows)
+        return pl.DataFrame(schema=_OUTPUT_SCHEMA), _outcome_table(Counter())
+    rows, _tally, outcomes = _compute_rows(decoded_packets)
+    return _rows_to_df(rows), _outcome_table(outcomes)
 
 
 def _rows_to_df(rows: list[dict[str, Any]]) -> pl.DataFrame:
@@ -922,69 +1186,161 @@ def _rows_to_df(rows: list[dict[str, Any]]) -> pl.DataFrame:
     )
 
 
-def _received_frames(component: _Component) -> set[bytes]:
+def _outcome_table(outcomes: Counter[str]) -> pl.DataFrame:
+    """One row per outcome: kept ones first, then the biggest losses."""
+    ordered = sorted(
+        outcomes.items(),
+        key=lambda item: (not item[0].startswith("kept"), -item[1], item[0]),
+    )
+    return pl.DataFrame(
+        {
+            "outcome": [outcome for outcome, _ in ordered],
+            "frames": [frames for _, frames in ordered],
+        },
+        schema={"outcome": pl.String, "frames": pl.Int64},
+    ).with_columns(percent=(pl.col("frames") * 100 / pl.col("frames").sum()).round(1))
+
+
+def _received_frames(component: _Component, markers: list[_Marker]) -> dict[bytes, int]:
     """Every fully-received, CRC-valid frame anywhere in `component`, timed
-    or not (with its fully-received JSON markers carved out) -- the
-    denominator for how many of the frames received made it into the output.
+    or not (with its fully-received JSON markers carved out), and the file
+    offset of its last byte.
     """
-    markers = _find_markers(component)
-    stream = bytearray()
-    have = bytearray()
-    cursor = 0
-    for m in [*markers, None]:
-        stop = len(component.data) if m is None else m.start - component.base
-        stream += component.data[cursor:stop]
-        have += component.have[cursor:stop]
-        if m is not None:
-            cursor = m.end - component.base
-    frames: set[bytes] = set()
-    for m in re.finditer(re.escape(MPI_SYNC), stream):
+    runs: list[tuple[int, int]] = []
+    cursor = component.base
+    for m in markers:
+        runs.append((cursor, m.start))
+        cursor = m.end
+    runs.append((cursor, component.base + len(component.data)))
+    stream = _stream(component, runs)
+    frames: dict[bytes, int] = {}
+    for m in re.finditer(re.escape(MPI_SYNC), stream.data):
         start = m.start()
-        frame_len = _frame_len_at(stream, start)
-        if frame_len is None or not all(have[start : start + frame_len]):
+        frame_len = _frame_len_at(stream.data, start)
+        if frame_len is None or start + frame_len > len(stream.data):
             continue
-        frame = bytes(stream[start : start + frame_len])
-        if len(frame) == frame_len and _frame_crc_ok(frame):
-            frames.add(frame)
+        if not all(stream.have[start : start + frame_len]):
+            continue
+        frame = bytes(stream.data[start : start + frame_len])
+        if _frame_crc_ok(frame):
+            frames.setdefault(frame, stream.file_offset(start + frame_len - 1))
     return frames
+
+
+def _keep_best(best: dict[bytes, dict[str, Any]], rows: list[dict[str, Any]]) -> None:
+    """Add `rows` to `best` (frame bytes -> row), keeping one row per frame:
+    interpolated over extrapolated, then the narrowest span, then earliest.
+    """
+
+    def preference(row: dict[str, Any]) -> tuple[bool, int, datetime]:
+        return (
+            row["timing_method"] != _INTERPOLATED,
+            row["anchor_span_blocks"] or 0,
+            row["collected_at"],
+        )
+
+    for row in rows:
+        frame = row.pop("_frame")
+        current = best.get(frame)
+        if current is None or preference(row) < preference(current):
+            best[frame] = row
+
+
+def _measured_ms_per_byte(
+    rates: dict[tuple[int, int], list[float]],
+) -> dict[tuple[int, int], float]:
+    """The median MPI data rate over all anchor spans, per frame config.
+    (A single span's rate is off by up to a few % from timestamp jitter.)
+    """
+    measured: dict[tuple[int, int], float] = {}
+    for (frame_len, integration_period), span_rates in sorted(rates.items()):
+        measured[frame_len, integration_period] = statistics.median(span_rates)
+        logger.info(
+            f"Measured MPI frame period: "
+            f"{measured[frame_len, integration_period] * frame_len:.2f} ms "
+            f"(median of {len(span_rates):,} anchor spans), for {frame_len}-byte "
+            f"frames at integration period {integration_period}."
+        )
+    return measured
 
 
 def _compute_rows(
     decoded_packets: pl.DataFrame,
-) -> tuple[list[dict[str, Any]], Counter[str]]:
+) -> tuple[list[dict[str, Any]], Counter[str], Counter[str]]:
+    """(output rows, link/anchor stats, frames per outcome)."""
     chunks = _load_chunks(decoded_packets)
     if not chunks:
-        return [], Counter()
+        return [], Counter(), Counter()
     groups, tally = _link_chunks(chunks)
     tally["chunks"] = len(chunks)
     tally["components"] = len(groups)
+    components = [_assemble([chunks[i] for i in group]) for group in groups]
+    markers = [_find_markers(component) for component in components]
 
-    # Frame bytes -> best row so far (narrowest span, then earliest).
+    # Interpolate between pairs of timestamps first: the data rate they
+    # measure is what frames near a lone timestamp are timed by.
     best: dict[bytes, dict[str, Any]] = {}
-    received: set[bytes] = set()
-    for group in groups:
-        component = _assemble([chunks[i] for i in group])
+    rates: dict[tuple[int, int], list[float]] = defaultdict(list)
+    pair_outcomes: list[dict[int, str]] = []
+    for component, component_markers in zip(components, markers, strict=True):
         tally["conflicting_bytes"] += component.conflicting_bytes
-        received |= _received_frames(component)
-        for span in _spans_for_component(component, tally):
-            candidates = _frames_in_span(component, span)
-            if candidates is None:
-                tally["spans_rejected_frames"] += 1
-                continue
+        timed, outcomes = _timed_spans(component, component_markers)
+        pair_outcomes.append(outcomes)
+        for span, candidates in timed:
             tally["spans"] += 1
-            for row in _frame_rows(component, span, candidates):
-                frame = row.pop("_frame")
-                current = best.get(frame)
-                key = (row["anchor_span_blocks"], row["collected_at"])
-                if current is None or key < (
-                    current["anchor_span_blocks"],
-                    current["collected_at"],
-                ):
-                    best[frame] = row
+            if candidates:
+                rates[_frame_config(candidates[0].frame)].append(span.ms_per_byte)
+            _keep_best(best, _frame_rows(component, _span_timing(span), candidates))
+    ms_per_byte_by_config = _measured_ms_per_byte(rates)
+
+    lost: dict[bytes, str] = {}
+    for component, component_markers, outcomes in zip(
+        components, markers, pair_outcomes, strict=True
+    ):
+        # File offset ranges [start, end) a lost frame's last byte can fall
+        # in, with why it was lost -- the last one that matches wins.
+        why_lost = [
+            (before.end, after.start, outcomes[before.start])
+            for before, after in pairwise(component_markers)
+            if outcomes.get(before.start, _TIMED) != _TIMED
+        ]
+        for anchor, direction, first_block in _extrapolation_anchors(
+            component_markers, outcomes
+        ):
+            result = _extrapolated_rows(
+                component, anchor, direction, ms_per_byte_by_config
+            )
+            if isinstance(result, list):
+                tally["extrapolated_blocks"] += 1
+                _keep_best(best, result)
+                continue
+            if first_block and result == _LOST_INCONSISTENT:
+                result = _LOST_STALE_FIRST_BLOCK
+            why_lost.append((*_extrapolation_region(anchor, direction), result))
+
+        default = (
+            _LOST_TOO_FAR
+            if any(m.is_timestamp for m in component_markers)
+            else _LOST_NO_TIMESTAMP
+        )
+        for frame, last_offset in _received_frames(
+            component, component_markers
+        ).items():
+            reasons = [r for lo, hi, r in why_lost if lo <= last_offset < hi]
+            lost.setdefault(frame, reasons[-1] if reasons else default)
+
+    outcomes_count: Counter[str] = Counter(
+        _KEPT_INTERPOLATED
+        if row["timing_method"] == _INTERPOLATED
+        else _KEPT_EXTRAPOLATED
+        for row in best.values()
+    )
+    outcomes_count.update(reason for frame, reason in lost.items() if frame not in best)
     # A frame straddling a never-received timestamp is only found once
-    # that timestamp is carved out by position, in `_frames_in_span`.
-    tally["frames_received"] = len(received | best.keys())
-    return list(best.values()), tally
+    # that timestamp is carved out by position, so `best` can have frames
+    # `lost` doesn't.
+    tally["frames_received"] = outcomes_count.total()
+    return list(best.values()), tally, outcomes_count
 
 
 def _write_parquet_atomic(df: pl.DataFrame, path: Path) -> None:
@@ -1025,17 +1381,29 @@ def run(*, data_dir: Path = DEFAULT_DATA_DIR) -> None:
         )
         .collect()
     )
-    rows, tally = _compute_rows(bulk_packets)
+    rows, tally, outcomes = _compute_rows(bulk_packets)
     result_df = _rows_to_df(rows)
 
     out_path = data_dir / OUTPUT_FILENAME
     _write_parquet_atomic(result_df, out_path)
     logger.info(f"MPI chunk linking/anchoring stats: {dict(sorted(tally.items()))}")
     received = tally["frames_received"]
+    with pl.Config(
+        tbl_rows=-1,
+        tbl_hide_dataframe_shape=True,
+        tbl_hide_column_data_types=True,
+        fmt_str_lengths=100,
+        tbl_width_chars=200,
+    ):
+        logger.info(
+            f"What became of the {received:,} distinct CRC-valid MPI frames "
+            f"received:\n{_outcome_table(outcomes)}"
+        )
     utilized = f"{result_df.height / received:.1%}" if received else "n/a"
     logger.info(
         f"Done. {result_df.height:,} MPI frame(s) written to {out_path}, from "
-        f"{tally['spans']:,} anchor span(s). Quality: {result_df.height:,} / "
-        f"{received:,} = {utilized} of the distinct CRC-valid MPI frames "
-        f"received were timed and kept."
+        f"{tally['spans']:,} anchor span(s) and {tally['extrapolated_blocks']:,} "
+        f"block(s) extrapolated from one timestamp. Quality: "
+        f"{result_df.height:,} / {received:,} = {utilized} of the distinct "
+        f"CRC-valid MPI frames received were timed and kept."
     )
