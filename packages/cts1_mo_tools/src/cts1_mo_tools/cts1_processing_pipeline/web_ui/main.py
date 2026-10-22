@@ -4,8 +4,8 @@ A NiceGUI dashboard over `everything_decoded.parquet` (step 3's output):
 recent beacon(s) at a glance, plus line/scatter charts for every field in
 the basic and extended beacon packets, grouped by subsystem -- see
 `beacon_stats_page`, `packet_browser_page`, `satellite_events_page`,
-`file_reassembler_page`, `overpasses_page`, `pipeline_status_page`, and
-`export_page` for the individual pages.
+`mpi_data_page`, `file_reassembler_page`, `overpasses_page`,
+`pipeline_status_page`, and `export_page` for the individual pages.
 
 Usage (uv):
     uv run cts1_serve_dashboard
@@ -36,6 +36,7 @@ from .beacon_stats_page import build_beacon_stats_page
 from .export_page import build_export_page
 from .export_raw import register_raw_export_route
 from .file_reassembler_page import build_file_reassembler_page
+from .mpi_data_page import build_mpi_data_page
 from .overpasses_page import build_overpasses_page
 from .packet_browser_page import build_packet_browser_page
 from .pipeline_status_page import build_pipeline_status_page
@@ -97,6 +98,7 @@ NAV_LINKS = (
     ("Beacon Data", "/"),
     ("Browse Packets", "/browse-packets"),
     ("Satellite Events", "/satellite-events"),
+    ("MPI Data", "/mpi-data"),
     ("File Reassembler", "/file-reassembler"),
     ("Overpasses", "/overpasses"),
     ("Pipeline Status", "/pipeline-status"),
@@ -166,6 +168,11 @@ def _build_pages(args: Args) -> None:  # noqa: C901
     def satellite_events_page() -> None:
         _nav()
         build_satellite_events_page(args.data_dir)
+
+    @ui.page("/mpi-data", title=_page_title("/mpi-data"))
+    def mpi_data_page() -> None:
+        _nav()
+        build_mpi_data_page(args.data_dir)
 
     @ui.page("/file-reassembler", title=_page_title("/file-reassembler"))
     def file_reassembler_page() -> None:
