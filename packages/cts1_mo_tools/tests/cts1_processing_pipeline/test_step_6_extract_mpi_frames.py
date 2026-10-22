@@ -6,10 +6,13 @@ from typing import Any
 import polars as pl
 from cts1_mo_tools.cts1_processing_pipeline.step_6_extract_mpi_frames.pipeline import (
     MPI_BUFFER_LEN,
+    MPI_COLLECTION_MAX_DURATION,
     MPI_SYNC,
+    assign_mpi_collections,
     compute_mpi_frames,
     compute_mpi_frames_with_outcomes,
     mpi_crc16,
+    summarize_mpi_collections,
 )
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
@@ -407,3 +410,104 @@ def test_different_recordings_at_same_offsets_stay_apart() -> None:
         own_pixels = recording.pixels_by_counter()
         for row in part.iter_rows(named=True):
             assert json.loads(row["pixels"]) == own_pixels[row["frame_counter"]]
+
+
+def _frames(*runs: tuple[datetime, list[int]]) -> pl.DataFrame:
+    """Frames 31ms apart from each (start time, counters) run."""
+    times: list[datetime] = []
+    counters: list[int] = []
+    for start, run_counters in runs:
+        times += [
+            start + timedelta(milliseconds=31 * i) for i in range(len(run_counters))
+        ]
+        counters += run_counters
+    return pl.DataFrame(
+        {"collected_at": times, "frame_counter": counters},
+        schema={"collected_at": pl.Datetime("us", "UTC"), "frame_counter": pl.Int64},
+    )
+
+
+def _collection_starts(frames: pl.DataFrame) -> list[tuple[datetime, int]]:
+    return (
+        assign_mpi_collections(frames)
+        .select("collection_started_at", "collection_first_frame_counter")
+        .unique(maintain_order=True)
+        .rows()
+    )
+
+
+def test_counter_reset_starts_a_new_collection() -> None:
+    second_start = _RECORDED_AT + timedelta(seconds=60)
+    frames = _frames(
+        (_RECORDED_AT, list(range(100, 200))), (second_start, list(range(5, 50)))
+    )
+    assert _collection_starts(frames) == [(_RECORDED_AT, 100), (second_start, 5)]
+
+
+def test_counter_wraparound_starts_a_new_collection() -> None:
+    frames = _frames((_RECORDED_AT, [65534, 65535, 0, 1]))
+    assert _collection_starts(frames) == [
+        (_RECORDED_AT, 65534),
+        (_RECORDED_AT + timedelta(milliseconds=62), 0),
+    ]
+
+
+def test_slightly_out_of_order_frames_stay_in_one_collection() -> None:
+    frames = _frames((_RECORDED_AT, [*range(100), *range(90, 200)]))
+    assert _collection_starts(frames) == [(_RECORDED_AT, 0)]
+
+
+def test_small_counter_drop_long_after_starts_a_new_collection() -> None:
+    later = _RECORDED_AT + timedelta(seconds=30)
+    frames = _frames((_RECORDED_AT, [20, 21]), (later, [3, 4]))
+    assert _collection_starts(frames) == [(_RECORDED_AT, 20), (later, 3)]
+
+
+def test_collection_ends_after_twenty_minutes() -> None:
+    later = _RECORDED_AT + MPI_COLLECTION_MAX_DURATION
+    frames = _frames((_RECORDED_AT, [0, 1]), (later, [40_000, 40_001]))
+    assert _collection_starts(frames) == [(_RECORDED_AT, 0), (later, 40_000)]
+
+
+def test_collection_summary_counts_frames_and_largest_gap() -> None:
+    second_start = _RECORDED_AT + timedelta(minutes=5)
+    present = [0, 1, 2, 6, 7, 9, 10]  # Gaps of 3 (3..5) and 1 (8).
+    frames = assign_mpi_collections(
+        _frames((_RECORDED_AT, present), (second_start, [0, 1, 2]))
+    )
+    summary = summarize_mpi_collections(frames)
+
+    first, second = summary.rows(named=True)
+    assert first == {
+        "collection_started_at": _RECORDED_AT,
+        "collection_ended_at": _RECORDED_AT + timedelta(milliseconds=31 * 6),
+        "frames_present": 7,
+        "frames_expected": 11,
+        "frames_missing": 4,
+        "first_frame_counter": 0,
+        "last_frame_counter": 10,
+        "largest_gap_frames": 3,
+        "largest_gap_started_at": _RECORDED_AT + timedelta(milliseconds=31 * 2),
+        "largest_gap_duration_ms": 31,
+    }
+    assert second["frames_missing"] == 0
+    assert second["largest_gap_frames"] == 0
+    assert second["largest_gap_duration_ms"] is None
+
+
+def test_full_downlink_is_one_collection() -> None:
+    recording = _Recording()
+    result = compute_mpi_frames(pl.DataFrame(_downlink(recording)))
+    assert result["collection_started_at"].unique().to_list() == [
+        result["collected_at"].min()
+    ]
+    assert set(result["collection_first_frame_counter"]) == {0}
+    (summary,) = summarize_mpi_collections(result).rows(named=True)
+    assert summary["frames_present"] == summary["frames_expected"] == result.height
+    assert summary["frames_missing"] == 0
+
+
+def test_empty_frames_summarize_to_empty_collections() -> None:
+    summary = summarize_mpi_collections(compute_mpi_frames(pl.DataFrame()))
+    assert summary.height == 0
+    assert summary.schema["collection_started_at"] == pl.Datetime("us", "UTC")

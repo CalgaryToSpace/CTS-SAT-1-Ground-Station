@@ -15,13 +15,17 @@ __all__ = [
     "ChartSpec",
     "channel_states_option",
     "chart_option",
+    "collection_timeline_option",
     "packet_counts_histogram_option",
 ]
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import polars as pl
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 # Palette shared across every multi-series chart on the page.
 _SERIES_COLORS = [
@@ -567,4 +571,57 @@ def channel_states_option(
                 ("clear" if alert else "off", False, _CHANNEL_OFF_COLOR, 8),
             )
         ],
+    }
+
+
+def collection_timeline_option(
+    timeline: pl.DataFrame, *, sources: Sequence[str], title: str
+) -> dict[str, Any] | None:
+    """ECharts `option` with one swimlane per source, a mark at each
+    `collected_at` -- or None if `timeline` has no rows.
+
+    `timeline` is `source` + `collected_at` (see
+    `collection_timeline.load_collection_timeline`); lanes run top to bottom
+    in `sources` order, each labelled with its count. Points go out as epoch
+    ms rather than ISO strings, as there can be ~100k of them, so the
+    tooltip formats them itself.
+    """
+    if timeline.is_empty():
+        return None
+    counts = dict(timeline["source"].cast(pl.String).value_counts().iter_rows())
+    lanes = {source: f"{source} ({counts.get(source, 0):,})" for source in sources}
+    series: list[dict[str, Any]] = []
+    for index, source in enumerate(sources):
+        times = timeline.filter(pl.col("source") == source)["collected_at"]
+        series.append(
+            {
+                "name": lanes[source],
+                "type": "scatter",
+                "symbol": "rect",
+                "symbolSize": [2, 18],
+                "data": [[ms, lanes[source]] for ms in times.dt.epoch("ms")],
+                "color": _SERIES_COLORS[index % len(_SERIES_COLORS)],
+                "large": True,
+                "largeThreshold": 2000,
+            }
+        )
+    return {
+        "animation": False,
+        "title": {"text": title, "textStyle": {"fontSize": 14}},
+        "grid": {"left": 170, "right": 30, "top": 40, "bottom": 70},
+        "tooltip": {
+            "trigger": "item",
+            ":formatter": (
+                "p => p.seriesName.replace(/ \\(.*/, '') + '<br>' + new Date("
+                "p.value[0]).toISOString().replace('T', ' ').replace('Z', ' UTC')"
+            ),
+        },
+        "xAxis": {"type": "time"},
+        # Category axes run bottom-up, so reverse to put the first source on top.
+        "yAxis": {"type": "category", "data": list(lanes.values())[::-1]},
+        "dataZoom": [
+            {"type": "inside", "filterMode": "weakFilter"},
+            {"type": "slider", "filterMode": "weakFilter", "bottom": 15},
+        ],
+        "series": series,
     }
