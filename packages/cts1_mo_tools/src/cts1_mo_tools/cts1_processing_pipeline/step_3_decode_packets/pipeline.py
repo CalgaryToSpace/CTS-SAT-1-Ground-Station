@@ -45,6 +45,14 @@ if TYPE_CHECKING:
 DEFAULT_DATA_DIR = step_2_pipeline.DEFAULT_DATA_DIR
 OUTPUT_FILENAME = "everything_decoded.parquet"
 
+# polars' default would make this a handful of ~200MB-uncompressed row
+# groups (step 2's `sources` JSON is most of that), and a row group is the
+# smallest unit a reader can skip or stream. The web UI reads this file
+# constantly -- the newest few rows, a time window, a filtered null-count
+# pass -- so small row groups keep each of those to the rows they touch,
+# for a few percent more file size.
+ROW_GROUP_SIZE = 10_000
+
 
 def compute_decoded_packets(distinct_packets: pl.DataFrame) -> pl.DataFrame:
     """Pure computation: distinct packets -> distinct packets + decoded fields.
@@ -90,7 +98,7 @@ def _write_parquet_atomic(df: pl.DataFrame, path: Path) -> None:
     can't leave a truncated/corrupt parquet file at `path`.
     """
     tmp_path = path.with_suffix(".tmp")
-    df.write_parquet(tmp_path)
+    df.write_parquet(tmp_path, row_group_size=ROW_GROUP_SIZE)
     tmp_path.replace(path)
 
 
