@@ -210,6 +210,7 @@ def test_full_downlink_recovers_and_times_every_frame_after_first_block() -> Non
     assert row["board_temperature_c"] == 1324 / 128  # Exact in binary.
     assert len(json.loads(row["pixels"])) == 65
     assert row["first_received_at"] >= _DOWNLINKED_AT
+    assert set(result["times_received"]) == {1}
 
 
 def test_frames_split_by_a_timestamp_are_carved_back_together() -> None:
@@ -283,6 +284,7 @@ def test_repeated_downlinks_dont_duplicate_frames() -> None:
     result = compute_mpi_frames(pl.DataFrame(rows))
     assert result.height == len(recording.expected_frames())
     assert result["frame_counter"].is_unique().all()
+    assert set(result["times_received"]) == {2}
 
 
 def test_different_recordings_at_same_offsets_stay_apart() -> None:

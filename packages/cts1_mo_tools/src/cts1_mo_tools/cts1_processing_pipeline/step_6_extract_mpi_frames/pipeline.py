@@ -207,6 +207,9 @@ _OUTPUT_SCHEMA = {
     "file_offset": pl.Int64,
     "first_received_at": pl.Datetime("us", "UTC"),
     "last_received_at": pl.Datetime("us", "UTC"),
+    # How many times the whole frame was received: the fewest distinct
+    # `everything_decoded` packets carrying any one of its chunks.
+    "times_received": pl.Int64,
     "packet_ids": pl.String,  # JSON array, e.g. '["ab12","cd34"]'
 }
 
@@ -831,13 +834,8 @@ def _frame_rows(
     for c in candidates:
         fraction = (c.stream_start + len(c.frame)) / span_bytes
         offset_ms = fraction * span.duration_ms
-        sightings = [
-            s
-            for chunk in component.chunks_covering(
-                c.file_offsets[0], c.file_offsets[-1] + 1
-            )
-            for s in chunk.sightings
-        ]
+        covering = component.chunks_covering(c.file_offsets[0], c.file_offsets[-1] + 1)
+        sightings = [s for chunk in covering for s in chunk.sightings]
         received = [s.received_at for s in sightings if s.received_at is not None]
         rows.append(
             {
@@ -852,6 +850,9 @@ def _frame_rows(
                 "file_offset": c.file_offsets[0],
                 "first_received_at": min(received, default=None),
                 "last_received_at": max(received, default=None),
+                "times_received": min(
+                    len({s.packet_id for s in chunk.sightings}) for chunk in covering
+                ),
                 "packet_ids": json.dumps(sorted({s.packet_id for s in sightings})),
                 "_frame": c.frame,
             }
