@@ -2,16 +2,40 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import polars as pl
+import pytest
+import requests
+from cts1_mo_tools import satnogs_data
+from cts1_mo_tools.cts1_processing_pipeline.web_ui import collection_timeline
 from cts1_mo_tools.cts1_processing_pipeline.web_ui.charts import (
     collection_timeline_option,
 )
 from cts1_mo_tools.cts1_processing_pipeline.web_ui.collection_timeline import (
+    FALLBACK_LAUNCHED_AT,
     TIMELINE_SOURCES,
+    launched_at,
     load_collection_timeline,
 )
 
 _COLLECTED = datetime(2026, 8, 9, 6, 0, tzinfo=UTC)
 _RECEIVED = datetime(2026, 8, 10, 12, 0, tzinfo=UTC)
+_LAUNCHED_AT = datetime(2026, 5, 3, 6, 59, tzinfo=UTC)
+
+
+@pytest.fixture(autouse=True)
+def launch_fetches(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Stand in for SatNOGS DB (no network in tests), with a fresh launch
+    date cache. Returns the NORAD IDs each fetch was for.
+    """
+    fetches: list[str] = []
+
+    def fetch(norad_id: str) -> datetime:
+        fetches.append(norad_id)
+        return _LAUNCHED_AT
+
+    monkeypatch.setattr(satnogs_data, "fetch_launch_date", fetch)
+    monkeypatch.setattr(collection_timeline, "_launch_date", None)
+    monkeypatch.setattr(collection_timeline, "_launch_date_failed_at", None)
+    return fetches
 
 
 def _ms(at: datetime) -> int:
@@ -26,25 +50,27 @@ def _write_inputs(data_dir: Path) -> None:
                 "BEACON_BASIC",  # Downlinked twice.
                 "BEACON_EXTENDED",
                 "BEACON_BASIC",  # Never-synced clock.
+                "BEACON_BASIC",  # Stale pre-launch time, before first sync.
                 "BEACON_BASIC",  # Bad CRC.
                 "GNSS_BESTXYZB_SAMPLE",
                 "GNSS_BESTXYZB_SAMPLE",  # Same sample, another ring dump.
                 "LOG_MESSAGE",
             ],
-            "received_at": [_RECEIVED + timedelta(minutes=i) for i in range(8)],
-            "csp_crc_valid": [True, True, True, True, False, True, True, True],
+            "received_at": [_RECEIVED + timedelta(minutes=i) for i in range(9)],
+            "csp_crc_valid": [True, True, True, True, True, False, True, True, True],
             "unix_epoch_time_ms": [
                 _ms(_COLLECTED),
                 _ms(_COLLECTED),
                 _ms(_COLLECTED + timedelta(seconds=10)),
                 123_456,
+                _ms(_LAUNCHED_AT - timedelta(days=30)),
                 _ms(_COLLECTED + timedelta(hours=1)),
                 None,
                 None,
                 None,
             ],
-            "gnss_crc_valid": [None, None, None, None, None, True, True, None],
-            "gnss_solution_utc_time": [None] * 5
+            "gnss_crc_valid": [None] * 6 + [True, True, None],
+            "gnss_solution_utc_time": [None] * 6
             + ["2026-08-09T05:00:00.500+00:00"] * 2
             + [None],
         }
@@ -98,3 +124,28 @@ def test_timeline_option_has_a_lane_per_source(tmp_path: Path) -> None:
     ]
     mpi = next(s for s in option["series"] if s["name"] == "MPI frames (3)")
     assert mpi["data"][0] == [_ms(_COLLECTED), "MPI frames (3)"]
+
+
+def test_launch_date_is_fetched_once(launch_fetches: list[str]) -> None:
+    assert launched_at() == _LAUNCHED_AT
+    assert launched_at() == _LAUNCHED_AT
+    assert launch_fetches == ["69015"]
+
+
+def test_launch_date_falls_back_and_retries_later(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unreachable(norad_id: str) -> datetime:
+        raise requests.ConnectionError(norad_id)
+
+    monkeypatch.setattr(satnogs_data, "fetch_launch_date", unreachable)
+    assert launched_at() == FALLBACK_LAUNCHED_AT
+
+    def reachable(norad_id: str) -> datetime:  # noqa: ARG001
+        return datetime(2026, 5, 4, tzinfo=UTC)
+
+    # Back up, but not retried until the retry interval has passed.
+    monkeypatch.setattr(satnogs_data, "fetch_launch_date", reachable)
+    assert launched_at() == FALLBACK_LAUNCHED_AT
+    monkeypatch.setattr(collection_timeline, "_launch_date_failed_at", -1e9)
+    assert launched_at() == datetime(2026, 5, 4, tzinfo=UTC)
