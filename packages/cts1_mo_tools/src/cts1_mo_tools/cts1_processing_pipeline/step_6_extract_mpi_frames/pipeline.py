@@ -920,6 +920,33 @@ def _rows_to_df(rows: list[dict[str, Any]]) -> pl.DataFrame:
     )
 
 
+def _received_frames(component: _Component) -> set[bytes]:
+    """Every fully-received, CRC-valid frame anywhere in `component`, timed
+    or not (with its fully-received JSON markers carved out) -- the
+    denominator for how many of the frames received made it into the output.
+    """
+    markers = _find_markers(component)
+    stream = bytearray()
+    have = bytearray()
+    cursor = 0
+    for m in [*markers, None]:
+        stop = len(component.data) if m is None else m.start - component.base
+        stream += component.data[cursor:stop]
+        have += component.have[cursor:stop]
+        if m is not None:
+            cursor = m.end - component.base
+    frames: set[bytes] = set()
+    for m in re.finditer(re.escape(MPI_SYNC), stream):
+        start = m.start()
+        frame_len = _frame_len_at(stream, start)
+        if frame_len is None or not all(have[start : start + frame_len]):
+            continue
+        frame = bytes(stream[start : start + frame_len])
+        if len(frame) == frame_len and _frame_crc_ok(frame):
+            frames.add(frame)
+    return frames
+
+
 def _compute_rows(
     decoded_packets: pl.DataFrame,
 ) -> tuple[list[dict[str, Any]], Counter[str]]:
@@ -932,9 +959,11 @@ def _compute_rows(
 
     # Frame bytes -> best row so far (narrowest span, then earliest).
     best: dict[bytes, dict[str, Any]] = {}
+    received: set[bytes] = set()
     for group in groups:
         component = _assemble([chunks[i] for i in group])
         tally["conflicting_bytes"] += component.conflicting_bytes
+        received |= _received_frames(component)
         for span in _spans_for_component(component, tally):
             candidates = _frames_in_span(component, span)
             if candidates is None:
@@ -950,6 +979,9 @@ def _compute_rows(
                     current["collected_at"],
                 ):
                     best[frame] = row
+    # A frame straddling a never-received timestamp is only found once
+    # that timestamp is carved out by position, in `_frames_in_span`.
+    tally["frames_received"] = len(received | best.keys())
     return list(best.values()), tally
 
 
@@ -997,7 +1029,11 @@ def run(*, data_dir: Path = DEFAULT_DATA_DIR) -> None:
     out_path = data_dir / OUTPUT_FILENAME
     _write_parquet_atomic(result_df, out_path)
     logger.info(f"MPI chunk linking/anchoring stats: {dict(sorted(tally.items()))}")
+    received = tally["frames_received"]
+    utilized = f"{result_df.height / received:.1%}" if received else "n/a"
     logger.info(
         f"Done. {result_df.height:,} MPI frame(s) written to {out_path}, from "
-        f"{tally['spans']:,} anchor span(s)."
+        f"{tally['spans']:,} anchor span(s). Quality: {result_df.height:,} / "
+        f"{received:,} = {utilized} of the distinct CRC-valid MPI frames "
+        f"received were timed and kept."
     )
