@@ -97,25 +97,38 @@ which chunks belong together. This step does it from the content:
 The same frame recovered more than once is kept once, preferring
 interpolated over extrapolated, then the narrowest anchor span. Every
 distinct CRC-valid frame received but not kept is tallied by why (see
-`compute_mpi_frames_with_outcomes`). Like steps 2-5, this step is
-parquet-in-parquet-out and reprocesses from scratch on every run.
+`compute_mpi_frames_with_outcomes`).
+
+Frames are then grouped into MPI collections (`assign_mpi_collections`):
+runs of frames from one recording, at most `MPI_COLLECTION_MAX_DURATION`
+long, each identified by its first frame (time and counter). A second
+output, `mpi_collections.parquet`, summarizes each one: its start/end,
+frames present vs expected from the counters, and its largest gap
+(`summarize_mpi_collections`).
+
+Like steps 2-5, this step is parquet-in-parquet-out and reprocesses from
+scratch on every run.
 """
 
 from __future__ import annotations
 
 __all__ = [
     "BLOCK_DURATION_TOLERANCE",
+    "COLLECTIONS_OUTPUT_FILENAME",
     "DEFAULT_DATA_DIR",
     "MAX_BRIDGED_CHUNKS",
     "MPI_BUFFER_LEN",
+    "MPI_COLLECTION_MAX_DURATION",
     "MPI_SYNC",
     "OUTPUT_FILENAME",
     "OVERLAP_LINK_MIN_BYTES",
     "STRONG_LINK_MIN_LEADING_BYTES",
+    "assign_mpi_collections",
     "compute_mpi_frames",
     "compute_mpi_frames_with_outcomes",
     "mpi_crc16",
     "run",
+    "summarize_mpi_collections",
 ]
 
 import binascii
@@ -150,6 +163,7 @@ if TYPE_CHECKING:
 
 DEFAULT_DATA_DIR = step_3_pipeline.DEFAULT_DATA_DIR
 OUTPUT_FILENAME = "mpi_frames.parquet"
+COLLECTIONS_OUTPUT_FILENAME = "mpi_collections.parquet"
 
 MPI_SYNC = b"\x0c\xff\xff\x0c"
 # Bytes of MPI data the firmware writes between two timestamp JSONs.
@@ -201,6 +215,16 @@ _TIMED = "timed"
 # that aren't both timestamps, or are too far apart to make a span.
 _OPEN_PAIR_OUTCOMES = (None, _LOST_LAYOUT)
 
+# MPI collections -- see `assign_mpi_collections`.
+MPI_COLLECTION_MAX_DURATION = timedelta(minutes=20)
+# A counter drop this small, between frames this close in time, isn't a
+# new recording, but two frames timed from different timestamps landing
+# slightly out of order (e.g. the two ends of a block extrapolated from
+# either side). A recording too short to reach it couldn't be timed anyway:
+# that takes at least a 20480-byte block.
+_MAX_OUT_OF_ORDER_FRAMES = 64
+_MAX_OUT_OF_ORDER_TIME = timedelta(seconds=2)
+
 # Inner dome voltage conversion, from the MPI's data packet definition.
 _INNER_DOME_ADC_MASK = 0x3FF
 _INNER_DOME_VOLTS_PER_COUNT = 0.105361
@@ -234,6 +258,10 @@ _OUTPUT_SCHEMA = {
     "anchor_before_at": pl.Datetime("us", "UTC"),
     "anchor_after_at": pl.Datetime("us", "UTC"),
     "frame_counter": pl.Int64,
+    # The MPI collection the frame is in, by its first frame: see
+    # `assign_mpi_collections`.
+    "collection_started_at": pl.Datetime("us", "UTC"),
+    "collection_first_frame_counter": pl.Int64,
     "board_temperature_c": pl.Float64,
     "firmware_version": pl.Int64,
     "detector_status": pl.Int64,
@@ -1179,10 +1207,115 @@ def compute_mpi_frames_with_outcomes(
 def _rows_to_df(rows: list[dict[str, Any]]) -> pl.DataFrame:
     if not rows:
         return pl.DataFrame(schema=_OUTPUT_SCHEMA)
+    frames = pl.DataFrame(
+        rows, schema_overrides=_OUTPUT_SCHEMA, infer_schema_length=None
+    ).sort("collected_at", "file_offset")
+    return assign_mpi_collections(frames).select(
+        pl.col(name).cast(dtype) for name, dtype in _OUTPUT_SCHEMA.items()
+    )
+
+
+def assign_mpi_collections(frames: pl.DataFrame) -> pl.DataFrame:
+    """`frames` (any table with `collected_at` and `frame_counter`), sorted
+    by `collected_at`, with the MPI collection each frame is in, identified
+    by the collection's first frame: `collection_started_at` and
+    `collection_first_frame_counter`.
+
+    A new collection starts at the first frame, and then at the first frame
+    `MPI_COLLECTION_MAX_DURATION` or more after the current collection's
+    first, or with a lower counter than the frame before it: a new
+    recording (the counter restarts at 0 on each one), or the counter
+    wrapping around. A drop of up to `_MAX_OUT_OF_ORDER_FRAMES` within
+    `_MAX_OUT_OF_ORDER_TIME` doesn't count -- that's timing jitter, not a
+    reset.
+    """
+    frames = frames.sort("collected_at", maintain_order=True)
+    times = frames["collected_at"].to_list()
+    counters = frames["frame_counter"].to_list()
+    starts: list[int] = []
+    start = 0
+    for i in range(len(times)):
+        drop = counters[i - 1] - counters[i] if i else 0
+        if i and (
+            times[i] - times[start] >= MPI_COLLECTION_MAX_DURATION
+            or drop > _MAX_OUT_OF_ORDER_FRAMES
+            or (drop > 0 and times[i] - times[i - 1] > _MAX_OUT_OF_ORDER_TIME)
+        ):
+            start = i
+        starts.append(start)
+    first = pl.Series(starts, dtype=pl.UInt32)
+    return frames.with_columns(
+        collection_started_at=frames["collected_at"].gather(first),
+        collection_first_frame_counter=frames["frame_counter"].gather(first),
+    )
+
+
+_COLLECTIONS_SCHEMA = {
+    "collection_started_at": pl.Datetime("us", "UTC"),
+    "collection_ended_at": pl.Datetime("us", "UTC"),
+    "frames_present": pl.Int64,
+    # From the counters: every frame from the first present to the last.
+    "frames_expected": pl.Int64,
+    "frames_missing": pl.Int64,
+    "first_frame_counter": pl.Int64,
+    "last_frame_counter": pl.Int64,
+    # The longest run of missing frames (by counter), when there is one: how
+    # many frames, the time of the frame before it, and the time between
+    # the frames either side of it.
+    "largest_gap_frames": pl.Int64,
+    "largest_gap_started_at": pl.Datetime("us", "UTC"),
+    "largest_gap_duration_ms": pl.Int64,
+}
+
+
+def summarize_mpi_collections(frames: pl.DataFrame) -> pl.DataFrame:
+    """One row per MPI collection in `frames` (as labelled by
+    `assign_mpi_collections`), oldest first -- see `_COLLECTIONS_SCHEMA`.
+    """
+    if frames.is_empty():
+        return pl.DataFrame(schema=_COLLECTIONS_SCHEMA)
+    collection = "collection_started_at"
+    gap_frames = pl.col("frame_counter").diff().over(collection) - 1
+    has_gap = gap_frames > 0
+    gaps = frames.sort(collection, "frame_counter").with_columns(
+        gap_frames=pl.when(has_gap).then(gap_frames),
+        gap_started_at=pl.when(has_gap).then(
+            pl.col("collected_at").shift().over(collection)
+        ),
+        gap_ended_at=pl.when(has_gap).then(pl.col("collected_at")),
+    )
+
+    def at_largest_gap(column: str) -> pl.Expr:
+        return (
+            pl.col(column)
+            .sort_by("gap_frames", descending=True, nulls_last=True)
+            .first()
+        )
+
     return (
-        pl.DataFrame(rows, schema_overrides=_OUTPUT_SCHEMA, infer_schema_length=None)
-        .select(pl.col(name).cast(dtype) for name, dtype in _OUTPUT_SCHEMA.items())
-        .sort("collected_at", "file_offset")
+        gaps.group_by(collection)
+        .agg(
+            collection_ended_at=pl.col("collected_at").max(),
+            frames_present=pl.len(),
+            first_frame_counter=pl.col("frame_counter").min(),
+            last_frame_counter=pl.col("frame_counter").max(),
+            largest_gap_frames=pl.col("gap_frames").max().fill_null(0),
+            largest_gap_started_at=at_largest_gap("gap_started_at"),
+            largest_gap_ended_at=at_largest_gap("gap_ended_at"),
+        )
+        .with_columns(
+            frames_expected=pl.col("last_frame_counter")
+            - pl.col("first_frame_counter")
+            + 1,
+            largest_gap_duration_ms=(
+                pl.col("largest_gap_ended_at") - pl.col("largest_gap_started_at")
+            ).dt.total_milliseconds(),
+        )
+        .with_columns(
+            frames_missing=pl.col("frames_expected") - pl.col("frames_present")
+        )
+        .select(pl.col(name).cast(dtype) for name, dtype in _COLLECTIONS_SCHEMA.items())
+        .sort(collection)
     )
 
 
@@ -1353,7 +1486,8 @@ def _write_parquet_atomic(df: pl.DataFrame, path: Path) -> None:
 
 
 def run(*, data_dir: Path = DEFAULT_DATA_DIR) -> None:
-    """Recompute `mpi_frames.parquet` from step 3's output.
+    """Recompute `mpi_frames.parquet` and `mpi_collections.parquet` from
+    step 3's output.
 
     Reads `everything_decoded.parquet` from `data_dir` (where step 3
     writes it) and writes the result back into the same directory --
@@ -1386,10 +1520,13 @@ def run(*, data_dir: Path = DEFAULT_DATA_DIR) -> None:
 
     out_path = data_dir / OUTPUT_FILENAME
     _write_parquet_atomic(result_df, out_path)
+    collections_df = summarize_mpi_collections(result_df)
+    _write_parquet_atomic(collections_df, data_dir / COLLECTIONS_OUTPUT_FILENAME)
     logger.info(f"MPI chunk linking/anchoring stats: {dict(sorted(tally.items()))}")
     received = tally["frames_received"]
     with pl.Config(
         tbl_rows=-1,
+        tbl_cols=-1,
         tbl_hide_dataframe_shape=True,
         tbl_hide_column_data_types=True,
         fmt_str_lengths=100,
@@ -1398,6 +1535,10 @@ def run(*, data_dir: Path = DEFAULT_DATA_DIR) -> None:
         logger.info(
             f"What became of the {received:,} distinct CRC-valid MPI frames "
             f"received:\n{_outcome_table(outcomes)}"
+        )
+        logger.info(
+            f"{collections_df.height:,} MPI collection(s):\n"
+            f"{collections_df.drop('largest_gap_started_at')}"
         )
     utilized = f"{result_df.height / received:.1%}" if received else "n/a"
     logger.info(

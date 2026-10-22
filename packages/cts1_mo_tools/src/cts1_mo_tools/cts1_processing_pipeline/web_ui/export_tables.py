@@ -212,6 +212,18 @@ TABLE_SPECS: tuple[TableSpec, ...] = (
         has_packet_type=False,
         lineage_columns=("packet_ids",),
     ),
+    TableSpec(
+        key="mpi_collections",
+        step="Step 6 -- Extract MPI Frames",
+        description=(
+            "MPI collections (runs of frames from one recording, up to 20 "
+            "minutes long), one row per collection: start/end time, frames "
+            "present vs expected from the frame counters, and the largest gap."
+        ),
+        filename=step_6_pipeline.COLLECTIONS_OUTPUT_FILENAME,
+        time_column="collection_started_at",
+        has_packet_type=False,
+    ),
 )
 
 ExportFormat = Literal["csv", "excel", "parquet", "sqlite", "duckdb"]

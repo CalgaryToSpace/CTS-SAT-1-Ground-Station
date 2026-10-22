@@ -47,6 +47,7 @@ flowchart LR
     step5 --> reassembled_tcmd_responses[("reassembled_tcmd_responses")]
     everything_decoded --> step6["Step 6\\nExtract MPI Frames"]
     step6 --> mpi_frames[("mpi_frames")]
+    step6 --> mpi_collections[("mpi_collections")]
 """
 
 RANGE_INPUT_MASK = "####-##-## ##:##:##"

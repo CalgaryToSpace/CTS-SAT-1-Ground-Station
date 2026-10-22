@@ -140,7 +140,8 @@ class Step5Args:
 @dataclass(frozen=True, slots=True)
 class Step6Args:
     """Step 6: extract MPI telemetry frames, with interpolated collection
-    times, from bulk file downlinks in everything_decoded into mpi_frames."""
+    times, from bulk file downlinks in everything_decoded into mpi_frames,
+    and summarize them per MPI collection into mpi_collections."""
 
 
 @dataclass(frozen=True, slots=True)
