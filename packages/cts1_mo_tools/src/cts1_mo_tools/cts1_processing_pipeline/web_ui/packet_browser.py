@@ -42,6 +42,7 @@ import polars as pl
 import xlsxwriter  # pyright: ignore[reportMissingTypeStubs]
 from cachetools import TTLCache, cached
 
+from cts1_mo_tools.cts1_decode_satnogs_packets import PACKET_TYPE_ENUM
 from cts1_mo_tools.cts1_processing_pipeline.common import drop_timezones_for_excel
 from cts1_mo_tools.cts1_processing_pipeline.step_5_reassemble_tcmd_responses import (
     pipeline as step_5_pipeline,
@@ -154,7 +155,9 @@ def _reassembled_tcmd_rows(path: Path) -> pl.LazyFrame | None:
         return None
     return lf.select(
         received_at=pl.col("first_received_at"),
-        packet_type=pl.lit("TCMD_RESPONSE"),
+        # Typed to match `everything_decoded`'s column: the relaxed concat in
+        # `_with_reassembled_tcmd` would otherwise demote it back to a String.
+        packet_type=pl.lit("TCMD_RESPONSE", dtype=PACKET_TYPE_ENUM),
         general_message=pl.col("tcmd_response_text"),
         tcmd_ts_sent=pl.col("tcmd_ts_sent"),
         tcmd_response_code=pl.col("tcmd_response_code"),

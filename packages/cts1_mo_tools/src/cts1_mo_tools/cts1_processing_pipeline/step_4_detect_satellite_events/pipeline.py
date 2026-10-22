@@ -61,6 +61,7 @@ from __future__ import annotations
 
 __all__ = [
     "DEFAULT_DATA_DIR",
+    "EVENT_TYPE_ENUM",
     "OUTPUT_FILENAME",
     "RESYNC_TOLERANCE",
     "compute_satellite_events",
@@ -73,7 +74,10 @@ from typing import TYPE_CHECKING, NamedTuple
 import polars as pl
 from loguru import logger
 
-from cts1_mo_tools.cts1_decode_satnogs_packets import MAX_VALID_EPOCH_MS
+from cts1_mo_tools.cts1_decode_satnogs_packets import (
+    MAX_VALID_EPOCH_MS,
+    PACKET_TYPE_ENUM,
+)
 from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
     pipeline as step_3_pipeline,
 )
@@ -100,6 +104,7 @@ EVENT_SPECS: tuple[_EventSpec, ...] = (
     _EventSpec("eps_uptime_sec", "EPS Reboot", 1000.0),
     _EventSpec("duration_since_last_uplink_ms", "Uplinked Commands", 1.0),
 )
+EVENT_TYPE_ENUM = pl.Enum([spec.event_type for spec in EVENT_SPECS])
 
 # A candidate counter drop is only trusted as a genuine event if the drop
 # itself or the beacon-to-beacon time gap exceeds this -- see the module
@@ -111,11 +116,11 @@ _RESYNC_TOLERANCE_MS = RESYNC_TOLERANCE / timedelta(milliseconds=1)
 # beacons decoded yet) is built with, so downstream readers always see the
 # same columns regardless of how much history exists.
 _OUTPUT_SCHEMA = {
-    "event_type": pl.String,
+    "event_type": EVENT_TYPE_ENUM,
     "detected_at": pl.Datetime("us", "UTC"),
     "estimated_event_at": pl.Datetime("us", "UTC"),
     "time_since_event_when_detected_ms": pl.Int64,
-    "detecting_packet_type": pl.String,
+    "detecting_packet_type": PACKET_TYPE_ENUM,
     "obc_reboot_reason": pl.String,
     "eps_reboot_reason": pl.String,
 }
@@ -152,13 +157,13 @@ def _events_for_counter(beacons: pl.LazyFrame, spec: _EventSpec) -> pl.LazyFrame
 
     time_since_event_ms = (counter * spec.ms_per_unit).round(0).cast(pl.Int64)
     return dropped.select(
-        event_type=pl.lit(spec.event_type),
+        event_type=pl.lit(spec.event_type, dtype=EVENT_TYPE_ENUM),
         detected_at=pl.col("beacon_utc_time"),
         estimated_event_at=(
             pl.col("beacon_utc_time") - pl.duration(milliseconds=time_since_event_ms)
         ),
         time_since_event_when_detected_ms=time_since_event_ms,
-        detecting_packet_type=pl.col("packet_type"),
+        detecting_packet_type=pl.col("packet_type").cast(PACKET_TYPE_ENUM),
         obc_reboot_reason=pl.col("reboot_reason"),
         eps_reboot_reason=pl.col("eps_reset_cause"),
     )

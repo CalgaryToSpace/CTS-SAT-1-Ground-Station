@@ -2,7 +2,9 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import polars as pl
+from cts1_mo_tools.cts1_decode_satnogs_packets import PACKET_TYPE_ENUM
 from cts1_mo_tools.cts1_processing_pipeline.step_4_detect_satellite_events.pipeline import (  # noqa: E501
+    EVENT_TYPE_ENUM,
     compute_satellite_events,
 )
 
@@ -51,7 +53,8 @@ def _df(rows: list[dict[str, Any]]) -> pl.DataFrame:
 def test_empty_input_returns_empty_with_expected_schema() -> None:
     result = compute_satellite_events(pl.DataFrame())
     assert result.height == 0
-    assert result.schema["event_type"] == pl.String
+    assert result.schema["event_type"] == EVENT_TYPE_ENUM
+    assert result.schema["detecting_packet_type"] == PACKET_TYPE_ENUM
     assert result.schema["detected_at"] == pl.Datetime("us", "UTC")
     assert result.schema["time_since_event_when_detected_ms"] == pl.Int64
 
