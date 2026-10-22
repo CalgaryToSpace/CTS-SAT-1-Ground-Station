@@ -95,7 +95,7 @@ BEACON_CHART_GROUPS: list[tuple[str, list[ChartSpec]]] = [
         [
             ChartSpec("OBC Temperature", ["obc_temperature_C"], unit="°C"),
             ChartSpec(
-                "OBC Active Oscillator (extended)",
+                "OBC Active Oscillator",
                 ["obc_active_oscillator_MHz"],
                 unit="MHz",
             ),
@@ -108,13 +108,13 @@ BEACON_CHART_GROUPS: list[tuple[str, list[ChartSpec]]] = [
         [
             ChartSpec("Battery Voltage", ["eps_battery_voltage_V"], unit="V"),
             ChartSpec(
-                "OBC ADC Battery Voltage (extended)",
+                "OBC ADC Battery Voltage",
                 ["obc_adc_battery_voltage_V"],
                 unit="V",
             ),
             ChartSpec("Battery Percent", ["eps_battery_percent"], unit="%"),
             ChartSpec(
-                "OBC ADC Battery Percent (extended)",
+                "OBC ADC Battery Percent",
                 ["obc_adc_battery_percent"],
                 unit="%",
             ),
@@ -151,7 +151,7 @@ BEACON_CHART_GROUPS: list[tuple[str, list[ChartSpec]]] = [
                 labels=["input", "output"],
             ),
             ChartSpec(
-                "Net Battery / Distributed Power, Average (extended)",
+                "Net Battery / Distributed Power, Average",
                 [
                     "eps_total_avg_net_battery_power_W",
                     "eps_total_avg_power_distributed_W",
@@ -162,7 +162,7 @@ BEACON_CHART_GROUPS: list[tuple[str, list[ChartSpec]]] = [
         ],
     ),
     (
-        "EPS Solar Channels (extended)",
+        "EPS Solar Channels",
         [
             ChartSpec(
                 "MPPT Input Voltage",
@@ -229,7 +229,7 @@ BEACON_CHART_GROUPS: list[tuple[str, list[ChartSpec]]] = [
                 categorical=True,
             ),
             ChartSpec(
-                "MPI Last Temperature (extended)",
+                "MPI Last Temperature",
                 ["mpi_last_temperature_C"],
                 unit="°C",
                 valid_min=-90.0,
@@ -248,7 +248,7 @@ BEACON_CHART_GROUPS: list[tuple[str, list[ChartSpec]]] = [
         ],
     ),
     (
-        "ADCS Attitude (extended)",
+        "ADCS Attitude",
         [
             ChartSpec(
                 "Estimated Attitude",
@@ -291,7 +291,7 @@ BEACON_CHART_GROUPS: list[tuple[str, list[ChartSpec]]] = [
         ],
     ),
     (
-        "ADCS Sensors (extended)",
+        "ADCS Sensors",
         [
             ChartSpec(
                 "Magnetic Field",
