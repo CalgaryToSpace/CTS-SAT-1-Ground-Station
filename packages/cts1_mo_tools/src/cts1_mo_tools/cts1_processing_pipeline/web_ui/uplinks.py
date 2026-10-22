@@ -19,10 +19,12 @@ from __future__ import annotations
 
 __all__ = [
     "UPLINK_WINDOW",
+    "FinishedUplink",
     "detect_finished_uplinks",
     "latest_finished_uplink",
 ]
 
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -46,6 +48,17 @@ UPLINK_WINDOW = timedelta(minutes=15)
 SAME_BOOT_TOLERANCE = timedelta(minutes=3)
 
 _CACHE_TTL_SECONDS = 30
+
+
+@dataclass(frozen=True, slots=True)
+class FinishedUplink:
+    """One row of `detect_finished_uplinks` -- see there for each field."""
+
+    uplink_finished_at: datetime
+    tcmd_count_before: int | None
+    tcmd_count_after: int
+    tcmd_count_delta: int | None
+
 
 _OUTPUT_SCHEMA = {
     "uplink_finished_at": pl.Datetime("us", "UTC"),
@@ -193,10 +206,12 @@ def _finished_uplinks_since(path: Path, since: datetime) -> pl.DataFrame:
 
 def latest_finished_uplink(
     path: Path = DEFAULT_PARQUET_PATH, *, window: timedelta = timedelta(hours=24)
-) -> dict[str, object] | None:
+) -> FinishedUplink | None:
     """The newest row of `detect_finished_uplinks` over beacons received in
     the last `window`, or None if no pass finished in that time.
     """
     now = round_down_datetime(datetime.now(UTC), timedelta(minutes=5))
     uplinks = _finished_uplinks_since(path, now - window)
-    return uplinks.row(0, named=True) if uplinks.height else None
+    if uplinks.is_empty():
+        return None
+    return FinishedUplink(**uplinks.row(0, named=True))

@@ -93,7 +93,7 @@ class _LiveData:
     latest: pl.DataFrame
     latest_extended: pl.DataFrame
     local_max_pending: tuple[int, datetime] | None
-    latest_uplink: dict[str, Any] | None
+    latest_uplink: uplinks.FinishedUplink | None
     recent: pl.DataFrame
 
 
@@ -121,7 +121,9 @@ def _local_max_pending_str(local_max: tuple[int, datetime] | None) -> str:
     return f"{count} (at {received_at:%Y-%m-%d %H:%M:%S} UTC, {_age_str(received_at)})"
 
 
-def _latest_uplink_stats(latest_uplink: dict[str, Any] | None) -> list[tuple[str, Any]]:
+def _latest_uplink_stats(
+    latest_uplink: uplinks.FinishedUplink | None,
+) -> list[tuple[str, Any]]:
     """The newest finished uplink pass in the last 24h -- see
     `uplinks.detect_finished_uplinks` -- and how many telecommands it
     uplinked ("?" when there's no beacon from before the pass to compare
@@ -132,8 +134,8 @@ def _latest_uplink_stats(latest_uplink: dict[str, Any] | None) -> list[tuple[str
             ("Latest Uplink Finished", "None in last 24h"),
             ("TCMDs in Latest Uplink", "?"),
         ]
-    finished_at = latest_uplink["uplink_finished_at"]
-    delta = latest_uplink["tcmd_count_delta"]
+    finished_at = latest_uplink.uplink_finished_at
+    delta = latest_uplink.tcmd_count_delta
     return [
         (
             "Latest Uplink Finished",
@@ -146,7 +148,7 @@ def _latest_uplink_stats(latest_uplink: dict[str, Any] | None) -> list[tuple[str
 def _latest_beacon_card(
     latest: pl.DataFrame,
     local_max_pending: tuple[int, datetime] | None,
-    latest_uplink: dict[str, Any] | None,
+    latest_uplink: uplinks.FinishedUplink | None,
 ) -> None:
     with ui.card().classes("w-full"):
         if latest.is_empty():
