@@ -27,6 +27,7 @@ from . import uplinks
 from .attitude_view import AttitudePlayer
 from .charts import (
     BEACON_CHART_GROUPS,
+    channel_states_option,
     chart_option,
     packet_counts_histogram_option,
 )
@@ -148,6 +149,39 @@ def _latest_uplink_stats(
             f"{latest_uplink.tcmd_count_after} = {'?' if delta is None else delta}",
         ),
     ]
+
+
+def _channel_chips(title: str, states: pl.DataFrame) -> None:
+    """One labelled row of on/off chips, from `states`' newest row (see
+    `beacon_data.eps_channel_states`). Says so when there's no reading yet.
+    """
+    with ui.column().classes("gap-1"):
+        ui.label(title).classes("text-base font-medium")
+        if states.is_empty():
+            ui.label("No reading yet.").classes("text-caption text-grey")
+            return
+        row = states.drop("received_at").row(-1, named=True)
+        with ui.row().classes("gap-1 flex-wrap"):
+            for name, on in row.items():
+                ui.chip(
+                    name,
+                    icon="power" if on else "power_off",
+                    color="positive" if on else "grey-4",
+                    text_color="white" if on else "grey-8",
+                ).props("dense square")
+
+
+def _power_channels_card(latest: pl.DataFrame, latest_extended: pl.DataFrame) -> None:
+    """Which EPS power channels (every beacon) and ADCS components (extended
+    beacons only) are currently on -- each from the newest beacon carrying it.
+    """
+    with ui.card().classes("w-full"):
+        ui.label("Power Channels").classes("text-lg font-bold")
+        with ui.row().classes("w-full gap-x-8 gap-y-2 flex-wrap"):
+            _channel_chips("EPS Channels", beacon_data.eps_channel_states(latest))
+            _channel_chips(
+                "ADCS Powered", beacon_data.adcs_channel_states(latest_extended)
+            )
 
 
 def _latest_beacon_card(
@@ -412,6 +446,16 @@ def _chart_groups(path: Path, *, since: datetime | None) -> None:
         path, since=since, every=PACKET_COUNT_WINDOW
     )
 
+    power_channels = [
+        option
+        for title, states in (
+            ("EPS Power Channels", beacon_data.eps_channel_states(beacons)),
+            ("ADCS Powered (extended)", beacon_data.adcs_channel_states(beacons)),
+        )
+        if (option := channel_states_option(states, title=title)) is not None
+    ]
+    _render_chart_group("Power Channels", power_channels)
+
     for title, specs in BEACON_CHART_GROUPS:
         _render_chart_group(title, _chart_options(specs, beacons))
 
@@ -453,6 +497,7 @@ def build_beacon_stats_page(data_dir: Path, hours: float) -> None:
             return
         _latest_beacon_card(live.latest, live.local_max_pending, live.latest_uplink)
         _latest_extended_beacon_card(live.latest_extended)
+        _power_channels_card(live.latest, live.latest_extended)
 
     @ui.refreshable
     def recent_status(live: _LiveData) -> None:

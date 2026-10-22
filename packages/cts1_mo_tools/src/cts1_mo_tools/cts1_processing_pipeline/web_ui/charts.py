@@ -13,6 +13,7 @@ from __future__ import annotations
 __all__ = [
     "BEACON_CHART_GROUPS",
     "ChartSpec",
+    "channel_states_option",
     "chart_option",
     "packet_counts_histogram_option",
 ]
@@ -56,6 +57,12 @@ class ChartSpec:
         if self.labels:
             return self.labels[index]
         return column
+
+
+# `channel_states_option` marks: a saturated green for "on", drawn taller than
+# the faint grey "off" marks, so the "on" spans stand out sharply.
+_CHANNEL_ON_COLOR = "#15A34A"
+_CHANNEL_OFF_COLOR = "#E0E0E0"
 
 
 # -- Beacon telemetry (BEACON_BASIC / BEACON_EXTENDED rows only) -------------
@@ -495,4 +502,58 @@ def packet_counts_histogram_option(
         "yAxis": {"type": "value", "name": "packets", "minInterval": 1},
         "dataZoom": [{"type": "inside"}],
         "series": series,
+    }
+
+
+def channel_states_option(states: pl.DataFrame, *, title: str) -> dict[str, Any] | None:
+    """ECharts `option` showing which power channels were on over time, or
+    None if `states` has no rows.
+
+    `states` is `received_at` plus one bool column per channel (see
+    `data.eps_channel_states` / `data.adcs_channel_states`). Each channel is
+    a row on a category y-axis (first column at the top), with a dot per
+    beacon: colored where the channel was on, grey where it was off. Gaps
+    are stretches with no beacon at all.
+    """
+    channels = [c for c in states.columns if c != "received_at"]
+    if states.is_empty() or not channels:
+        return None
+
+    long = states.unpivot(
+        index="received_at", on=channels, variable_name="channel", value_name="on"
+    )
+
+    def _points(*, on: bool) -> list[list[Any]]:
+        sub = long.filter(pl.col("on") == on)
+        return [
+            [ts.isoformat(), channel]
+            for ts, channel in zip(sub["received_at"], sub["channel"], strict=True)
+        ]
+
+    return {
+        "animation": False,
+        "title": {"text": title, "textStyle": {"fontSize": 14}},
+        "grid": {"left": 190, "right": 20, "top": 50, "bottom": 30},
+        "tooltip": {"trigger": "item"},
+        "legend": {"show": True, "top": 26},
+        "xAxis": {"type": "time"},
+        # Category axes run bottom-up, so reverse to put the first channel on top.
+        "yAxis": {"type": "category", "data": channels[::-1]},
+        "dataZoom": [{"type": "inside"}],
+        "series": [
+            {
+                "name": name,
+                "type": "scatter",
+                "symbol": "rect",
+                "symbolSize": [4, height],
+                "data": _points(on=on),
+                "color": color,
+                "large": True,
+                "largeThreshold": 2000,
+            }
+            for name, on, color, height in (
+                ("on", True, _CHANNEL_ON_COLOR, 14),
+                ("off", False, _CHANNEL_OFF_COLOR, 8),
+            )
+        ],
     }
