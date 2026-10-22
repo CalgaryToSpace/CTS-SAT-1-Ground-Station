@@ -23,6 +23,7 @@ __all__ = [
     "load_bulk_file_downlink_packets",
     "load_packet_counts_per_window",
     "load_reassembled_tcmd_responses",
+    "newest_rows",
     "round_down_datetime",
 ]
 
@@ -81,6 +82,28 @@ def _scan(path: Path) -> pl.LazyFrame | None:
     if not path.exists():
         return None
     return pl.scan_parquet(path)
+
+
+def newest_rows(lf: pl.LazyFrame, n: int) -> pl.DataFrame:
+    """`lf`'s `n` most recently received rows, newest first -- the same
+    result as `lf.sort("received_at", descending=True).head(n)`.
+
+    That one-liner materializes every column of every row before sorting
+    (gigabytes, once the whole mission's history is in the file), so this
+    finds the `n`th-newest `received_at` from that one column first, then
+    fetches only rows at/after it. That filter is pushed into the scan, which
+    skips older row groups outright and only decodes the wide columns for
+    the rows that match.
+    """
+    cutoff = lf.select(pl.col("received_at").top_k(n).min()).collect().item()
+    if cutoff is None:
+        return lf.head(0).collect()
+    return (
+        lf.filter(pl.col("received_at") >= cutoff)
+        .sort("received_at", descending=True)
+        .head(n)
+        .collect()
+    )
 
 
 @cached(TTLCache(maxsize=3, ttl=_CACHE_TTL_SECONDS))
@@ -254,12 +277,7 @@ def latest_beacons(
     lf = _scan(path)
     if lf is None:
         return pl.DataFrame()
-    return (
-        lf.filter(pl.col("packet_type").is_in(packet_types))
-        .sort("received_at", descending=True)
-        .head(n)
-        .collect()
-    )
+    return newest_rows(lf.filter(pl.col("packet_type").is_in(packet_types)), n)
 
 
 def latest_local_max_pending_tcmd_count(

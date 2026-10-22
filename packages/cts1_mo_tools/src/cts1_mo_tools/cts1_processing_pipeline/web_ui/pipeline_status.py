@@ -59,6 +59,8 @@ from cts1_mo_tools.cts1_processing_pipeline.step_5_reassemble_tcmd_responses imp
     pipeline as step_5_pipeline,
 )
 
+from .data import newest_rows
+
 if TYPE_CHECKING:
     from datetime import timedelta
     from pathlib import Path
@@ -302,7 +304,7 @@ def latest_packets(path: Path, n: int = 25) -> pl.DataFrame:
     lf = _scan(path)
     if lf is None:
         return pl.DataFrame()
-    return lf.sort("received_at", descending=True).head(n).collect()
+    return newest_rows(lf, n)
 
 
 @dataclass(frozen=True, slots=True)

@@ -3,10 +3,11 @@ access to every column of `everything_decoded.parquet`, plus CSV/Excel
 exports of the filtered set.
 
 Every filter (packet type, time range, message substring) is pushed into
-the lazy scan before `.collect()`, and a page is a `.slice()` on that same
-lazy frame -- so browsing a file with a lot of history only ever
-materializes the one page (plus one column-pruned null-count pass) actually
-needed for the current filter, never the whole table.
+the lazy scan before `.collect()`, and a page is sorted and sliced on just
+its sort key(s) before the rest of its columns are fetched -- so browsing a
+file with a lot of history only ever materializes the one page (plus one
+streamed null-count pass, cached per filter) actually needed, never the
+whole table. See `load_page`.
 
 With `PacketBrowserFilters.reassemble_tcmd_responses` set, every raw
 `TCMD_RESPONSE` packet is swapped out for step 5's reassembled responses
@@ -39,11 +40,14 @@ from typing import TYPE_CHECKING
 
 import polars as pl
 import xlsxwriter  # pyright: ignore[reportMissingTypeStubs]
+from cachetools import TTLCache, cached
 
 from cts1_mo_tools.cts1_processing_pipeline.common import drop_timezones_for_excel
 from cts1_mo_tools.cts1_processing_pipeline.step_5_reassemble_tcmd_responses import (
     pipeline as step_5_pipeline,
 )
+
+from .data import newest_rows
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -56,6 +60,11 @@ DEFAULT_PAGE_SIZE = 200
 # export format) and tell the user to narrow the filters instead of
 # silently truncating without a word.
 MAX_EXPORT_ROWS = 10_000
+
+# Unique per row of `_source`'s table (across both halves of the reassembled
+# view), so `load_page` can fetch exactly the rows its key-only sort picked.
+# Internal only: never shown in the grid or exported.
+_ROW_ID = "__row_id"
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +177,11 @@ def _with_reassembled_tcmd(decoded: pl.LazyFrame, path: Path) -> pl.LazyFrame:
     reassembled = _reassembled_tcmd_rows(_reassembled_tcmd_path(path))
     if reassembled is None:
         return decoded
+    # Numbered on from where `decoded`'s `_ROW_ID`s end (a count straight
+    # from the parquet footer), so the two halves never share one.
+    reassembled = reassembled.with_row_index(
+        _ROW_ID, offset=decoded.select(pl.len()).collect().item()
+    )
 
     base_columns = decoded.collect_schema().names()
     # The per-packet sequence numbers mean nothing once the packets are
@@ -201,7 +215,10 @@ def _source(path: Path, filters: PacketBrowserFilters) -> pl.LazyFrame | None:
     TCMD_RESPONSE packets reassembled, per `filters`.
     """
     lf = _scan(path)
-    if lf is None or not filters.reassemble_tcmd_responses:
+    if lf is None:
+        return None
+    lf = lf.with_row_index(_ROW_ID)
+    if not filters.reassemble_tcmd_responses:
         return lf
     return _with_reassembled_tcmd(lf, path)
 
@@ -239,17 +256,50 @@ def packet_type_options(path: Path) -> list[str]:
     )
 
 
+def _column_names(lf: pl.LazyFrame) -> list[str]:
+    """`_source`'s columns, minus the internal `_ROW_ID`."""
+    return [c for c in lf.collect_schema().names() if c != _ROW_ID]
+
+
 def _total_and_non_null_columns(
-    filtered: pl.LazyFrame, column_names: list[str]
+    path: Path, filters: PacketBrowserFilters
 ) -> tuple[int, list[str]]:
     """One pass over the filtered set: its row count, plus which columns
     have at least one non-null value in it -- computed together so a page
     load or export only scans the filtered rows once for this, not twice.
+
+    That pass has to read every column of every matching row, so it's
+    streamed (row group by row group, rather than decoding the whole file's
+    widest columns at once) and cached per file version + filter set --
+    turning the page or changing the sort doesn't redo it.
     """
-    agg = filtered.select(
-        pl.len().alias("__total__"),
-        *[pl.col(c).null_count().alias(c) for c in column_names],
-    ).collect()
+    # Every file `_source` may read, so a pipeline rewrite of either one
+    # (steps 3 and 5 finish at different times) misses the cache.
+    versions = tuple(
+        p.stat().st_mtime_ns if p.exists() else None
+        for p in (path, _reassembled_tcmd_path(path))
+    )
+    return _total_and_non_null_columns_cached(path, versions, filters)
+
+
+@cached(TTLCache(maxsize=8, ttl=300))
+def _total_and_non_null_columns_cached(
+    path: Path,
+    versions: tuple[int | None, ...],  # noqa: ARG001 -- only part of the cache key
+    filters: PacketBrowserFilters,
+) -> tuple[int, list[str]]:
+    lf = _source(path, filters)
+    if lf is None:
+        return 0, []
+    column_names = _column_names(lf)
+    agg = (
+        _apply_filters(lf, filters)
+        .select(
+            pl.len().alias("__total__"),
+            *[pl.col(c).null_count().alias(c) for c in column_names],
+        )
+        .collect(engine="streaming")
+    )
     total = int(agg.item(0, "__total__"))
     if total == 0:
         return 0, []
@@ -272,15 +322,23 @@ def load_page(
 
     A `sort.column` not in the file (e.g. left over from before a schema
     change) falls back to the default order rather than erroring.
+
+    Sorting the whole filtered set with every column attached would
+    materialize all of it (gigabytes, with the whole mission's history), so
+    the page is picked in two passes: sort just the key column(s) and slice
+    out the page's `_ROW_ID`s, then fetch the full rows for only those.
+    Filtering that second pass on the page's `received_at` values too is
+    what lets it skip row groups and decode the wide columns for only the
+    matching rows -- the `_ROW_ID` filter alone can't be pushed into the
+    scan.
     """
     sort = sort or PacketSort()
     lf = _source(path, filters)
     if lf is None:
         return PacketPage(rows=pl.DataFrame(), total_rows=0, columns=[])
 
-    column_names = lf.collect_schema().names()
-    filtered = _apply_filters(lf, filters)
-    total, non_null_columns = _total_and_non_null_columns(filtered, column_names)
+    column_names = _column_names(lf)
+    total, non_null_columns = _total_and_non_null_columns(path, filters)
     if total == 0:
         return PacketPage(rows=pl.DataFrame(), total_rows=0, columns=[])
 
@@ -292,11 +350,21 @@ def load_page(
     if sort.column != "received_at":
         by.append("received_at")
         descending.append(True)
-    rows = (
-        filtered.sort(by, descending=descending, nulls_last=True)
+    filtered = _apply_filters(lf, filters)
+    page_keys = (
+        filtered.select(_ROW_ID, *by)
+        .sort(by, descending=descending, nulls_last=True)
         .slice(offset, limit)
-        .select(non_null_columns)
         .collect()
+    )
+    page_rows = filtered.filter(
+        pl.col("received_at").is_in(page_keys["received_at"].implode()),
+        pl.col(_ROW_ID).is_in(page_keys[_ROW_ID].implode()),
+    ).collect()
+    rows = (
+        page_keys.select(_ROW_ID)
+        .join(page_rows, on=_ROW_ID, how="left", maintain_order="left")
+        .select(non_null_columns)
     )
     return PacketPage(rows=rows, total_rows=total, columns=non_null_columns)
 
@@ -313,18 +381,11 @@ def _filtered_export_df(
     if lf is None:
         return pl.DataFrame(), False
 
-    column_names = lf.collect_schema().names()
-    filtered = _apply_filters(lf, filters)
-    total, non_null_columns = _total_and_non_null_columns(filtered, column_names)
+    total, non_null_columns = _total_and_non_null_columns(path, filters)
     if total == 0:
         return pl.DataFrame(), False
 
-    df = (
-        filtered.sort("received_at", descending=True)
-        .head(row_cap)
-        .select(non_null_columns)
-        .collect()
-    )
+    df = newest_rows(_apply_filters(lf, filters), row_cap).select(non_null_columns)
     return df, total > row_cap
 
 
