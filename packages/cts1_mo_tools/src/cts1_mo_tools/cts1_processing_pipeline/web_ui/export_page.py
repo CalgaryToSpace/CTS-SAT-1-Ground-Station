@@ -45,6 +45,8 @@ flowchart LR
     step4 --> satellite_events[("satellite_events_from_beacons")]
     everything_decoded --> step5["Step 5\\nReassemble TCMD Responses"]
     step5 --> reassembled_tcmd_responses[("reassembled_tcmd_responses")]
+    everything_decoded --> step6["Step 6\\nExtract MPI Frames"]
+    step6 --> mpi_frames[("mpi_frames")]
 """
 
 RANGE_INPUT_MASK = "####-##-## ##:##:##"

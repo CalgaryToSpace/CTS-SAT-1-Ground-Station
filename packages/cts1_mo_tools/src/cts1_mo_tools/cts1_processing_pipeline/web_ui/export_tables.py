@@ -52,6 +52,9 @@ from cts1_mo_tools.cts1_processing_pipeline.step_4_detect_satellite_events impor
 from cts1_mo_tools.cts1_processing_pipeline.step_5_reassemble_tcmd_responses import (
     pipeline as step_5_pipeline,
 )
+from cts1_mo_tools.cts1_processing_pipeline.step_6_extract_mpi_frames import (
+    pipeline as step_6_pipeline,
+)
 
 from . import pipeline_status
 
@@ -195,6 +198,19 @@ TABLE_SPECS: tuple[TableSpec, ...] = (
         filename=step_5_pipeline.OUTPUT_FILENAME,
         time_column="first_received_at",
         has_packet_type=False,
+    ),
+    TableSpec(
+        key="mpi_frames",
+        step="Step 6 -- Extract MPI Frames",
+        description=(
+            "MPI telemetry frames recovered from bulk file downlinks, one row "
+            "per frame, with a collection time interpolated between the "
+            "file's onboard timestamps."
+        ),
+        filename=step_6_pipeline.OUTPUT_FILENAME,
+        time_column="collected_at",
+        has_packet_type=False,
+        lineage_columns=("packet_ids",),
     ),
 )
 
