@@ -18,6 +18,7 @@ __all__ = [
     "DEFAULT_PARQUET_PATH",
     "DEFAULT_REASSEMBLED_TCMD_PATH",
     "adcs_channel_states",
+    "adcs_error_states",
     "eps_channel_states",
     "latest_beacons",
     "latest_local_max_pending_tcmd_count",
@@ -37,6 +38,8 @@ import polars as pl
 from cachetools import TTLCache, cached
 
 from cts1_mo_tools.cts1_decode_satnogs_packets import (
+    ADCS_ERROR_BITS,
+    ADCS_FLAG_BITS,
     EPS_CHANNEL_MAP,
     PACKET_TYPE_ENUM,
 )
@@ -353,14 +356,34 @@ def latest_local_max_pending_tcmd_count(
     return int(row["pending_queued_tcmd_count"]), row["received_at"]
 
 
-def _drop_idle_unused_channels(states: pl.DataFrame) -> pl.DataFrame:
-    """Drop `*_UNUSED` channel columns that are never on in `states`."""
-    idle = [
-        c
-        for c in states.columns
-        if c.endswith(_UNUSED_CHANNEL_SUFFIX) and not states[c].any()
-    ]
-    return states.drop(idle)
+def _drop_never_on(states: pl.DataFrame, columns: Sequence[str]) -> pl.DataFrame:
+    """Drop those of `columns` that are never True in `states`."""
+    return states.drop([c for c in columns if not states[c].any()])
+
+
+def _json_list_states(
+    beacons: pl.DataFrame, column: str, names: Sequence[str]
+) -> pl.DataFrame:
+    """`received_at` plus one bool column per `names` entry, in that order,
+    True where `column`'s JSON list of names (e.g. `adcs_powered_list`)
+    includes it. Rows where `column` is null are dropped.
+    """
+    if column not in beacons.columns:
+        return pl.DataFrame()
+    return (
+        beacons.select("received_at", column)
+        .drop_nulls()
+        .select(
+            "received_at",
+            *(
+                pl.col(column)
+                .cast(pl.String)
+                .str.contains(f'"{name}"', literal=True)
+                .alias(name)
+                for name in names
+            ),
+        )
+    )
 
 
 def eps_channel_states(beacons: pl.DataFrame) -> pl.DataFrame:
@@ -391,7 +414,9 @@ def eps_channel_states(beacons: pl.DataFrame) -> pl.DataFrame:
             for bit_num, name in EPS_CHANNEL_MAP.items()
         ),
     )
-    return _drop_idle_unused_channels(states)
+    return _drop_never_on(
+        states, [c for c in states.columns if c.endswith(_UNUSED_CHANNEL_SUFFIX)]
+    )
 
 
 def adcs_channel_states(beacons: pl.DataFrame) -> pl.DataFrame:
@@ -401,20 +426,37 @@ def adcs_channel_states(beacons: pl.DataFrame) -> pl.DataFrame:
     Decoded from `adcs_powered_list`, which only `BEACON_EXTENDED` packets
     carry -- so there's one row per extended beacon in `beacons`, in order.
     """
-    column = "adcs_powered_list"
-    if column not in beacons.columns:
-        return pl.DataFrame()
-    return (
-        beacons.select("received_at", column)
-        .drop_nulls()
-        .select(
-            "received_at",
-            *(
-                pl.col(column)
-                .cast(pl.String)
-                .str.contains(f'"{name}"', literal=True)
-                .alias(name)
-                for name in ADCS_POWER_CONTROL_CHANNELS
-            ),
+    return _json_list_states(beacons, "adcs_powered_list", ADCS_POWER_CONTROL_CHANNELS)
+
+
+def adcs_error_states(beacons: pl.DataFrame) -> pl.DataFrame:
+    """`received_at` plus one bool column per ADCS error (`adcs_errors`) or
+    overcurrent detection (`adcs_flags`), True where it's set -- one row per
+    extended beacon in `beacons`. Columns are in bit order, so each camera's
+    errors and overcurrents sit together.
+
+    Only those set at some point in `beacons` are kept: there are 24 of
+    them, and almost all are clear almost all the time.
+    """
+    by_bit = sorted(
+        (bit_num, column, name)
+        for column, bits in (
+            ("adcs_errors", ADCS_ERROR_BITS),
+            ("adcs_flags", ADCS_FLAG_BITS),
         )
+        for bit_num, name in bits
     )
+    if not {"adcs_errors", "adcs_flags"} <= set(beacons.columns):
+        return pl.DataFrame()
+    states = beacons.filter(pl.col("adcs_errors").is_not_null()).select(
+        "received_at",
+        *(
+            pl.col(column)
+            .cast(pl.String)
+            .str.contains(f'"{name}"', literal=True)
+            .fill_null(value=False)
+            .alias(name)
+            for _, column, name in by_bit
+        ),
+    )
+    return _drop_never_on(states, [name for _, _, name in by_bit])

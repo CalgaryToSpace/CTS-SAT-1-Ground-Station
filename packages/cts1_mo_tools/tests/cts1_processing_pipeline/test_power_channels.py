@@ -8,6 +8,7 @@ from cts1_mo_tools.cts1_processing_pipeline.web_ui.charts import (
 from cts1_mo_tools.cts1_processing_pipeline.web_ui.data import (
     ADCS_POWER_CONTROL_CHANNELS,
     adcs_channel_states,
+    adcs_error_states,
     eps_channel_states,
 )
 
@@ -94,3 +95,35 @@ def test_adcs_power_control_channels_are_decoded_names() -> None:
 def test_adcs_channel_states_in_telecommand_order() -> None:
     states = adcs_channel_states(_beacons(["0x00000001"], ['["GPS_LNA_POWER"]']))
     assert states.columns == ["received_at", *ADCS_POWER_CONTROL_CHANNELS]
+
+
+def test_adcs_error_states_keeps_only_seen_in_bit_order() -> None:
+    beacons = pl.DataFrame(
+        {
+            "received_at": [_BASE, _BASE + timedelta(minutes=1), _BASE],
+            "adcs_errors": [
+                '["COARSE_SUN_SENSOR_ERROR","CAM1_SENSOR_BUSY_ERROR"]',
+                "[]",
+                None,
+            ],
+            "adcs_flags": ['["CAM1_3V3_OVERCURRENT"]', "[]", None],
+        }
+    )
+    states = adcs_error_states(beacons)
+    # Bits 34, 35, 45: the overcurrent flag sorts in among the errors.
+    assert states.columns == [
+        "received_at",
+        "CAM1_3V3_OVERCURRENT",
+        "CAM1_SENSOR_BUSY_ERROR",
+        "COARSE_SUN_SENSOR_ERROR",
+    ]
+    assert states.height == 2
+    assert all(states.row(0)[1:])
+    assert not any(states.row(1)[1:])
+
+
+def test_channel_states_option_alert_uses_set_clear() -> None:
+    states = eps_channel_states(_beacons(["0x00000001"], [None]))
+    option = channel_states_option(states, title="x", alert=True)
+    assert option is not None
+    assert [s["name"] for s in option["series"]] == ["set", "clear"]

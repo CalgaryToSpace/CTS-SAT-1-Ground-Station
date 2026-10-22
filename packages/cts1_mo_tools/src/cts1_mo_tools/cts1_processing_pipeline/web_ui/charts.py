@@ -63,6 +63,8 @@ class ChartSpec:
 # the faint grey "off" marks, so the "on" spans stand out sharply.
 _CHANNEL_ON_COLOR = "#15A34A"
 _CHANNEL_OFF_COLOR = "#E0E0E0"
+# ...and red instead, when "on" means something's wrong (`alert=True`).
+_CHANNEL_ALERT_COLOR = "#DC2626"
 
 
 # -- Beacon telemetry (BEACON_BASIC / BEACON_EXTENDED rows only) -------------
@@ -505,15 +507,19 @@ def packet_counts_histogram_option(
     }
 
 
-def channel_states_option(states: pl.DataFrame, *, title: str) -> dict[str, Any] | None:
-    """ECharts `option` showing which power channels were on over time, or
-    None if `states` has no rows.
+def channel_states_option(
+    states: pl.DataFrame, *, title: str, alert: bool = False
+) -> dict[str, Any] | None:
+    """ECharts `option` showing which channels/flags were on over time, or
+    None if `states` has no rows (or no channels).
 
     `states` is `received_at` plus one bool column per channel (see
-    `data.eps_channel_states` / `data.adcs_channel_states`). Each channel is
-    a row on a category y-axis (first column at the top), with a dot per
-    beacon: colored where the channel was on, grey where it was off. Gaps
-    are stretches with no beacon at all.
+    `data.eps_channel_states` / `data.adcs_channel_states` /
+    `data.adcs_error_states`). Each channel is a row on a category y-axis
+    (first column at the top), with a mark per beacon: green where the
+    channel was on, grey where it was off. Gaps are stretches with no beacon
+    at all. `alert=True` is for error flags: red "set" marks instead of
+    green "on" ones.
     """
     channels = [c for c in states.columns if c != "received_at"]
     if states.is_empty() or not channels:
@@ -552,8 +558,13 @@ def channel_states_option(states: pl.DataFrame, *, title: str) -> dict[str, Any]
                 "largeThreshold": 2000,
             }
             for name, on, color, height in (
-                ("on", True, _CHANNEL_ON_COLOR, 14),
-                ("off", False, _CHANNEL_OFF_COLOR, 8),
+                (
+                    "set" if alert else "on",
+                    True,
+                    _CHANNEL_ALERT_COLOR if alert else _CHANNEL_ON_COLOR,
+                    14,
+                ),
+                ("clear" if alert else "off", False, _CHANNEL_OFF_COLOR, 8),
             )
         ],
     }

@@ -459,6 +459,14 @@ def _chart_groups(path: Path, *, since: datetime | None) -> None:
     for title, specs in BEACON_CHART_GROUPS:
         _render_chart_group(title, _chart_options(specs, beacons))
 
+    # Right after the loop, so it sits with the ADCS groups that end it.
+    adcs_errors = channel_states_option(
+        beacon_data.adcs_error_states(beacons),
+        title="ADCS Errors & Overcurrents Seen in Window",
+        alert=True,
+    )
+    _render_chart_group("ADCS Errors (extended)", [adcs_errors] if adcs_errors else [])
+
     histogram = packet_counts_histogram_option(
         packet_counts, title="Packets Received per 6h Window, by Packet Type"
     )
