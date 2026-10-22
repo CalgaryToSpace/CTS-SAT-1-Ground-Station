@@ -23,6 +23,7 @@ from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
 )
 
 from . import data as beacon_data
+from . import uplinks
 from .attitude_view import AttitudePlayer
 from .charts import (
     BEACON_CHART_GROUPS,
@@ -92,6 +93,7 @@ class _LiveData:
     latest: pl.DataFrame
     latest_extended: pl.DataFrame
     local_max_pending: tuple[int, datetime] | None
+    latest_uplink: uplinks.FinishedUplink | None
     recent: pl.DataFrame
 
 
@@ -103,6 +105,7 @@ def _load_live_data(path: Path) -> _LiveData:
             path, n=1, packet_types=("BEACON_EXTENDED",)
         ),
         local_max_pending=beacon_data.latest_local_max_pending_tcmd_count(path),
+        latest_uplink=uplinks.latest_finished_uplink(path, window=timedelta(hours=24)),
         recent=beacon_data.latest_beacons(path, n=10),
     )
 
@@ -118,8 +121,39 @@ def _local_max_pending_str(local_max: tuple[int, datetime] | None) -> str:
     return f"{count} (at {received_at:%Y-%m-%d %H:%M:%S} UTC, {_age_str(received_at)})"
 
 
+def _latest_uplink_stats(
+    latest_uplink: uplinks.FinishedUplink | None,
+) -> list[tuple[str, Any]]:
+    """The newest finished uplink pass in the last 24h -- see
+    `uplinks.detect_finished_uplinks` -- and how many telecommands it
+    uplinked ("?" when there's no beacon from before the pass to compare
+    against).
+    """
+    if latest_uplink is None:
+        return [
+            ("Latest Uplink Finished", "None in last 24h"),
+            ("TCMDs in Latest Uplink", "?"),
+        ]
+    finished_at = latest_uplink.uplink_finished_at
+    before = latest_uplink.tcmd_count_before
+    delta = latest_uplink.tcmd_count_delta
+    return [
+        (
+            "Latest Uplink Finished",
+            f"{finished_at:%Y-%m-%d %H:%M:%S} UTC ({_age_str(finished_at)})",
+        ),
+        (
+            "TCMDs in Latest Uplink",
+            f"{'?' if before is None else before} → "
+            f"{latest_uplink.tcmd_count_after} = {'?' if delta is None else delta}",
+        ),
+    ]
+
+
 def _latest_beacon_card(
-    latest: pl.DataFrame, local_max_pending: tuple[int, datetime] | None
+    latest: pl.DataFrame,
+    local_max_pending: tuple[int, datetime] | None,
+    latest_uplink: uplinks.FinishedUplink | None,
 ) -> None:
     with ui.card().classes("w-full"):
         if latest.is_empty():
@@ -152,6 +186,7 @@ def _latest_beacon_card(
                 "Latest Local Max Pending TCMD Count",
                 _local_max_pending_str(local_max_pending),
             ),
+            *_latest_uplink_stats(latest_uplink),
             ("Time Sync Source", row.get("last_time_sync_source")),
             ("RF Switch Control Mode", row.get("active_rf_switch_control_mode")),
         ]
@@ -416,7 +451,7 @@ def build_beacon_stats_page(data_dir: Path, hours: float) -> None:
                 "pipeline (step_1, step_2, step_3) first."
             ).classes("text-lg text-warning")
             return
-        _latest_beacon_card(live.latest, live.local_max_pending)
+        _latest_beacon_card(live.latest, live.local_max_pending, live.latest_uplink)
         _latest_extended_beacon_card(live.latest_extended)
 
     @ui.refreshable
