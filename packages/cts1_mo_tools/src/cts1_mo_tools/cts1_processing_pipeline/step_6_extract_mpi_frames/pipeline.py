@@ -635,7 +635,8 @@ def _timestamp_fields(marker: _Marker) -> tuple[int, int, str, int] | None:
     "<epoch ms at last sync>+<ms since sync>_<source>" -- except the time
     since sync is worked out as `timestamp_ms` minus the sync epoch, as the
     firmware's own "<ms since sync>" is garbage: it's computed from the
-    (truncated) epoch time where it expects the uptime.
+    (truncated) epoch time where it expects the uptime. Workaround for
+    https://github.com/CalgaryToSpace/CTS-SAT-1-OBC-Firmware/issues/676
     """
     uptime = marker.fields.get("uptime_ms")
     epoch_ms = marker.fields.get("timestamp_ms")
