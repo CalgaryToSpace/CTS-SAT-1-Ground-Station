@@ -232,6 +232,17 @@ def send_file_to_tcmd_file(  # noqa: C901, PLR0912, PLR0913, PLR0915
     else:
         current_tsexec = None
 
+    # The first tsexec is the earliest, so it's the one to check.
+    if (
+        current_tssent is not None
+        and current_tsexec is not None
+        and current_tsexec <= current_tssent + timedelta(minutes=10)
+    ):
+        logger.warning(
+            f"First tsexec ({current_tsexec.isoformat()}) is at or before "
+            f"10 minutes after tssent start ({current_tssent.isoformat()})."
+        )
+
     lines: list[str] = []
     for command, immediate in commands:
         command_out = command.rstrip("!")
