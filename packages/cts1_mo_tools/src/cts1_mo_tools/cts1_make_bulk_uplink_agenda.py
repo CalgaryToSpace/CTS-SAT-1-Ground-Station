@@ -62,7 +62,7 @@ def _determine_max_optimal_chunk_size(  # noqa: PLR0913
         assert_never(encoding)
 
 
-def send_file_to_tcmd_file(  # noqa: C901, PLR0913, PLR0915
+def send_file_to_tcmd_file(  # noqa: C901, PLR0912, PLR0913, PLR0915
     input_file: Path,
     *,
     satellite_file: str,
@@ -71,6 +71,7 @@ def send_file_to_tcmd_file(  # noqa: C901, PLR0913, PLR0915
     tssent_start_val: int | str | None = None,
     tssent_interval_ms: int = 1000,
     tsexec_start_val: int | str | None = None,
+    tsexec_validation_start_val: int | str | None = None,
     tsexec_interval_ms: int = 30_000,
     hash_count: int = 30,
     mode: Literal[
@@ -94,6 +95,10 @@ def send_file_to_tcmd_file(  # noqa: C901, PLR0913, PLR0915
             If not provided, no tsexec suffix tags will be added.
             E.g., "2027-01-01T00:00:00-06:00"
         tsexec_interval_ms: Interval in milliseconds between tsexec telecommands.
+        tsexec_validation_start_val: Alternative to `tsexec_start_val`. Timestamp
+            to use as the tsexec of the first validation (SHA256 hash) telecommand.
+            The write telecommands are shifted earlier so that they finish right
+            before this time. E.g., "2027-01-01T00:00:00-06:00"
         mode: "bulk_uplink_b64" (use `comms_bulk_uplink_*` commands, more efficient)
             or "bulk_uplink_hex" (use `comms_bulk_uplink_*` commands, less efficient)
             or "write_file_hex" (use `fs_write_file_hex` command).
@@ -103,44 +108,20 @@ def send_file_to_tcmd_file(  # noqa: C901, PLR0913, PLR0915
         logger.error(f"File not found: {input_file}")
         sys.exit(1)
 
-    lines: list[str] = []
+    if tsexec_start_val is not None and tsexec_validation_start_val is not None:
+        logger.error(
+            "Specify at most one of --tsexec-start-val and "
+            "--tsexec-validation-start-val."
+        )
+        sys.exit(1)
 
-    current_tssent: datetime | None = (
-        _parse_datetime_argument(tssent_start_val)
-        if tssent_start_val is not None
-        else None
-    )
-    current_tsexec: datetime | None = (
-        _parse_datetime_argument(tsexec_start_val) if tsexec_start_val else None
-    )
+    # Commands are collected first (as `(command, immediate)` pairs), and the
+    # timestamps are assigned afterwards, so that the tsexec schedule can be
+    # anchored to the start of the validation commands.
+    commands: list[tuple[str, bool]] = []
 
     def emit(command: str, *, immediate: bool = False) -> None:
-        nonlocal current_tssent, current_tsexec
-
-        command_out = command.rstrip("!")
-
-        if current_tssent is not None:
-            tssent_int = int(current_tssent.timestamp() * 1000)
-            command_out += f"@tssent={tssent_int}"
-
-        if current_tsexec is not None and (immediate is False):
-            tsexec_int = int(current_tsexec.timestamp() * 1000)
-            command_out += f"@tsexec={tsexec_int}"
-
-        command_out += "!"
-
-        assert len(command_out) <= MAX_TELECOMMAND_LENGTH, (
-            f"Telecommand too long ({len(command_out)} chars): {command_out}"
-        )
-
-        lines.append(command_out)
-        logger.debug(f"Emitting: {command_out}")
-
-        if current_tssent is not None:
-            current_tssent += timedelta(milliseconds=tssent_interval_ms)
-
-        if current_tsexec is not None and (immediate is False):
-            current_tsexec += timedelta(milliseconds=tsexec_interval_ms)
+        commands.append((command, immediate))
 
     file_bytes = input_file.read_bytes()
     total_size = len(file_bytes)
@@ -212,9 +193,57 @@ def send_file_to_tcmd_file(  # noqa: C901, PLR0913, PLR0915
         emit("CTS1+comms_bulk_uplink_close_file()")
         emit("CTS1+comms_bulk_uplink_close_file()")
 
+    # Number of tsexec-scheduled commands before the validation commands.
+    pre_validation_scheduled_count = sum(
+        1 for _, immediate in commands if not immediate
+    )
+
     # Repeat this `hash_count` times for a better chance of data transfer.
     for _ in range(hash_count):
         emit(f"CTS1+fs_read_file_sha256_hash_json({satellite_file},0,0)")
+
+    current_tssent: datetime | None = (
+        _parse_datetime_argument(tssent_start_val)
+        if tssent_start_val is not None
+        else None
+    )
+    current_tsexec: datetime | None
+    if tsexec_start_val is not None:
+        current_tsexec = _parse_datetime_argument(tsexec_start_val)
+    elif tsexec_validation_start_val is not None:
+        current_tsexec = _parse_datetime_argument(
+            tsexec_validation_start_val
+        ) - timedelta(milliseconds=tsexec_interval_ms * pre_validation_scheduled_count)
+        logger.info(f"Calculated tsexec start: {current_tsexec.isoformat()}")
+    else:
+        current_tsexec = None
+
+    lines: list[str] = []
+    for command, immediate in commands:
+        command_out = command.rstrip("!")
+
+        if current_tssent is not None:
+            tssent_int = int(current_tssent.timestamp() * 1000)
+            command_out += f"@tssent={tssent_int}"
+
+        if current_tsexec is not None and not immediate:
+            tsexec_int = int(current_tsexec.timestamp() * 1000)
+            command_out += f"@tsexec={tsexec_int}"
+
+        command_out += "!"
+
+        assert len(command_out) <= MAX_TELECOMMAND_LENGTH, (
+            f"Telecommand too long ({len(command_out)} chars): {command_out}"
+        )
+
+        lines.append(command_out)
+        logger.debug(f"Emitting: {command_out}")
+
+        if current_tssent is not None:
+            current_tssent += timedelta(milliseconds=tssent_interval_ms)
+
+        if current_tsexec is not None and not immediate:
+            current_tsexec += timedelta(milliseconds=tsexec_interval_ms)
 
     hash_on_disk = hashlib.sha256(file_bytes).hexdigest()
 
@@ -243,6 +272,7 @@ def send_file_to_tcmd_file(  # noqa: C901, PLR0913, PLR0915
         f"#   tssent_interval_ms={tssent_interval_ms}",
         f"#   tsexec_start_val={tsexec_start_val}",
         f"#   tsexec_interval_ms={tsexec_interval_ms}",
+        f"#   tsexec_validation_start_val={tsexec_validation_start_val}",
         f"#   mode={mode}",
         f"#   command: {cli_command}",
     ]
