@@ -74,9 +74,10 @@ def send_file_to_tcmd_file(  # noqa: C901, PLR0912, PLR0913, PLR0915
     tsexec_validation_start_val: int | str | None = None,
     tsexec_interval_ms: int = 30_000,
     hash_count: int = 30,
-    mode: Literal[
+    uplink_mode: Literal[
         "bulk_uplink_b64", "bulk_uplink_hex", "write_file_hex"
     ] = "bulk_uplink_b64",
+    validation_mode: Literal["file_map_v1", "sha256_tcmd"] = "file_map_v1",
 ) -> None:
     """Send a file by writing CTS1 telecommands to an output file.
 
@@ -96,13 +97,17 @@ def send_file_to_tcmd_file(  # noqa: C901, PLR0912, PLR0913, PLR0915
             E.g., "2027-01-01T00:00:00-06:00"
         tsexec_interval_ms: Interval in milliseconds between tsexec telecommands.
         tsexec_validation_start_val: Alternative to `tsexec_start_val`. Timestamp
-            to use as the tsexec of the first validation (SHA256 hash) telecommand.
+            to use as the tsexec of the first validation telecommand.
             The write telecommands are shifted earlier so that they finish right
             before this time. E.g., "2027-01-01T00:00:00-06:00"
         mode: "bulk_uplink_b64" (use `comms_bulk_uplink_*` commands, more efficient)
             or "bulk_uplink_hex" (use `comms_bulk_uplink_*` commands, less efficient)
             or "write_file_hex" (use `fs_write_file_hex` command).
             As of 2026-06-28, FrontierSat doesn't appear to work with "bulk_uplink_b64".
+        hash_count: Number of times to repeat the validation telecommand.
+        validation_mode: "file_map_v1" (run the `get_file_map_v1` blob
+            on the satellite file) or "sha256_tcmd" (use the
+            `fs_read_file_sha256_hash_json` command).
     """
     if not input_file.exists():
         logger.error(f"File not found: {input_file}")
@@ -130,13 +135,13 @@ def send_file_to_tcmd_file(  # noqa: C901, PLR0912, PLR0913, PLR0915
     use_bulk_uplink: bool
     encoding: Literal["base64", "hex"]
 
-    if mode == "bulk_uplink_hex":
+    if uplink_mode == "bulk_uplink_hex":
         encoding = "hex"
         use_bulk_uplink = True
         tcmd_name_len = len("bulkup16")
         len_of_other_args = 0
         command_format_string = "CTS1+bulkup16({hex_data})"
-    elif mode == "write_file_hex":
+    elif uplink_mode == "write_file_hex":
         encoding = "hex"
         use_bulk_uplink = False
         tcmd_name_len = len("fs_write_file_hex")
@@ -144,7 +149,7 @@ def send_file_to_tcmd_file(  # noqa: C901, PLR0912, PLR0913, PLR0915
         command_format_string = (
             "CTS1+fs_write_file_hex({satellite_file},{offset},{hex_data})"
         )
-    elif mode == "bulk_uplink_b64":
+    elif uplink_mode == "bulk_uplink_b64":
         encoding = "base64"
         use_bulk_uplink = True
         tcmd_name_len = len("bulkup64")
@@ -152,7 +157,7 @@ def send_file_to_tcmd_file(  # noqa: C901, PLR0912, PLR0913, PLR0915
         command_format_string = "CTS1+bulkup64({b64_data})"
 
     else:
-        assert_never(mode)
+        assert_never(uplink_mode)
 
     if chunk_size is None:
         real_chunk_size: int = _determine_max_optimal_chunk_size(
@@ -198,9 +203,18 @@ def send_file_to_tcmd_file(  # noqa: C901, PLR0912, PLR0913, PLR0915
         1 for _, immediate in commands if not immediate
     )
 
+    if validation_mode == "file_map_v1":
+        validation_command = (
+            f"CTS1+exec_blob_from_fs(blobs/get_file_map_v1.blob,0,{satellite_file})"
+        )
+    elif validation_mode == "sha256_tcmd":
+        validation_command = f"CTS1+fs_read_file_sha256_hash_json({satellite_file},0,0)"
+    else:
+        assert_never(validation_mode)
+
     # Repeat this `hash_count` times for a better chance of data transfer.
     for _ in range(hash_count):
-        emit(f"CTS1+fs_read_file_sha256_hash_json({satellite_file},0,0)")
+        emit(validation_command)
 
     current_tssent: datetime | None = (
         _parse_datetime_argument(tssent_start_val)
@@ -273,7 +287,9 @@ def send_file_to_tcmd_file(  # noqa: C901, PLR0912, PLR0913, PLR0915
         f"#   tsexec_start_val={tsexec_start_val}",
         f"#   tsexec_interval_ms={tsexec_interval_ms}",
         f"#   tsexec_validation_start_val={tsexec_validation_start_val}",
-        f"#   mode={mode}",
+        f"#   uplink_mode={uplink_mode}",
+        f"#   validation_mode={validation_mode}",
+        f"#   hash_count={hash_count}",
         f"#   command: {cli_command}",
     ]
     logger.debug("Footer comments:\n" + "\n".join(footer_comments))
