@@ -72,11 +72,11 @@ def send_file_to_tcmd_file(  # noqa: C901, PLR0912, PLR0913, PLR0915
     tssent_interval_ms: int = 1000,
     tsexec_start_val: int | str | None = None,
     tsexec_validation_start_val: int | str | None = None,
-    tsexec_interval_ms: int = 30_000,
+    tsexec_interval_ms: int = 20_000,
     hash_count: int = 30,
     uplink_mode: Literal[
         "bulk_uplink_b64", "bulk_uplink_hex", "write_file_hex"
-    ] = "bulk_uplink_b64",
+    ] = "write_file_hex",
     validation_mode: Literal["file_map_v1", "sha256_tcmd"] = "file_map_v1",
 ) -> None:
     """Send a file by writing CTS1 telecommands to an output file.
@@ -103,7 +103,8 @@ def send_file_to_tcmd_file(  # noqa: C901, PLR0912, PLR0913, PLR0915
         mode: "bulk_uplink_b64" (use `comms_bulk_uplink_*` commands, more efficient)
             or "bulk_uplink_hex" (use `comms_bulk_uplink_*` commands, less efficient)
             or "write_file_hex" (use `fs_write_file_hex` command).
-            As of 2026-06-28, FrontierSat doesn't appear to work with "bulk_uplink_b64".
+            "write_file_hex" seems to be the best approach, as it allows for
+            partial re-uplinks on subsequent overpasses.
         hash_count: Number of times to repeat the validation telecommand.
         validation_mode: "file_map_v1" (run the `get_file_map_v1` blob
             on the satellite file) or "sha256_tcmd" (use the
