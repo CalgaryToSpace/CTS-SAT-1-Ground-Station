@@ -344,9 +344,7 @@ def _build_single_entries(
     tssent = ctx.pass_start + timedelta(seconds=row_index)
 
     """Schedule custom tsexec values"""
-    tsexec = parse_time(
-        ctx.pass_date, ctx.pass_start, ctx.row["tsexec Start (UTC)"]
-    )
+    tsexec = parse_time(ctx.pass_date, ctx.pass_start, ctx.row["tsexec Start (UTC)"])
     if tsexec is None:
         msg = f"Missing tsexec for {ctx.cmd}"
         raise ValueError(msg)
@@ -367,9 +365,7 @@ def _build_interval_entries(
     tsexec_start = parse_time(
         ctx.pass_date, ctx.pass_start, ctx.row["tsexec Start (UTC)"]
     )
-    tsexec_end = parse_time(
-        ctx.pass_date, ctx.pass_start, ctx.row["tsexec End (UTC)"]
-    )
+    tsexec_end = parse_time(ctx.pass_date, ctx.pass_start, ctx.row["tsexec End (UTC)"])
     interval = parse_interval(ctx.row["Interval"])
 
     if tsexec_start is None or tsexec_end is None or interval is None:
