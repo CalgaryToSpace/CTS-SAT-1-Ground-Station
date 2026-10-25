@@ -2,12 +2,12 @@
 access to every column of `everything_decoded.parquet`, plus CSV/Excel
 exports of the filtered set.
 
-Every filter (packet type, time range, message substring) is pushed into
-the lazy scan before `.collect()`, and a page is sorted and sliced on just
-its sort key(s) before the rest of its columns are fetched -- so browsing a
-file with a lot of history only ever materializes the one page (plus one
-streamed null-count pass, cached per filter) actually needed, never the
-whole table. See `load_page`.
+Every filter (packet type, boringness, time range, message substring) is
+pushed into the lazy scan before `.collect()`, and a page is sorted and
+sliced on just its sort key(s) before the rest of its columns are fetched --
+so browsing a file with a lot of history only ever materializes the one page
+(plus one streamed null-count pass, cached per filter) actually needed,
+never the whole table. See `load_page`.
 
 With `PacketBrowserFilters.reassemble_tcmd_responses` set, every raw
 `TCMD_RESPONSE` packet is swapped out for step 5's reassembled responses
@@ -15,13 +15,20 @@ With `PacketBrowserFilters.reassemble_tcmd_responses` set, every raw
 packets it spanned) -- see `_reassembled_tcmd_rows` for how those rows are
 fit into `everything_decoded`'s columns, so every filter/sort/export below
 works on either view unchanged.
+
+Every row also gets a derived `boringness` column (see `BORINGNESS_LEVELS`),
+classifying routine chatter so the page can hide it.
 """
 
 from __future__ import annotations
 
 __all__ = [
+    "BORING",
+    "BORINGNESS_LEVELS",
     "DEFAULT_PAGE_SIZE",
+    "INTERESTING",
     "MAX_EXPORT_ROWS",
+    "VERY_BORING",
     "CsvExportResult",
     "ExcelExportResult",
     "PacketBrowserFilters",
@@ -62,6 +69,28 @@ DEFAULT_PAGE_SIZE = 200
 # silently truncating without a word.
 MAX_EXPORT_ROWS = 10_000
 
+# Values of the derived `boringness` column, least to most boring.
+INTERESTING = "Interesting"
+BORING = "Boring"
+VERY_BORING = "Very Boring"
+BORINGNESS_LEVELS = (INTERESTING, BORING, VERY_BORING)
+
+# `general_message` patterns (Rust regex syntax, searched anywhere in the
+# message unless anchored) for routine chatter that's almost never worth
+# reading. Very Boring wins over Boring when both match.
+_VERY_BORING_PATTERNS = (
+    r"^\s*extended_beacon_blob_v\d+ success\s*$",
+    r"Telecommand '\w+' executed\. Duration=\d+ms, err=0\b",
+    r"Executing telecommand '\w+'",
+    r"Successfully (opened|closed) file: .+\.blob",
+)
+# Boring unless the message also mentions a failure/error -- not counting
+# the `fetch_fails=N` field every one of these status lines carries (a
+# cumulative counter, so it'd otherwise make all of them Interesting).
+_BORING_PATTERN = r"^\s*gnss_bestxyzb_ring_blob_v\d+"
+_BORING_EXCEPT_PATTERN = r"(?i)fail|err"
+_BORING_EXCEPT_IGNORED_PATTERN = r"\bfetch_fails=\d+"
+
 # Unique per row of `_source`'s table (across both halves of the reassembled
 # view), so `load_page` can fetch exactly the rows its key-only sort picked.
 # Internal only: never shown in the grid or exported.
@@ -73,6 +102,8 @@ class PacketBrowserFilters:
     """Every server-side filter the Browse Packets page applies."""
 
     packet_types: tuple[str, ...] | None = None  # None/empty = every type
+    # Which `BORINGNESS_LEVELS` to include; None/empty = every level.
+    boringness: tuple[str, ...] | None = None
     start: datetime | None = None
     end: datetime | None = None
     message_substring: str | None = None
@@ -213,22 +244,53 @@ def _with_reassembled_tcmd(decoded: pl.LazyFrame, path: Path) -> pl.LazyFrame:
     return combined.select(ordered)
 
 
+def _boringness_expr() -> pl.Expr:
+    """`general_message` classified into one of `BORINGNESS_LEVELS` (null
+    messages count as Interesting).
+    """
+    message = pl.col("general_message")
+    very_boring = pl.any_horizontal(
+        [message.str.contains(p) for p in _VERY_BORING_PATTERNS]
+    )
+    boring = message.str.contains(_BORING_PATTERN) & ~message.str.replace_all(
+        _BORING_EXCEPT_IGNORED_PATTERN, ""
+    ).str.contains(_BORING_EXCEPT_PATTERN)
+    return (
+        pl.when(very_boring)
+        .then(pl.lit(VERY_BORING))
+        .when(boring)
+        .then(pl.lit(BORING))
+        .otherwise(pl.lit(INTERESTING))
+        .alias("boringness")
+    )
+
+
+def _with_boringness(lf: pl.LazyFrame) -> pl.LazyFrame:
+    """`lf` with `boringness` slotted in right after `packet_type`."""
+    columns = lf.collect_schema().names()
+    insert_at = columns.index("packet_type") + 1 if "packet_type" in columns else 0
+    return lf.select(*columns[:insert_at], _boringness_expr(), *columns[insert_at:])
+
+
 def _source(path: Path, filters: PacketBrowserFilters) -> pl.LazyFrame | None:
     """The table the page browses: `everything_decoded` as-is, or with its
-    TCMD_RESPONSE packets reassembled, per `filters`.
+    TCMD_RESPONSE packets reassembled, per `filters` -- either way with the
+    derived `boringness` column added.
     """
     lf = _scan(path)
     if lf is None:
         return None
     lf = lf.with_row_index(_ROW_ID)
-    if not filters.reassemble_tcmd_responses:
-        return lf
-    return _with_reassembled_tcmd(lf, path)
+    if filters.reassemble_tcmd_responses:
+        lf = _with_reassembled_tcmd(lf, path)
+    return _with_boringness(lf)
 
 
 def _apply_filters(lf: pl.LazyFrame, filters: PacketBrowserFilters) -> pl.LazyFrame:
     if filters.packet_types:
         lf = lf.filter(pl.col("packet_type").is_in(filters.packet_types))
+    if filters.boringness:
+        lf = lf.filter(pl.col("boringness").is_in(filters.boringness))
     if filters.start is not None:
         lf = lf.filter(pl.col("received_at") >= filters.start)
     if filters.end is not None:

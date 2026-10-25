@@ -1,10 +1,11 @@
 """The "Browse Packets" page: a wide, Excel-like grid over every column of
-`everything_decoded.parquet`, packet-type/time-range/message-substring
-filters and sorting applied server-side, a details panel for whichever row
-was clicked (every field, each copyable), plus CSV/Excel exports of the
-filtered set. A toggle switches TCMD_RESPONSE rows between one row per raw
-packet and one row per reassembled (possibly multi-packet) response -- see
-`packet_browser` for the actual querying/paging/export logic.
+`everything_decoded.parquet`, packet-type/boringness/time-range/
+message-substring filters and sorting applied server-side, a details panel
+for whichever row was clicked (every field, each copyable), plus CSV/Excel
+exports of the filtered set. A toggle switches TCMD_RESPONSE rows between
+one row per raw packet and one row per reassembled (possibly multi-packet)
+response -- see `packet_browser` for the actual querying/paging/export
+logic.
 """
 
 # pyright: standard
@@ -165,6 +166,8 @@ class _FilterState:
     """The (mutable) filter/sort/paging state every widget on this page edits."""
 
     packet_types: list[str] = field(default_factory=list)  # empty = every type
+    # Routine chatter hidden by default; empty = every level.
+    boringness: list[str] = field(default_factory=lambda: [packet_browser.INTERESTING])
     start: str | None = None
     end: str | None = None
     message_substring: str = ""
@@ -178,6 +181,7 @@ class _FilterState:
     def to_filters(self) -> packet_browser.PacketBrowserFilters:
         return packet_browser.PacketBrowserFilters(
             packet_types=tuple(self.packet_types) or None,
+            boringness=tuple(self.boringness) or None,
             start=_parse_range_input(self.start),
             end=_parse_range_input(self.end),
             message_substring=self.message_substring or None,
@@ -197,8 +201,8 @@ def _filters_section(
         ui.label("Filters").classes("text-lg font-bold")
         ui.label(
             "Applied server-side before any rows are sent to the browser. "
-            "Press Enter in any text box (or Search) to apply; packet type "
-            "and rows/page apply immediately."
+            "Press Enter in any text box (or Search) to apply; packet type, "
+            "boringness and rows/page apply immediately."
         ).classes("text-caption text-grey")
 
         def _set_and_search(attr: str, value: object) -> None:
@@ -213,6 +217,18 @@ def _filters_section(
                 value=state.packet_types,
                 on_change=lambda e: _set_and_search("packet_types", e.value or []),
             ).classes("w-64").props("use-chips dense clearable")
+            ui.select(
+                list(packet_browser.BORINGNESS_LEVELS),
+                multiple=True,
+                label="Boringness (all if empty)",
+                value=state.boringness,
+                on_change=lambda e: _set_and_search("boringness", e.value or []),
+            ).classes("w-64").props("use-chips dense clearable").tooltip(
+                "Very Boring: routine successes (beacon blobs, telecommand "
+                "executed with err=0, blob file open/close, ...). Boring: GNSS "
+                "ring-blob messages without a failure/error. Everything else "
+                "is Interesting."
+            )
 
             ui.input(
                 "Start (UTC)",
@@ -556,7 +572,9 @@ def build_packet_browser_page(data_dir: Path) -> None:  # noqa: C901, PLR0915
             "Every decoded packet, every column -- filtering and sorting "
             "happen server-side, so this stays responsive no matter how much "
             "history has piled up. Drag to select text in any cell to copy "
-            "it, or click a row to see (and copy) all of its fields. With "
+            "it, or click a row to see (and copy) all of its fields. Routine "
+            '"Boring"/"Very Boring" messages are hidden unless picked in the '
+            "Boringness filter. With "
             '"Reassemble TCMD responses" on, multi-packet telecommand '
             "responses show as one row each."
         ).classes("text-caption text-grey")
