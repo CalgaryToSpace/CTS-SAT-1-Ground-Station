@@ -33,8 +33,8 @@ def _parse_time_of_day(value: str) -> time:
 
 
 def parse_time(
-    mission_date: str,
-    mission_start: datetime,
+    pass_date: str,
+    pass_start: datetime,
     value: str | None,
 ) -> datetime | None:
     if value is None:
@@ -46,7 +46,7 @@ def parse_time(
         return None
 
     if value.lower() == "past":
-        year = int(mission_date.split("-", maxsplit=1)[0])
+        year = int(pass_date.split("-", maxsplit=1)[0])
         return datetime(1970, 1, 1, tzinfo=UTC)
 
     try:
@@ -56,7 +56,7 @@ def parse_time(
         pass
 
     parsed_time = _parse_time_of_day(value)
-    year, month, day = map(int, mission_date.split("-"))
+    year, month, day = map(int, pass_date.split("-"))
     candidate = datetime(
         year,
         month,
@@ -67,7 +67,7 @@ def parse_time(
         tzinfo=UTC,
     )
 
-    if candidate < mission_start:
+    if candidate < pass_start:
         candidate += timedelta(days=1)
 
     return candidate
@@ -125,8 +125,8 @@ def to_int(value: str | None, default: int = 0) -> int:
     return int(float(text))
 
 
-def substitute(text: str | None, mission_date: str) -> str:
-    return "" if text is None else str(text).replace("{DATE}", mission_date)
+def substitute(text: str | None, pass_date: str) -> str:
+    return "" if text is None else str(text).replace("{DATE}", pass_date)
 
 
 TSSENT_RE = re.compile(r"@tssent=(\d+)")
@@ -189,8 +189,8 @@ def extract_date(value: str | None) -> str | None:
     return match.group(1) if match else None
 
 
-def _parse_mission_start(mission_date: str, start_utc_value: str | None) -> datetime:
-    """Resolve the mission's exact start datetime, used as the anchor for
+def _parse_pass_start(pass_date: str, start_utc_value: str | None) -> datetime:
+    """Resolve the pass's exact start datetime, used as the anchor for
     the midnight-rollover logic in parse_time.
     """
     if start_utc_value:
@@ -208,7 +208,7 @@ def _parse_mission_start(mission_date: str, start_utc_value: str | None) -> date
 
         return parsed
 
-    year, month, day = map(int, mission_date.split("-"))
+    year, month, day = map(int, pass_date.split("-"))
     return datetime(year, month, day, tzinfo=UTC)
 
 
@@ -306,17 +306,17 @@ def load_sheet(path: Path) -> tuple[str, datetime, list[dict[str, str]]]:
     rows = _read_raw_rows(path)
     header = _find_header(rows)
 
-    mission_date = (
+    pass_date = (
         extract_date(header.date_value) or extract_date(header.start_utc_value) or ""
     )
 
-    if not mission_date:
-        msg = "Mission date not found."
+    if not pass_date:
+        msg = "pass date not found."
         raise ValueError(msg)
 
-    mission_start = _parse_mission_start(mission_date, header.start_utc_value)
+    pass_start = _parse_pass_start(pass_date, header.start_utc_value)
 
-    return mission_date, mission_start, _extract_commands(rows, header)
+    return pass_date, pass_start, _extract_commands(rows, header)
 
 
 # ---------------------------------------------------------------------
@@ -327,8 +327,8 @@ def load_sheet(path: Path) -> tuple[str, datetime, list[dict[str, str]]]:
 @dataclass
 class _RowContext:
     row: dict[str, str]
-    mission_date: str
-    mission_start: datetime
+    pass_date: str
+    pass_start: datetime
     cmd: str
     resp: str
 
@@ -340,12 +340,12 @@ def _build_single_entries(
     row_index: int,
 ) -> tuple[list[tuple[int, str]], list[str]]:
     """Unique tssent values are generated using the pass start time, incremented by 1 s
-    for each row. Error handling is handled in _parse_mission_start()."""
-    tssent = ctx.mission_start + timedelta(seconds=row_index)
+    for each row. Error handling is handled in _parse_pass_start()."""
+    tssent = ctx.pass_start + timedelta(seconds=row_index)
 
     """Schedule custom tsexec values"""
     tsexec = parse_time(
-        ctx.mission_date, ctx.mission_start, ctx.row["tsexec Start (UTC)"]
+        ctx.pass_date, ctx.pass_start, ctx.row["tsexec Start (UTC)"]
     )
     if tsexec is None:
         msg = f"Missing tsexec for {ctx.cmd}"
@@ -365,10 +365,10 @@ def _build_interval_entries(
     ctx: _RowContext,
 ) -> list[tuple[int, str]]:
     tsexec_start = parse_time(
-        ctx.mission_date, ctx.mission_start, ctx.row["tsexec Start (UTC)"]
+        ctx.pass_date, ctx.pass_start, ctx.row["tsexec Start (UTC)"]
     )
     tsexec_end = parse_time(
-        ctx.mission_date, ctx.mission_start, ctx.row["tsexec End (UTC)"]
+        ctx.pass_date, ctx.pass_start, ctx.row["tsexec End (UTC)"]
     )
     interval = parse_interval(ctx.row["Interval"])
 
@@ -398,8 +398,8 @@ def _build_interval_entries(
 
 
 def build_agenda(
-    mission_date: str,
-    mission_start: datetime,
+    pass_date: str,
+    pass_start: datetime,
     rows: list[dict[str, str]],
 ) -> list[str]:
 
@@ -410,12 +410,12 @@ def build_agenda(
 
     for row_index, row in enumerate(rows):
         mode = row["Mode"].strip().lower()
-        cmd = substitute(row["Telecommand"], mission_date)
-        resp = substitute(row["resp_fname"], mission_date)
+        cmd = substitute(row["Telecommand"], pass_date)
+        resp = substitute(row["resp_fname"], pass_date)
         ctx = _RowContext(
             row=row,
-            mission_date=mission_date,
-            mission_start=mission_start,
+            pass_date=pass_date,
+            pass_start=pass_start,
             cmd=cmd,
             resp=resp,
         )
@@ -522,18 +522,18 @@ def spreadsheet_file_to_agenda_file(
     if seed is not None:
         random.seed(seed)
 
-    mission_date, mission_start, rows = load_sheet(input_file)
+    pass_date, pass_start, rows = load_sheet(input_file)
 
     # Default output file path if not provided, using Start UTC time.
     if output_file is None:
         output_file = Path(
             "packages/cts1_mo_tools/src/cts1_mo_tools/cts1_agenda_files"
-        ) / default_agenda_filename(mission_start)
+        ) / default_agenda_filename(pass_start)
     elif Path(output_file).is_dir():
         # If the output file is a directory, use the default filename.
-        output_file = Path(output_file) / default_agenda_filename(mission_start)
+        output_file = Path(output_file) / default_agenda_filename(pass_start)
 
-    agenda = build_agenda(mission_date, mission_start, rows)
+    agenda = build_agenda(pass_date, pass_start, rows)
 
     summary_comment = build_summary_comment(rows) + "\n\n" if summary_table else ""
 
