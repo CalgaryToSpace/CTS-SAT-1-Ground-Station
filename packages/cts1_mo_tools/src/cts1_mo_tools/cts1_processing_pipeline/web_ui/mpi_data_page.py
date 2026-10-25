@@ -11,10 +11,11 @@ from __future__ import annotations
 
 __all__ = ["build_mpi_data_page"]
 
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path  # noqa: TC003 -- tyro needs this at runtime elsewhere
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from nicegui import run, ui
 
@@ -23,6 +24,8 @@ from .charts import collection_timeline_option
 from .layout import page_shell
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     import polars as pl
 
 
@@ -59,19 +62,79 @@ def _collection_timeline_card(timeline: pl.DataFrame | None) -> None:
         ui.echart(option).classes("w-full h-80")
 
 
-# (field, label, numeric) for each column of the collections table.
-_COLLECTION_COLUMNS: tuple[tuple[str, str, bool], ...] = (
-    ("collection_started_at", "Started (UTC)", False),
-    ("collection_ended_at", "Ended (UTC)", False),
-    ("frames_present", "Frames Present", True),
-    ("frames_expected", "Frames Expected", True),
-    ("frames_missing", "Frames Missing", True),
-    ("first_frame_counter", "First Counter", True),
-    ("last_frame_counter", "Last Counter", True),
-    ("largest_gap_frames", "Largest Gap (Frames)", True),
-    ("largest_gap_started_at", "Largest Gap Start (UTC)", False),
-    ("largest_gap_duration_ms", "Largest Gap Duration", True),
+# (group label, columns) for each group of the collections table, each
+# column being (field, label, numeric) -- the groups get their own header row
+# above the columns', so it's clear which come from the satellite's on-board
+# analysis of the file and which from the frames actually downlinked.
+_COLLECTION_COLUMN_GROUPS: tuple[tuple[str, tuple[tuple[str, str, bool], ...]], ...] = (
+    (
+        "Collection",
+        (
+            ("collection_started_at", "Started (UTC)", False),
+            ("collection_ended_at", "Ended (UTC)", False),
+            ("collection_duration_ms", "Duration", True),
+            ("collection_time_source", "Times From", False),
+        ),
+    ),
+    (
+        "On-Board Analysis (analyze_mpi_data)",
+        (
+            ("analysis_file", "File", False),
+            ("analysis_file_size", "File Size", True),
+            ("analysis_frame_count", "Frames", True),
+            ("analysis_strong_signal_counts", "Strong Signals", False),
+            ("analysis_count", "Analyses", True),
+            ("analysis_sha256", "SHA-256", False),
+            ("analysis_received_at", "Received (UTC)", False),
+        ),
+    ),
+    (
+        "Frames Received (Downlinked)",
+        (
+            ("frames_present", "Present", True),
+            ("frames_expected", "Expected", True),
+            ("frames_missing", "Missing", True),
+            ("first_frame_counter", "First Counter", True),
+            ("last_frame_counter", "Last Counter", True),
+            ("largest_gap_frames", "Largest Gap (Frames)", True),
+            ("largest_gap_started_at", "Largest Gap Start (UTC)", False),
+            ("largest_gap_duration_ms", "Largest Gap Duration", True),
+        ),
+    ),
 )
+_COLLECTION_COLUMNS = tuple(
+    column for _, columns in _COLLECTION_COLUMN_GROUPS for column in columns
+)
+
+# The table's header: a row of group labels, each spanning its columns, then
+# the usual row of column labels.
+_COLLECTION_HEADER_SLOT = (
+    '<q-tr :props="props">'
+    + "".join(
+        f'<q-th colspan="{len(columns)}" class="text-center text-weight-bold"'
+        f' style="border-left: 1px solid rgba(128, 128, 128, 0.4)">{label}</q-th>'
+        for label, columns in _COLLECTION_COLUMN_GROUPS
+    )
+    + "</q-tr>"
+    '<q-tr :props="props">'
+    '<q-th v-for="col in props.cols" :key="col.name" :props="props">'
+    "{{ col.label }}</q-th>"
+    "</q-tr>"
+)
+
+
+def _seconds(duration_ms: int) -> str:
+    return f"{duration_ms / 1000:,.2f} s"
+
+
+# How the columns that need more than `str()` are shown.
+_CELL_FORMATTERS: dict[str, Callable[[Any], Any]] = {
+    "collection_duration_ms": _seconds,
+    "largest_gap_duration_ms": _seconds,
+    "analysis_file_size": lambda size: f"{size:,} B",
+    "analysis_sha256": lambda sha256: sha256[:12],
+    "analysis_strong_signal_counts": mpi_collections.strong_signal_counts_text,
+}
 
 
 def _cell(field: str, value: Any) -> Any:
@@ -79,25 +142,167 @@ def _cell(field: str, value: Any) -> Any:
         return ""
     if isinstance(value, datetime):
         return f"{value:%Y-%m-%d %H:%M:%S.%f}"[:-3]
-    if field == "largest_gap_duration_ms":
-        return f"{value / 1000:,.2f} s"
-    return value
+    formatter = _CELL_FORMATTERS.get(field)
+    return formatter(value) if formatter else value
 
 
-def _collections_card(collections: pl.DataFrame | None) -> None:
-    """`collections` is None while it's still loading."""
-    with ui.card().classes("w-full"):
-        ui.label("MPI Collections").classes("text-lg font-bold")
+def _time_source_cell(row: dict[str, Any]) -> str:
+    """ "Times From": the analysis's full action name when it's from one --
+    e.g. "analyze_mpi_data_v1".
+    """
+    source = row.get("collection_time_source") or ""
+    action = row.get("analysis_action")
+    return action if source == "analysis" and action else source
+
+
+def _property_value(value: Any) -> str:
+    return value if isinstance(value, str) else json.dumps(value)
+
+
+def _analysis_details(analysis: dict[str, Any]) -> None:
+    """Every property of one analysis response, as sent, with its strong
+    signals (when there are any) as their own table.
+    """
+    properties = mpi_collections.response_properties(analysis["analysis_response_text"])
+    strong_signals = properties.pop("strong_signals", None)
+    rows = [
+        {
+            "property": "(telecommand sent)",
+            "value": _cell("", analysis["analysis_tcmd_sent_at"]),
+        },
+        {
+            "property": "(response received)",
+            "value": _cell("", analysis["analysis_received_at"]),
+        },
+        *(
+            {"property": key, "value": _property_value(value)}
+            for key, value in properties.items()
+        ),
+    ]
+    ui.table(
+        columns=[
+            {
+                "name": "property",
+                "label": "Property",
+                "field": "property",
+                "align": "left",
+            },
+            {"name": "value", "label": "Value", "field": "value", "align": "left"},
+        ],
+        rows=rows,
+        row_key="property",
+    ).classes("w-full").props("dense flat")
+    if isinstance(strong_signals, list) and strong_signals:
+        ui.label(f"Strong signals ({len(strong_signals):,})").classes("font-bold mt-2")
+        signals = cast("list[Any]", strong_signals)
+        if all(isinstance(signal, dict) for signal in signals):
+            keys = list(dict.fromkeys(k for signal in signals for k in signal))
+            ui.table(
+                columns=[
+                    {"name": k, "label": k, "field": k, "align": "left"} for k in keys
+                ],
+                rows=[
+                    {k: _property_value(signal.get(k)) for k in keys} | {"_i": i}
+                    for i, signal in enumerate(signals)
+                ],
+                row_key="_i",
+            ).classes("w-full").props("dense flat")
+        else:
+            ui.code(json.dumps(signals, indent=2), language="json").classes("w-full")
+
+
+def _show_analyses(collection: dict[str, Any], analyses: pl.DataFrame) -> None:
+    """A dialog with every distinct analysis of `collection`'s file."""
+    matching = mpi_collections.analyses_of(analyses, collection)
+    if not matching:
+        ui.notify(
+            "No on-board analysis for this collection."
+            if collection.get("analysis_action") is None
+            else "No analysis details -- rerun step 6 to write mpi_analyses.parquet."
+        )
+        return
+    with ui.dialog() as dialog, ui.card().classes("w-full max-w-5xl"):
+        with ui.row().classes("w-full items-center justify-between"):
+            ui.label(collection.get("analysis_file") or "(unnamed file)").classes(
+                "text-lg font-bold"
+            )
+            ui.button(icon="close", on_click=dialog.close).props("flat round dense")
         ui.label(
-            "Runs of MPI frames from one recording, newest first: a new one "
+            f"{len(matching)} distinct analysis response(s) of this file, the "
+            "one the collection uses first (the latest version, then the "
+            "largest file, then the earliest received)."
+        ).classes("text-caption text-grey")
+        for i, analysis in enumerate(matching):
+            title = " · ".join(
+                part
+                for part in (
+                    analysis["analysis_action"],
+                    f"received {_cell('', analysis['analysis_received_at'])}",
+                    f"≥{analysis['analysis_strong_threshold_dn']} DN"
+                    if analysis["analysis_strong_threshold_dn"] is not None
+                    else "",
+                    f"{analysis['analysis_file_size']:,} B"
+                    if analysis["analysis_file_size"] is not None
+                    else "",
+                    "used for this collection" if i == 0 else "",
+                )
+                if part
+            )
+            with ui.expansion(title, value=i == 0).classes("w-full"):
+                _analysis_details(analysis)
+    dialog.open()
+
+
+def _export_buttons(collections: pl.DataFrame) -> None:
+    """Download the whole table -- every column of `mpi_collections.parquet`,
+    including the ones the page hides.
+    """
+    with ui.row().classes("items-center gap-2"):
+        ui.button(
+            "Export CSV",
+            icon="download",
+            on_click=lambda: ui.download.content(
+                mpi_collections.collections_csv_bytes(collections),
+                filename="mpi_collections.csv",
+            ),
+        ).props("dense")
+        ui.button(
+            "Export Excel",
+            icon="download",
+            on_click=lambda: ui.download.content(
+                mpi_collections.collections_xlsx_bytes(collections),
+                filename="mpi_collections.xlsx",
+            ),
+        ).props("dense outline")
+
+
+def _collections_card(
+    collections: pl.DataFrame | None, analyses: pl.DataFrame | None
+) -> None:
+    """`collections`/`analyses` are None while they're still loading."""
+    with ui.card().classes("w-full"):
+        with ui.row().classes("w-full items-center justify-between"):
+            ui.label("MPI Collections").classes("text-lg font-bold")
+            if collections is not None and not collections.is_empty():
+                _export_buttons(collections)
+        ui.label(
+            "One row per MPI recording, newest first. On-Board Analysis: the "
+            "satellite's own summary of the whole MPI data file on board (an "
+            "analyze_mpi_data telecommand response), when one was received. "
+            "Frames Received: only the frames actually downlinked and timed so "
+            "far -- expected/missing are from the first to the last frame "
+            "counter present, so frames lost before the first or after the "
+            "last aren't counted. Start/end come from the analysis's "
+            "earliest/latest timestamps when there is one (Times From: "
+            "analyze_mpi_data_v<N>), otherwise the first/last frame received "
+            "(Times From: frames). Without an analysis, a new collection "
             "starts 20 minutes after the last one's first frame, or when the "
             "frame counter drops (a new recording, or the counter wrapping "
-            "around). Frames expected/missing are from the first to the last "
-            "frame counter present, so frames lost before the first or after "
-            "the last aren't counted."
+            "around). Strong Signals: the count at each DN threshold the file "
+            "was analyzed with. Click a row for every analysis of its file."
         ).classes("text-caption text-grey")
 
-        if collections is None:
+        if collections is None or analyses is None:
             with ui.row().classes("items-center gap-2 p-2"):
                 ui.spinner(size="md")
                 ui.label("Loading...").classes("text-grey")
@@ -118,13 +323,26 @@ def _collections_card(collections: pl.DataFrame | None) -> None:
             }
             for field, label, numeric in _COLLECTION_COLUMNS
         ]
+        collection_rows = collections.to_dicts()
         rows = [
-            {field: _cell(field, row[field]) for field, _, _ in _COLLECTION_COLUMNS}
-            for row in collections.iter_rows(named=True)
+            # `.get`: an `mpi_collections.parquet` from before analyses were merged in
+            # has no analysis columns.
+            {field: _cell(field, row.get(field)) for field, _, _ in _COLLECTION_COLUMNS}
+            | {"collection_time_source": _time_source_cell(row), "_row_index": i}
+            for i, row in enumerate(collection_rows)
         ]
-        ui.table(columns=columns, rows=rows, row_key="collection_started_at").classes(
-            "w-full"
-        ).props("dense flat")
+        table = ui.table(columns=columns, rows=rows, row_key="_row_index").classes(
+            "w-full cursor-pointer"
+        )
+        table.props("dense flat")
+        table.add_slot("header", _COLLECTION_HEADER_SLOT)
+        # Its args are the click event, the row, and its index.
+        table.on(
+            "rowClick",
+            lambda e: _show_analyses(
+                collection_rows[e.args[1]["_row_index"]], analyses
+            ),
+        )
         ui.label(f"{collections.height:,} collection(s).").classes(
             "text-caption text-grey mt-2"
         )
@@ -134,6 +352,7 @@ def _collections_card(collections: pl.DataFrame | None) -> None:
 class _PageData:
     timeline: pl.DataFrame
     collections: pl.DataFrame
+    analyses: pl.DataFrame
 
 
 def _load_page_data(data_dir: Path) -> _PageData:
@@ -141,6 +360,7 @@ def _load_page_data(data_dir: Path) -> _PageData:
     return _PageData(
         timeline=collection_timeline.load_collection_timeline(data_dir),
         collections=mpi_collections.load_collections(data_dir),
+        analyses=mpi_collections.load_analyses(data_dir),
     )
 
 
@@ -148,7 +368,9 @@ def build_mpi_data_page(data_dir: Path) -> None:
     @ui.refreshable
     def content(page_data: _PageData | None) -> None:
         _collection_timeline_card(page_data and page_data.timeline)
-        _collections_card(page_data and page_data.collections)
+        _collections_card(
+            page_data and page_data.collections, page_data and page_data.analyses
+        )
 
     async def _reload() -> None:
         # Load in a thread, then rebuild synchronously -- see

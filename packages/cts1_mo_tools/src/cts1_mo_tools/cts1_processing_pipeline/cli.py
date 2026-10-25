@@ -141,7 +141,8 @@ class Step5Args:
 class Step6Args:
     """Step 6: extract MPI telemetry frames, with interpolated collection
     times, from bulk file downlinks in everything_decoded into mpi_frames,
-    and summarize them per MPI collection into mpi_collections."""
+    and summarize them per MPI collection (merged with any analyze_mpi_data
+    responses from reassembled_tcmd_responses) into mpi_collections."""
 
 
 @dataclass(frozen=True, slots=True)

@@ -216,12 +216,28 @@ TABLE_SPECS: tuple[TableSpec, ...] = (
         key="mpi_collections",
         step="Step 6 -- Extract MPI Frames",
         description=(
-            "MPI collections (runs of frames from one recording, up to 20 "
-            "minutes long), one row per collection: start/end time, frames "
-            "present vs expected from the frame counters, and the largest gap."
+            "MPI collections, one row per recording: start/end time and "
+            "duration (from the on-board analyze_mpi_data analysis when "
+            "there is one), the analysis's file metadata and frame counts, "
+            "and the frames received vs expected from the frame counters, "
+            "with the largest gap."
         ),
         filename=step_6_pipeline.COLLECTIONS_OUTPUT_FILENAME,
         time_column="collection_started_at",
+        has_packet_type=False,
+    ),
+    TableSpec(
+        key="mpi_analyses",
+        step="Step 6 -- Extract MPI Frames",
+        description=(
+            "Every distinct analyze_mpi_data telecommand response (the "
+            "satellite's own analysis of an MPI data file on board), one row "
+            "per response: the file's name, size, SHA-256, frame counts, "
+            "earliest/latest timestamps, strong signals at the threshold "
+            "used, and the raw response."
+        ),
+        filename=step_6_pipeline.ANALYSES_OUTPUT_FILENAME,
+        time_column="analysis_started_at",
         has_packet_type=False,
     ),
 )

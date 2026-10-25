@@ -11,6 +11,8 @@ from cts1_mo_tools.cts1_processing_pipeline.step_6_extract_mpi_frames.pipeline i
     assign_mpi_collections,
     compute_mpi_frames,
     compute_mpi_frames_with_outcomes,
+    extract_all_mpi_analyses,
+    extract_mpi_analyses,
     mpi_crc16,
     summarize_mpi_collections,
 )
@@ -478,6 +480,8 @@ def test_collection_summary_counts_frames_and_largest_gap() -> None:
     summary = summarize_mpi_collections(frames)
 
     first, second = summary.rows(named=True)
+    analysis_columns = [c for c in summary.columns if c.startswith("analysis_")]
+    assert analysis_columns
     assert first == {
         "collection_started_at": _RECORDED_AT,
         "collection_ended_at": _RECORDED_AT + timedelta(milliseconds=31 * 6),
@@ -489,6 +493,10 @@ def test_collection_summary_counts_frames_and_largest_gap() -> None:
         "largest_gap_frames": 3,
         "largest_gap_started_at": _RECORDED_AT + timedelta(milliseconds=31 * 2),
         "largest_gap_duration_ms": 31,
+        "collection_time_source": "frames",
+        "collection_duration_ms": 31 * 6,
+        "frame_collection_count": 1,
+        **dict.fromkeys(analysis_columns),
     }
     assert second["frames_missing"] == 0
     assert second["largest_gap_frames"] == 0
@@ -511,3 +519,256 @@ def test_empty_frames_summarize_to_empty_collections() -> None:
     summary = summarize_mpi_collections(compute_mpi_frames(pl.DataFrame()))
     assert summary.height == 0
     assert summary.schema["collection_started_at"] == pl.Datetime("us", "UTC")
+
+
+def _analysis_response(  # noqa: PLR0913
+    *,
+    earliest: datetime,
+    latest: datetime,
+    file: str = "mpi_data/2026-08-09_063310Z.mpi",
+    size: int = 103285,
+    received_at: datetime = _DOWNLINKED_AT,
+    is_complete: bool = True,
+    response_code: int = 0,
+    action: str = "analyze_mpi_data_v1",
+    strong_threshold_dn: int = 200,
+    strong_signal_count: int = 0,
+) -> dict[str, Any]:
+    text = json.dumps(
+        {
+            "action": action,
+            "file": file,
+            "sha256": "2EA8096F" + "0" * 56,
+            "size": size,
+            "frame_count": 673,
+            "valid_frame_count": 667,
+            "bad_frame_count": 6,
+            "background_frame_count": 3,
+            "warmup_frame_count": 78,
+            "frame_byte_range": [259, 102919],
+            "time_sync_count": 6,
+            "mpi_start_count": 1,
+            "malformed_time_sync_count": 0,
+            "earliest": {
+                "timestamp_ms": _epoch_ms(earliest),
+                "datetime": "2026-08-09T063310.000Z_E",
+            },
+            "latest": {
+                "timestamp_ms": _epoch_ms(latest),
+                "datetime": "2026-08-09T063410.000Z_E",
+            },
+            "strong_threshold_dn": strong_threshold_dn,
+            "strong_frame_count": 0,
+            "strong_signal_count": strong_signal_count,
+            "strong_signals": [],
+        }
+    )
+    return {
+        "first_received_at": received_at,
+        "tcmd_sent_at": received_at - timedelta(seconds=5),
+        "tcmd_response_code": response_code,
+        "is_complete": is_complete,
+        "tcmd_response_text": text,
+    }
+
+
+def _tcmd_responses(*responses: dict[str, Any]) -> pl.DataFrame:
+    return pl.DataFrame(
+        [
+            *responses,
+            # Not an analysis at all.
+            {
+                "first_received_at": _DOWNLINKED_AT,
+                "tcmd_sent_at": None,
+                "tcmd_response_code": 0,
+                "is_complete": True,
+                "tcmd_response_text": "pong",
+            },
+        ],
+        schema={
+            "first_received_at": pl.Datetime("us", "UTC"),
+            "tcmd_sent_at": pl.Datetime("us", "UTC"),
+            "tcmd_response_code": pl.Int64,
+            "is_complete": pl.Boolean,
+            "tcmd_response_text": pl.String,
+        },
+    )
+
+
+def test_extract_mpi_analyses_keeps_complete_successful_ones() -> None:
+    earliest = _RECORDED_AT
+    latest = _RECORDED_AT + timedelta(minutes=1)
+    analyses = extract_mpi_analyses(
+        _tcmd_responses(
+            _analysis_response(earliest=earliest, latest=latest),
+            _analysis_response(
+                earliest=earliest, latest=latest, file="b.mpi", is_complete=False
+            ),
+            _analysis_response(
+                earliest=earliest, latest=latest, file="c.mpi", response_code=1
+            ),
+        )
+    )
+    (analysis,) = analyses.rows(named=True)
+    assert analysis["analysis_started_at"] == earliest
+    assert analysis["analysis_ended_at"] == latest
+    assert analysis["analysis_file"] == "mpi_data/2026-08-09_063310Z.mpi"
+    assert analysis["analysis_file_size"] == 103285
+    assert analysis["analysis_sha256"] == "2ea8096f" + "0" * 56
+    assert analysis["analysis_frame_count"] == 673
+    assert analysis["analysis_valid_frame_count"] == 667
+    assert analysis["analysis_first_frame_byte"] == 259
+    assert analysis["analysis_last_frame_byte"] == 102919
+    assert analysis["analysis_strong_signals"] == "[]"
+    assert analysis["analysis_action"] == "analyze_mpi_data_v1"
+    assert analysis["analysis_version"] == 1
+
+
+def test_extract_mpi_analyses_keeps_the_largest_per_file() -> None:
+    earliest = _RECORDED_AT
+    analyses = extract_mpi_analyses(
+        _tcmd_responses(
+            _analysis_response(
+                earliest=earliest, latest=earliest + timedelta(seconds=30), size=50
+            ),
+            _analysis_response(
+                earliest=earliest, latest=earliest + timedelta(seconds=60), size=99
+            ),
+        )
+    )
+    assert analyses["analysis_file_size"].to_list() == [99]
+
+
+def test_extract_mpi_analyses_prefers_the_latest_version_per_file() -> None:
+    earliest = _RECORDED_AT
+    latest = earliest + timedelta(seconds=60)
+    analyses = extract_mpi_analyses(
+        _tcmd_responses(
+            _analysis_response(earliest=earliest, latest=latest, size=99),
+            _analysis_response(
+                earliest=earliest,
+                latest=latest,
+                size=50,
+                action="analyze_mpi_data_v2",
+            ),
+            _analysis_response(
+                earliest=earliest, latest=latest, size=999, action="analyze_mpi_data"
+            ),
+        )
+    )
+    assert analyses.select("analysis_version", "analysis_file_size").rows() == [(2, 50)]
+
+
+def test_analysis_times_and_describes_its_collection() -> None:
+    earliest = _RECORDED_AT - timedelta(seconds=5)
+    latest = _RECORDED_AT + timedelta(minutes=1)
+    unrelated = _RECORDED_AT + timedelta(hours=2)
+    no_frames = _RECORDED_AT + timedelta(days=1)
+    frames = assign_mpi_collections(
+        _frames((_RECORDED_AT, [0, 1, 2, 5]), (unrelated, [0, 1]))
+    )
+    analyses = extract_mpi_analyses(
+        _tcmd_responses(
+            _analysis_response(earliest=earliest, latest=latest),
+            _analysis_response(
+                earliest=no_frames,
+                latest=no_frames + timedelta(minutes=1),
+                file="other.mpi",
+            ),
+        )
+    )
+    summary = summarize_mpi_collections(frames, analyses)
+
+    merged, frames_only, analysis_only = summary.rows(named=True)
+    assert merged["collection_started_at"] == earliest
+    assert merged["collection_ended_at"] == latest
+    assert merged["collection_time_source"] == "analysis"
+    assert merged["collection_duration_ms"] == 65_000
+    assert merged["frame_collection_count"] == 1
+    assert merged["frames_present"] == 4
+    assert merged["frames_missing"] == 2
+    assert merged["analysis_file"] == "mpi_data/2026-08-09_063310Z.mpi"
+    assert merged["analysis_frame_count"] == 673
+
+    assert frames_only["collection_started_at"] == unrelated
+    assert frames_only["collection_time_source"] == "frames"
+    assert frames_only["analysis_file"] is None
+
+    assert analysis_only["collection_started_at"] == no_frames
+    assert analysis_only["frame_collection_count"] == 0
+    assert analysis_only["frames_present"] == 0
+    assert analysis_only["frames_expected"] is None
+    assert analysis_only["analysis_file"] == "other.mpi"
+
+
+def test_analysis_merges_every_recording_in_its_file() -> None:
+    second_start = _RECORDED_AT + timedelta(seconds=30)
+    frames = assign_mpi_collections(
+        _frames((_RECORDED_AT, [0, 1, 3]), (second_start, [0, 1]))
+    )
+    analyses = extract_mpi_analyses(
+        _tcmd_responses(
+            _analysis_response(
+                earliest=_RECORDED_AT, latest=second_start + timedelta(seconds=10)
+            )
+        )
+    )
+    (merged,) = summarize_mpi_collections(frames, analyses).rows(named=True)
+    assert merged["frame_collection_count"] == 2
+    assert merged["frames_present"] == 5
+    assert merged["frames_expected"] == 6
+    assert merged["first_frame_counter"] == 0
+    assert merged["last_frame_counter"] == 1
+    assert merged["largest_gap_frames"] == 1
+
+
+def test_all_analyses_keeps_each_distinct_response_once() -> None:
+    earliest = _RECORDED_AT
+    latest = earliest + timedelta(seconds=60)
+    response = _analysis_response(earliest=earliest, latest=latest)
+    redownlinked = {**response, "first_received_at": _DOWNLINKED_AT + timedelta(1)}
+    other_threshold = _analysis_response(
+        earliest=earliest, latest=latest, strong_threshold_dn=100
+    )
+    analyses = extract_all_mpi_analyses(
+        _tcmd_responses(redownlinked, response, other_threshold)
+    )
+    assert analyses.select("analysis_strong_threshold_dn", "analysis_received_at").sort(
+        "analysis_strong_threshold_dn"
+    ).rows() == [
+        (100, _DOWNLINKED_AT),
+        (200, _DOWNLINKED_AT),
+    ]
+    assert json.loads(analyses["analysis_response_text"][0])["file"] == (
+        "mpi_data/2026-08-09_063310Z.mpi"
+    )
+
+
+def test_primary_analysis_counts_strong_signals_at_every_threshold() -> None:
+    earliest = _RECORDED_AT
+    latest = earliest + timedelta(seconds=60)
+    (analysis,) = extract_mpi_analyses(
+        _tcmd_responses(
+            _analysis_response(
+                earliest=earliest,
+                latest=latest,
+                strong_threshold_dn=100,
+                strong_signal_count=5,
+            ),
+            _analysis_response(earliest=earliest, latest=latest, size=50),
+            # Same threshold, but a smaller file: not the one counted.
+            _analysis_response(
+                earliest=earliest,
+                latest=latest,
+                strong_threshold_dn=100,
+                strong_signal_count=9,
+                size=10,
+            ),
+        )
+    ).rows(named=True)
+    assert analysis["analysis_count"] == 3
+    assert analysis["analysis_file_size"] == 103285
+    assert json.loads(analysis["analysis_strong_signal_counts"]) == {
+        "100": 5,
+        "200": 0,
+    }

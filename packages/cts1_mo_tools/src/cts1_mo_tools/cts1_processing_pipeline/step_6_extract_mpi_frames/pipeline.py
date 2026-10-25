@@ -106,17 +106,33 @@ output, `mpi_collections.parquet`, summarizes each one: its start/end,
 frames present vs expected from the counters, and its largest gap
 (`summarize_mpi_collections`).
 
+The satellite can also summarize an MPI data file itself, on board, with
+the `analyze_mpi_data` telecommand: its response (reassembled by step 5)
+gives the file's name, size, SHA-256, frame counts, and `earliest`/
+`latest` timestamps. Every distinct one is written to
+`mpi_analyses.parquet` (`extract_all_mpi_analyses`), and each file's
+primary analysis -- the latest version, then the largest -- is what its
+collection uses (`primary_mpi_analyses`), along with the strong signal
+count at every threshold the file was analyzed with. Every frame collection
+overlapping an analysis's `earliest`..`latest` is merged into it, and the
+collection is then timed by the analysis -- the whole file on board, not
+just the frames that happened to be downlinked -- with the file's metadata
+alongside. An analysis with no frames downlinked yet is still a collection.
+
 Like steps 2-5, this step is parquet-in-parquet-out and reprocesses from
-scratch on every run.
+scratch on every run. It reads step 5's output too, if it's there (the
+collections just aren't merged with any analyses if not).
 """
 
 from __future__ import annotations
 
 __all__ = [
+    "ANALYSES_OUTPUT_FILENAME",
     "BLOCK_DURATION_TOLERANCE",
     "COLLECTIONS_OUTPUT_FILENAME",
     "DEFAULT_DATA_DIR",
     "MAX_BRIDGED_CHUNKS",
+    "MPI_ANALYSIS_ACTION_PREFIX",
     "MPI_BUFFER_LEN",
     "MPI_COLLECTION_MAX_DURATION",
     "MPI_SYNC",
@@ -126,8 +142,12 @@ __all__ = [
     "assign_mpi_collections",
     "compute_mpi_frames",
     "compute_mpi_frames_with_outcomes",
+    "extract_all_mpi_analyses",
+    "extract_mpi_analyses",
     "mpi_crc16",
+    "primary_mpi_analyses",
     "run",
+    "sort_mpi_analyses_by_preference",
     "summarize_mpi_collections",
 ]
 
@@ -156,6 +176,9 @@ from cts1_mo_tools.cts1_processing_pipeline.step_2_deduplicate_packets.pipeline 
 from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
     pipeline as step_3_pipeline,
 )
+from cts1_mo_tools.cts1_processing_pipeline.step_5_reassemble_tcmd_responses import (
+    pipeline as step_5_pipeline,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -164,6 +187,7 @@ if TYPE_CHECKING:
 DEFAULT_DATA_DIR = step_3_pipeline.DEFAULT_DATA_DIR
 OUTPUT_FILENAME = "mpi_frames.parquet"
 COLLECTIONS_OUTPUT_FILENAME = "mpi_collections.parquet"
+ANALYSES_OUTPUT_FILENAME = "mpi_analyses.parquet"
 
 MPI_SYNC = b"\x0c\xff\xff\x0c"
 # Bytes of MPI data the firmware writes between two timestamp JSONs.
@@ -1250,7 +1274,8 @@ def assign_mpi_collections(frames: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-_COLLECTIONS_SCHEMA = {
+# The per-frame-collection summary, before any merging with MPI analyses.
+_FRAME_COLLECTIONS_SCHEMA = {
     "collection_started_at": pl.Datetime("us", "UTC"),
     "collection_ended_at": pl.Datetime("us", "UTC"),
     "frames_present": pl.Int64,
@@ -1267,13 +1292,271 @@ _COLLECTIONS_SCHEMA = {
     "largest_gap_duration_ms": pl.Int64,
 }
 
+# One `analyze_mpi_data` telecommand response, as `extract_all_mpi_analyses`
+# pulls it out of step 5's output: the satellite's own summary of one MPI
+# data file, from the full file on board.
+_ANALYSES_SCHEMA = {
+    "analysis_started_at": pl.Datetime("us", "UTC"),  # `earliest`
+    "analysis_ended_at": pl.Datetime("us", "UTC"),  # `latest`
+    "analysis_file": pl.String,
+    "analysis_file_size": pl.Int64,
+    "analysis_sha256": pl.String,
+    "analysis_frame_count": pl.Int64,
+    "analysis_valid_frame_count": pl.Int64,
+    "analysis_bad_frame_count": pl.Int64,
+    "analysis_background_frame_count": pl.Int64,
+    "analysis_warmup_frame_count": pl.Int64,
+    "analysis_first_frame_byte": pl.Int64,  # `frame_byte_range`
+    "analysis_last_frame_byte": pl.Int64,
+    "analysis_time_sync_count": pl.Int64,
+    "analysis_mpi_start_count": pl.Int64,
+    "analysis_malformed_time_sync_count": pl.Int64,
+    "analysis_strong_threshold_dn": pl.Int64,
+    "analysis_strong_frame_count": pl.Int64,
+    "analysis_strong_signal_count": pl.Int64,
+    "analysis_strong_signals": pl.String,  # JSON array, as sent
+    "analysis_action": pl.String,
+    # The `v<N>` at the end of `analysis_action`, if any.
+    "analysis_version": pl.Int64,
+    "analysis_tcmd_sent_at": pl.Datetime("us", "UTC"),
+    "analysis_received_at": pl.Datetime("us", "UTC"),
+}
 
-def summarize_mpi_collections(frames: pl.DataFrame) -> pl.DataFrame:
-    """One row per MPI collection in `frames` (as labelled by
-    `assign_mpi_collections`), oldest first -- see `_COLLECTIONS_SCHEMA`.
+# `mpi_analyses.parquet`: every distinct analysis, with the response itself
+# (so nothing a future version adds is lost).
+_ALL_ANALYSES_SCHEMA = {
+    **_ANALYSES_SCHEMA,
+    "analysis_response_text": pl.String,
+}
+
+# One file's primary analysis (see `primary_mpi_analyses`), plus what the
+# file's other analyses add to it.
+_FILE_ANALYSES_SCHEMA = {
+    **_ANALYSES_SCHEMA,
+    # How many distinct analyses of the file were received.
+    "analysis_count": pl.Int64,
+    # The strong signal count at every `strong_threshold_dn` the file was
+    # analyzed with, as a JSON object of threshold -> count, e.g.
+    # '{"100":5,"200":0}' -- each from the primary analysis at that
+    # threshold (picked the same way as the file's primary analysis).
+    "analysis_strong_signal_counts": pl.String,
+}
+
+_COLLECTIONS_SCHEMA = {
+    **_FRAME_COLLECTIONS_SCHEMA,
+    # "analysis" when the start/end are the MPI analysis's `earliest`/
+    # `latest` (the timestamps in the file on board), "frames" when they're
+    # just the first/last frame downlinked.
+    "collection_time_source": pl.String,
+    # The recording's duration: from `collection_started_at` to
+    # `collection_ended_at`.
+    "collection_duration_ms": pl.Int64,
+    # How many frame collections (see `assign_mpi_collections`) were merged
+    # into this one -- 0 for an analysis with no frames downlinked yet, more
+    # than 1 when one file holds several recordings.
+    "frame_collection_count": pl.Int64,
+    **_FILE_ANALYSES_SCHEMA,
+}
+
+# The `action` of an `analyze_mpi_data` telecommand's response -- any
+# version, e.g. "analyze_mpi_data_v1".
+MPI_ANALYSIS_ACTION_PREFIX = "analyze_mpi_data"
+_ANALYSIS_VERSION_RE = re.compile(r"_v(\d+)$")
+# How far outside an MPI analysis's `earliest`..`latest` a frame collection
+# can reach and still be that analysis's: frames are timed from the same
+# timestamps, but may be extrapolated up to a block past them.
+_ANALYSIS_MATCH_TOLERANCE = timedelta(seconds=_BLOCK_DURATION_RANGE_MS[1] // 1000)
+
+
+def _int_field(value: object) -> int | None:
+    # `bool` is an `int` subclass, but `"size": true` is not a size.
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _analysis_time(value: object) -> datetime | None:
+    """An analysis's `earliest`/`latest`: `{"timestamp_ms": ..., ...}`."""
+    if not isinstance(value, dict):
+        return None
+    epoch_ms = _int_field(cast("dict[str, Any]", value).get("timestamp_ms"))
+    if epoch_ms is None or not 0 < epoch_ms <= MAX_VALID_EPOCH_MS:
+        return None
+    return _epoch_ms_to_datetime(epoch_ms)
+
+
+def _analysis_row(
+    properties: dict[str, Any], tcmd_sent_at: datetime | None, received_at: datetime
+) -> dict[str, Any] | None:
+    started_at = _analysis_time(properties.get("earliest"))
+    ended_at = _analysis_time(properties.get("latest"))
+    if started_at is None or ended_at is None or ended_at < started_at:
+        return None
+    byte_range = properties.get("frame_byte_range")
+    first_byte, last_byte = (
+        (_int_field(byte_range[0]), _int_field(byte_range[1]))
+        if isinstance(byte_range, list)
+        and len(byte_range := cast("list[object]", byte_range)) == 2  # noqa: PLR2004
+        else (None, None)
+    )
+    file = properties.get("file")
+    sha256 = properties.get("sha256")
+    strong_signals = properties.get("strong_signals")
+    return {
+        "analysis_started_at": started_at,
+        "analysis_ended_at": ended_at,
+        "analysis_file": file if isinstance(file, str) else None,
+        "analysis_file_size": _int_field(properties.get("size")),
+        "analysis_sha256": sha256.lower() if isinstance(sha256, str) else None,
+        **{
+            f"analysis_{key}": _int_field(properties.get(key))
+            for key in (
+                "frame_count",
+                "valid_frame_count",
+                "bad_frame_count",
+                "background_frame_count",
+                "warmup_frame_count",
+                "time_sync_count",
+                "mpi_start_count",
+                "malformed_time_sync_count",
+                "strong_threshold_dn",
+                "strong_frame_count",
+                "strong_signal_count",
+            )
+        },
+        "analysis_first_frame_byte": first_byte,
+        "analysis_last_frame_byte": last_byte,
+        "analysis_strong_signals": (
+            json.dumps(strong_signals) if isinstance(strong_signals, list) else None
+        ),
+        "analysis_action": properties["action"],
+        "analysis_version": (
+            int(m.group(1))
+            if (m := _ANALYSIS_VERSION_RE.search(properties["action"]))
+            else None
+        ),
+        "analysis_tcmd_sent_at": tcmd_sent_at,
+        "analysis_received_at": received_at,
+    }
+
+
+def extract_all_mpi_analyses(tcmd_responses: pl.DataFrame) -> pl.DataFrame:
+    """Every distinct successful `analyze_mpi_data` response in
+    `tcmd_responses` (step 5's `reassembled_tcmd_responses.parquet`), oldest
+    first -- see `_ALL_ANALYSES_SCHEMA`.
+
+    Only complete responses (every part received), with response code 0,
+    that parse as JSON and have a valid `earliest`/`latest` count. The same
+    response received more than once (an identical re-downlink) is kept
+    once, as first received.
+    """
+    if tcmd_responses.is_empty():
+        return pl.DataFrame(schema=_ALL_ANALYSES_SCHEMA)
+    rows: list[dict[str, Any]] = []
+    for text, tcmd_sent_at, received_at in (
+        tcmd_responses.filter(
+            pl.col("is_complete")
+            & (pl.col("tcmd_response_code") == 0)
+            & pl.col("tcmd_response_text").str.contains(
+                MPI_ANALYSIS_ACTION_PREFIX, literal=True
+            )
+        )
+        .select("tcmd_response_text", "tcmd_sent_at", "first_received_at")
+        .iter_rows()
+    ):
+        try:
+            properties = json.loads(text)
+        except ValueError:
+            continue
+        if not isinstance(properties, dict):
+            continue
+        properties = cast("dict[str, Any]", properties)
+        action = properties.get("action")
+        if not (
+            isinstance(action, str) and action.startswith(MPI_ANALYSIS_ACTION_PREFIX)
+        ):
+            continue
+        if row := _analysis_row(properties, tcmd_sent_at, received_at):
+            rows.append({**row, "analysis_response_text": text})
+    if not rows:
+        return pl.DataFrame(schema=_ALL_ANALYSES_SCHEMA)
+    return (
+        pl.DataFrame(rows, schema=_ALL_ANALYSES_SCHEMA)
+        .sort("analysis_received_at", nulls_last=True)
+        .unique("analysis_response_text", keep="first", maintain_order=True)
+        .sort("analysis_started_at", "analysis_received_at")
+    )
+
+
+def sort_mpi_analyses_by_preference(analyses: pl.DataFrame) -> pl.DataFrame:
+    """`analyses`, the most-preferred first: the latest version (the `v<N>`
+    in its `action`), then the largest (the file may have grown in
+    between), then the earliest received.
+    """
+    return analyses.sort(
+        "analysis_version",
+        "analysis_file_size",
+        "analysis_received_at",
+        descending=[True, True, False],
+        nulls_last=True,
+    )
+
+
+def primary_mpi_analyses(all_analyses: pl.DataFrame) -> pl.DataFrame:
+    """One row per MPI data file in `all_analyses` (from
+    `extract_all_mpi_analyses`), oldest first: its most-preferred analysis
+    (see `sort_mpi_analyses_by_preference`), plus how many there were and
+    the strong signal count at each threshold -- see
+    `_FILE_ANALYSES_SCHEMA`. An analysis with no file name is its own file.
+    """
+    if all_analyses.is_empty():
+        return pl.DataFrame(schema=_FILE_ANALYSES_SCHEMA)
+    # A stand-in file name, so nameless analyses each stay on their own.
+    file_key = pl.coalesce("analysis_file", pl.format("\\0{}", pl.int_range(pl.len())))
+    analyses = sort_mpi_analyses_by_preference(
+        all_analyses.with_columns(_file_key=file_key)
+    )
+    strong_counts = (
+        analyses.filter(
+            pl.col("analysis_strong_threshold_dn").is_not_null()
+            & pl.col("analysis_strong_signal_count").is_not_null()
+        )
+        .unique(["_file_key", "analysis_strong_threshold_dn"], keep="first")
+        .sort("analysis_strong_threshold_dn")
+        .group_by("_file_key")
+        .agg(
+            analysis_strong_signal_counts=pl.concat_str(
+                pl.lit("{"),
+                pl.format(
+                    '"{}":{}',
+                    "analysis_strong_threshold_dn",
+                    "analysis_strong_signal_count",
+                ).str.join(","),
+                pl.lit("}"),
+            )
+        )
+    )
+    return (
+        analyses.with_columns(analysis_count=pl.len().over("_file_key"))
+        .unique("_file_key", keep="first", maintain_order=True)
+        .join(strong_counts, on="_file_key", how="left")
+        .select(
+            pl.col(name).cast(dtype) for name, dtype in _FILE_ANALYSES_SCHEMA.items()
+        )
+        .sort("analysis_started_at")
+    )
+
+
+def extract_mpi_analyses(tcmd_responses: pl.DataFrame) -> pl.DataFrame:
+    """`primary_mpi_analyses` straight from step 5's output."""
+    return primary_mpi_analyses(extract_all_mpi_analyses(tcmd_responses))
+
+
+def _summarize_frame_collections(frames: pl.DataFrame) -> pl.DataFrame:
+    """One row per frame collection in `frames` (as labelled by
+    `assign_mpi_collections`), oldest first -- see
+    `_FRAME_COLLECTIONS_SCHEMA`.
     """
     if frames.is_empty():
-        return pl.DataFrame(schema=_COLLECTIONS_SCHEMA)
+        return pl.DataFrame(schema=_FRAME_COLLECTIONS_SCHEMA)
     collection = "collection_started_at"
     gap_frames = pl.col("frame_counter").diff().over(collection) - 1
     has_gap = gap_frames > 0
@@ -1314,8 +1597,113 @@ def summarize_mpi_collections(frames: pl.DataFrame) -> pl.DataFrame:
         .with_columns(
             frames_missing=pl.col("frames_expected") - pl.col("frames_present")
         )
-        .select(pl.col(name).cast(dtype) for name, dtype in _COLLECTIONS_SCHEMA.items())
+        .select(
+            pl.col(name).cast(dtype)
+            for name, dtype in _FRAME_COLLECTIONS_SCHEMA.items()
+        )
         .sort(collection)
+    )
+
+
+def _matching_analysis(
+    collection: dict[str, Any], analyses: list[dict[str, Any]]
+) -> int | None:
+    """The index of the analysis (in `analyses`) whose `earliest`..`latest`
+    the frame collection overlaps, if any -- the most-overlapped one, should
+    several.
+    """
+    best: tuple[timedelta, int] | None = None
+    for i, analysis in enumerate(analyses):
+        overlap = min(
+            collection["collection_ended_at"],
+            analysis["analysis_ended_at"] + _ANALYSIS_MATCH_TOLERANCE,
+        ) - max(
+            collection["collection_started_at"],
+            analysis["analysis_started_at"] - _ANALYSIS_MATCH_TOLERANCE,
+        )
+        if overlap >= timedelta(0) and (best is None or overlap > best[0]):
+            best = (overlap, i)
+    return None if best is None else best[1]
+
+
+def _merged_collection(
+    analysis: dict[str, Any], collections: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """One analysis and every frame collection in it (oldest first) as one
+    collection, timed by the analysis.
+    """
+    row: dict[str, Any] = {
+        "collection_started_at": analysis["analysis_started_at"],
+        "collection_ended_at": analysis["analysis_ended_at"],
+        "collection_time_source": "analysis",
+        "frame_collection_count": len(collections),
+        **analysis,
+    }
+    if not collections:
+        return {**row, "frames_present": 0, "frames_missing": None}
+    largest_gap = max(collections, key=lambda c: c["largest_gap_frames"])
+    return {
+        **row,
+        **{
+            key: sum(c[key] for c in collections)
+            for key in ("frames_present", "frames_expected", "frames_missing")
+        },
+        "first_frame_counter": collections[0]["first_frame_counter"],
+        "last_frame_counter": collections[-1]["last_frame_counter"],
+        **{
+            key: largest_gap[key]
+            for key in (
+                "largest_gap_frames",
+                "largest_gap_started_at",
+                "largest_gap_duration_ms",
+            )
+        },
+    }
+
+
+def summarize_mpi_collections(
+    frames: pl.DataFrame, analyses: pl.DataFrame | None = None
+) -> pl.DataFrame:
+    """One row per MPI collection, oldest first -- see `_COLLECTIONS_SCHEMA`.
+
+    Each frame collection in `frames` (as labelled by
+    `assign_mpi_collections`) that overlaps an MPI analysis in `analyses`
+    (from `extract_mpi_analyses`) is merged into it: its start/end become
+    the analysis's `earliest`/`latest` -- the timestamps in the whole file
+    on board, rather than just whichever frames were downlinked -- and its
+    file metadata comes along. Every analysis is a collection, even with no
+    frames downlinked yet; every other frame collection stays as it was.
+    """
+    frame_collections = _summarize_frame_collections(frames)
+    analysis_rows = [] if analyses is None else analyses.to_dicts()
+    merged: list[list[dict[str, Any]]] = [[] for _ in analysis_rows]
+    rows: list[dict[str, Any]] = []
+    for collection in frame_collections.iter_rows(named=True):
+        i = _matching_analysis(collection, analysis_rows)
+        if i is None:
+            rows.append(
+                {
+                    **collection,
+                    "collection_time_source": "frames",
+                    "frame_collection_count": 1,
+                }
+            )
+        else:
+            merged[i].append(collection)
+    rows += [
+        _merged_collection(analysis, collections)
+        for analysis, collections in zip(analysis_rows, merged, strict=True)
+    ]
+    if not rows:
+        return pl.DataFrame(schema=_COLLECTIONS_SCHEMA)
+    return (
+        pl.DataFrame(rows, schema=_COLLECTIONS_SCHEMA)
+        .with_columns(
+            collection_duration_ms=(
+                pl.col("collection_ended_at") - pl.col("collection_started_at")
+            ).dt.total_milliseconds()
+        )
+        .sort("collection_started_at")
     )
 
 
@@ -1487,10 +1875,11 @@ def _write_parquet_atomic(df: pl.DataFrame, path: Path) -> None:
 
 def run(*, data_dir: Path = DEFAULT_DATA_DIR) -> None:
     """Recompute `mpi_frames.parquet` and `mpi_collections.parquet` from
-    step 3's output.
+    step 3's (and step 5's) output.
 
-    Reads `everything_decoded.parquet` from `data_dir` (where step 3
-    writes it) and writes the result back into the same directory --
+    Reads `everything_decoded.parquet` and `reassembled_tcmd_responses.parquet`
+    from `data_dir` (where steps 3 and 5 write them) and writes the result
+    back into the same directory --
     parquet-in-parquet-out, no database involved.
     """
     decoded_path = data_dir / step_3_pipeline.OUTPUT_FILENAME
@@ -1518,9 +1907,22 @@ def run(*, data_dir: Path = DEFAULT_DATA_DIR) -> None:
     rows, tally, outcomes = _compute_rows(bulk_packets)
     result_df = _rows_to_df(rows)
 
+    tcmd_path = data_dir / step_5_pipeline.OUTPUT_FILENAME
+    if tcmd_path.exists():
+        all_analyses_df = extract_all_mpi_analyses(pl.read_parquet(tcmd_path))
+    else:
+        logger.warning(f"{tcmd_path} not found -- no MPI analyses (run step_5).")
+        all_analyses_df = pl.DataFrame(schema=_ALL_ANALYSES_SCHEMA)
+    analyses_df = primary_mpi_analyses(all_analyses_df)
+    logger.info(
+        f"{all_analyses_df.height:,} distinct MPI analysis response(s) found, "
+        f"of {analyses_df.height:,} file(s)."
+    )
+
     out_path = data_dir / OUTPUT_FILENAME
     _write_parquet_atomic(result_df, out_path)
-    collections_df = summarize_mpi_collections(result_df)
+    _write_parquet_atomic(all_analyses_df, data_dir / ANALYSES_OUTPUT_FILENAME)
+    collections_df = summarize_mpi_collections(result_df, analyses_df)
     _write_parquet_atomic(collections_df, data_dir / COLLECTIONS_OUTPUT_FILENAME)
     logger.info(f"MPI chunk linking/anchoring stats: {dict(sorted(tally.items()))}")
     received = tally["frames_received"]
@@ -1535,10 +1937,6 @@ def run(*, data_dir: Path = DEFAULT_DATA_DIR) -> None:
         logger.info(
             f"What became of the {received:,} distinct CRC-valid MPI frames "
             f"received:\n{_outcome_table(outcomes)}"
-        )
-        logger.info(
-            f"{collections_df.height:,} MPI collection(s):\n"
-            f"{collections_df.drop('largest_gap_started_at')}"
         )
     utilized = f"{result_df.height / received:.1%}" if received else "n/a"
     logger.info(

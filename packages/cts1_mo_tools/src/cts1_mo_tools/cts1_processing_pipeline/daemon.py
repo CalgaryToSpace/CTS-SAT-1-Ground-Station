@@ -135,8 +135,9 @@ def run_all_steps(  # noqa: PLR0913
     step_3_pipeline.run(data_dir=data_dir)
     announce(4)
     step_4_pipeline.run(data_dir=data_dir)
-    # Steps 4, 5 and 6 are independent (all only read step 3's output); they
+    # Steps 4 and 5 are independent (both only read step 3's output); they
     # just run one after the other here to keep the daemon single-threaded.
+    # Step 6 reads step 5's output too (for MPI analyses), so it goes last.
     announce(5)
     step_5_pipeline.run(data_dir=data_dir)
     announce(6)
