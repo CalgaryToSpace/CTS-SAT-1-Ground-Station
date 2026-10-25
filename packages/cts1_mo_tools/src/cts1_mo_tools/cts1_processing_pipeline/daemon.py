@@ -125,6 +125,9 @@ def run_all_steps(  # noqa: PLR0913
         temp_dir=temp_dir,
         force_rerun=force_rerun,
         tools=tools,
+        on_progress=lambda done, total: reporter.set_progress(
+            done, total, "observations"
+        ),
     )
     announce(2)
     step_2_pipeline.run(data_dir=data_dir)
