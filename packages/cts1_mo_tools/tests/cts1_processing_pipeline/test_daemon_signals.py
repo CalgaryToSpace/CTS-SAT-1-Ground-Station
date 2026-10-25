@@ -192,6 +192,44 @@ def test_status_reporter_publishes_and_stops(tmp_path: Path) -> None:
     assert stopped.last_run_finished_at is not None
 
 
+def test_status_reporter_publishes_progress(tmp_path: Path) -> None:
+    with StatusReporter(tmp_path, interval_sec=0.05) as reporter:
+        reporter.set(DaemonState.PROCESSING, detail="backfill: step 1 (download)")
+        reporter.set_progress(47, 52, "observations")
+        status = daemon_signals.read_status(tmp_path)
+        assert status is not None
+        assert status.detail == "backfill: step 1 (download)"
+        assert status.progress == daemon_signals.Progress(47, 52, "observations")
+        assert str(status.progress) == "47/52 observations"
+
+        # A new state's work starts its own count.
+        reporter.set(DaemonState.PROCESSING, detail="backfill: step 2 (dedupe)")
+        status = daemon_signals.read_status(tmp_path)
+        assert status is not None
+        assert status.progress is None
+
+
+def test_malformed_progress_is_ignored(tmp_path: Path) -> None:
+    (tmp_path / daemon_signals.DAEMON_STATUS_FILENAME).write_text(
+        json.dumps(
+            {
+                "state": "processing",
+                "updated_at": datetime.now(UTC).isoformat(),
+                "progress": {"done": "lots"},
+            }
+        )
+    )
+    status = daemon_signals.read_status(tmp_path)
+    assert status is not None
+    assert status.progress is None
+
+
+def test_progress_fraction_is_clamped() -> None:
+    assert daemon_signals.Progress(0, 0).fraction == 0.0
+    assert daemon_signals.Progress(3, 4).fraction == 0.75
+    assert daemon_signals.Progress(5, 4).fraction == 1.0
+
+
 def test_status_reporter_heartbeat_keeps_the_file_fresh(tmp_path: Path) -> None:
     """The heartbeat thread rewrites the file without any `set` call --
     which is what keeps a daemon blocked inside a long pipeline step

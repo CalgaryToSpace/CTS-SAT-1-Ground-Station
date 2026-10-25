@@ -293,6 +293,8 @@ def _daemon_detail_text(status: daemon_signals.DaemonStatus | None) -> str | Non
     parts: list[str] = []
     if status.detail:
         parts.append(status.detail)
+    if status.progress is not None and status.is_processing:
+        parts.append(str(status.progress))
     if status.updated_at is not None:
         parts.append(f"last heartbeat {_age_str(status.updated_at)}")
     if status.last_run_finished_at is not None and not status.is_processing:
@@ -325,6 +327,14 @@ def _daemon_section(data_dir: Path) -> None:
             detail = _daemon_detail_text(status)
             if detail:
                 ui.label(detail).classes("text-caption text-grey")
+            if (
+                status is not None
+                and status.is_processing
+                and status.progress is not None
+            ):
+                ui.linear_progress(
+                    value=status.progress.fraction, show_value=False, color=color
+                ).classes("w-64").tooltip(str(status.progress))
             if pending is not None:
                 # The daemon only looks for the request between runs, so a
                 # request raised mid-run legitimately sits here for a while

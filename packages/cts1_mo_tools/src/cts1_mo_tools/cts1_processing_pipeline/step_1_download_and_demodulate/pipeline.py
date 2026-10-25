@@ -458,6 +458,7 @@ def run(  # noqa: C901, PLR0913, PLR0915
     temp_dir: Path | None = None,
     force_rerun: bool = False,
     tools: tuple[str, ...] | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> None:
     """Run the pipeline once.
 
@@ -489,6 +490,11 @@ def run(  # noqa: C901, PLR0913, PLR0915
             still recorded to decoder_runs as usual.
         tools: Which decoders to run, from DECODERS. None (the default) runs
             all of them.
+        on_progress: Called as `on_progress(done, total)` with how many of
+            this run's candidate observations have been decoded so far --
+            once with `done=0` before the first is dispatched, then after
+            each one. Not called at all when there's nothing to decode. The
+            daemon uses this to show "47/52 observations" in the web UI.
 
     Raises:
         ValueError: If `tools` names something outside DECODERS.
@@ -541,6 +547,8 @@ def run(  # noqa: C901, PLR0913, PLR0915
         logger.info(f"  Using tools: {sorted(enabled_tools)}")
         if not candidates:
             return
+        if on_progress is not None:
+            on_progress(0, len(candidates))
 
         decoder_versions = _resolve_decoder_versions(enabled_tools)
         logger.info(f"Decoder versions: {decoder_versions}")
@@ -587,6 +595,8 @@ def run(  # noqa: C901, PLR0913, PLR0915
                 logger.info(
                     f"[{total_decoded}/{len(candidates)}] observation {obs['id']}"
                 )
+                if on_progress is not None:
+                    on_progress(total_decoded, len(candidates))
 
         try:
             for batch_start in range(0, len(candidates), CHECKPOINT_INTERVAL):

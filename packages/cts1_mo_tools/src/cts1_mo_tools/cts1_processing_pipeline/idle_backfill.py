@@ -188,6 +188,9 @@ class IdleBackfill:
                 workers=self.workers,
                 temp_dir=self.temp_dir,
                 tools=self.tools,
+                on_progress=lambda done, total: reporter.set_progress(
+                    done, total, "observations"
+                ),
             )
         except Exception:  # noqa: BLE001
             logger.exception(f"Daemon: {label} failed; moving on")

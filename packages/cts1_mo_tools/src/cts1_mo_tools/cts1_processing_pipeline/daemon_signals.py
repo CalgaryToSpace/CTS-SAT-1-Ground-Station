@@ -32,6 +32,7 @@ __all__ = [
     "TRIGGER_REQUEST_FILENAME",
     "DaemonState",
     "DaemonStatus",
+    "Progress",
     "StatusReporter",
     "TriggerRequest",
     "clear_trigger_request",
@@ -49,7 +50,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Self
+from typing import TYPE_CHECKING, Any, Self, cast
 
 from loguru import logger
 
@@ -204,6 +205,47 @@ def clear_trigger_request(data_dir: Path) -> None:
 
 
 @dataclass(frozen=True, slots=True)
+class Progress:
+    """How far through the current step the daemon is, e.g. 47 of 52
+    observations decoded. Approximate: it counts work items finished, not
+    time, and items vary a lot in how long they take.
+    """
+
+    done: int
+    total: int
+    unit: str = "items"
+    """What's being counted, plural -- e.g. "observations"."""
+
+    def __str__(self) -> str:
+        return f"{self.done}/{self.total} {self.unit}"
+
+    @property
+    def fraction(self) -> float:
+        """`done / total`, clamped to [0, 1]; 0 for an empty total."""
+        if self.total <= 0:
+            return 0.0
+        return min(max(self.done / self.total, 0.0), 1.0)
+
+    def to_json(self) -> dict[str, Any]:
+        return {"done": self.done, "total": self.total, "unit": self.unit}
+
+    @classmethod
+    def from_json(cls, value: Any) -> Progress | None:
+        """Parse what `to_json` wrote, or None if `value` isn't that."""
+        if not isinstance(value, dict):
+            return None
+        fields = cast("dict[str, Any]", value)
+        done = fields.get("done")
+        total = fields.get("total")
+        unit = fields.get("unit")
+        if not isinstance(done, int) or not isinstance(total, int):
+            return None
+        return cls(
+            done=done, total=total, unit=unit if isinstance(unit, str) else "items"
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class DaemonStatus:
     """The daemon's last-published state, as read from `daemon_status.json`."""
 
@@ -224,6 +266,10 @@ class DaemonStatus:
     pid: int | None = None
     """The daemon process's PID, for matching a status file against a
     process when debugging a deployment."""
+
+    progress: Progress | None = None
+    """How far through the current step the daemon is, for steps that
+    report it (step 1's observation decoding). None otherwise."""
 
     @property
     def is_live(self) -> bool:
@@ -253,6 +299,7 @@ def write_status(  # noqa: PLR0913
     next_run_at: datetime | None = None,
     last_run_finished_at: datetime | None = None,
     pid: int | None = None,
+    progress: Progress | None = None,
 ) -> None:
     """Publish `state` to `daemon_status.json` for the web UI to read."""
     _write_json_atomic(
@@ -266,6 +313,7 @@ def write_status(  # noqa: PLR0913
                 last_run_finished_at.isoformat() if last_run_finished_at else None
             ),
             "pid": pid if pid is not None else os.getpid(),
+            "progress": progress.to_json() if progress is not None else None,
         },
     )
 
@@ -294,6 +342,7 @@ def read_status(data_dir: Path) -> DaemonStatus | None:
         next_run_at=_parse_timestamp(payload.get("next_run_at")),
         last_run_finished_at=_parse_timestamp(payload.get("last_run_finished_at")),
         pid=pid if isinstance(pid, int) else None,
+        progress=Progress.from_json(payload.get("progress")),
     )
 
 
@@ -334,6 +383,7 @@ class StatusReporter:
         self._detail: str | None = None
         self._next_run_at: datetime | None = None
         self._last_run_finished_at: datetime | None = None
+        self._progress: Progress | None = None
 
     def set(
         self,
@@ -346,7 +396,8 @@ class StatusReporter:
 
         Leaving `PROCESSING` stamps `last_run_finished_at`, so the web UI
         can show when the last run ended without the daemon having to track
-        that separately.
+        that separately. Clears any progress from `set_progress`, which
+        belonged to whatever the previous state was doing.
         """
         with self._lock:
             if self._state is DaemonState.PROCESSING and state is not (
@@ -356,6 +407,19 @@ class StatusReporter:
             self._state = state
             self._detail = detail
             self._next_run_at = next_run_at
+            self._progress = None
+        self._publish()
+
+    def set_progress(self, done: int, total: int, unit: str = "items") -> None:
+        """Publish how far through the current state's work the daemon is,
+        keeping the state and detail as they are.
+
+        Written straight away rather than left for the next heartbeat, so
+        the web UI's count doesn't lag a few items behind -- the file is
+        tiny, and items take seconds each, so that's no real extra I/O.
+        """
+        with self._lock:
+            self._progress = Progress(done=done, total=total, unit=unit)
         self._publish()
 
     def start(self) -> None:
@@ -378,6 +442,7 @@ class StatusReporter:
             self._state = DaemonState.STOPPED
             self._detail = None
             self._next_run_at = None
+            self._progress = None
         self._publish()
 
     def __enter__(self) -> Self:
@@ -405,6 +470,7 @@ class StatusReporter:
                 detail = self._detail
                 next_run_at = self._next_run_at
                 last_run_finished_at = self._last_run_finished_at
+                progress = self._progress
             try:
                 write_status(
                     self._data_dir,
@@ -412,6 +478,7 @@ class StatusReporter:
                     detail=detail,
                     next_run_at=next_run_at,
                     last_run_finished_at=last_run_finished_at,
+                    progress=progress,
                 )
             except OSError as exc:
                 logger.warning(f"Could not write daemon status file: {exc}")
