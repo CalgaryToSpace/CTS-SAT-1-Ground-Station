@@ -363,7 +363,6 @@ def _build_single_entries(
 
 def _build_interval_entries(
         ctx: _RowContext,
-        row_index: int,
 ) -> list[tuple[int, str]]:
     tsexec_start = parse_time(
         ctx.mission_date, ctx.mission_start, ctx.row["tsexec Start (UTC)"]
@@ -430,7 +429,7 @@ def build_agenda(
             random_commands.extend(random_entries)
 
         elif mode == "interval":
-            agenda.extend(_build_interval_entries(ctx, row_index))
+            agenda.extend(_build_interval_entries(ctx))
             if (row["Repeat"].strip() != "") or (row["Random"].strip() != ""):
                 logger.warning(
                     f"Repeat and random values are ignored for interval mode for"
