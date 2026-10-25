@@ -8,6 +8,7 @@ from cts1_mo_tools.cts1_processing_pipeline.web_ui.mpi_collections import (
     collections_csv_bytes,
     collections_xlsx_bytes,
     strong_signal_counts_text,
+    strong_signals_downlinked_text,
 )
 
 _COLLECTIONS = pl.DataFrame(
@@ -53,3 +54,14 @@ def test_analyses_of_a_collection_puts_the_used_one_first() -> None:
     )
     assert [a["analysis_version"] for a in matching] == [2, 1]
     assert analyses_of(analyses, {"analysis_file": None, "analysis_action": None}) == []
+
+
+def test_strong_signals_downlinked_text() -> None:
+    signals = [{"frames": [5, 6]}, {"frames": [9, 11]}, {"frames": [50, 50]}, {}]
+    assert strong_signals_downlinked_text(signals, "[2,1,0,3]") == [
+        "yes (2/2 frames)",
+        "partly (1/3 frames)",
+        "no (0/1 frames)",
+        "yes (3 frames)",
+    ]
+    assert strong_signals_downlinked_text(signals[:1], None) == ["unknown"]

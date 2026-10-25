@@ -195,14 +195,26 @@ def _analysis_details(analysis: dict[str, Any]) -> None:
     if isinstance(strong_signals, list) and strong_signals:
         ui.label(f"Strong signals ({len(strong_signals):,})").classes("font-bold mt-2")
         signals = cast("list[Any]", strong_signals)
+        downlinked = mpi_collections.strong_signals_downlinked_text(
+            signals, analysis.get("analysis_strong_signal_frames_downlinked")
+        )
         if all(isinstance(signal, dict) for signal in signals):
             keys = list(dict.fromkeys(k for signal in signals for k in signal))
             ui.table(
                 columns=[
                     {"name": k, "label": k, "field": k, "align": "left"} for k in keys
+                ]
+                + [
+                    {
+                        "name": "_downlinked",
+                        "label": "Downlinked",
+                        "field": "_downlinked",
+                        "align": "left",
+                    }
                 ],
                 rows=[
-                    {k: _property_value(signal.get(k)) for k in keys} | {"_i": i}
+                    {k: _property_value(signal.get(k)) for k in keys}
+                    | {"_i": i, "_downlinked": downlinked[i]}
                     for i, signal in enumerate(signals)
                 ],
                 row_key="_i",
@@ -218,7 +230,7 @@ def _show_analyses(collection: dict[str, Any], analyses: pl.DataFrame) -> None:
         ui.notify(
             "No on-board analysis for this collection."
             if collection.get("analysis_action") is None
-            else "No analysis details -- rerun step 6 to write mpi_analyses.parquet."
+            else "No analysis details -- rerun step 7 to write mpi_analyses.parquet."
         )
         return
     with ui.dialog() as dialog, ui.card().classes("w-full max-w-5xl"):
@@ -310,7 +322,7 @@ def _collections_card(
         if collections.is_empty():
             ui.label(
                 "No MPI collections yet -- run the pipeline (step_1..step_3, "
-                "then step_6) first."
+                "then step_6 and step_7) first."
             ).classes("text-caption text-grey mt-2")
             return
 

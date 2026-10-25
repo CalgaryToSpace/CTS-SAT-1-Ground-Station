@@ -17,6 +17,7 @@ Usage (uv):
     uv run cts1_processing_pipeline step_4
     uv run cts1_processing_pipeline step_5
     uv run cts1_processing_pipeline step_6
+    uv run cts1_processing_pipeline step_7
     uv run cts1_processing_pipeline daemon
     uv run cts1_processing_pipeline daemon --start "3 days" --interval 5
     uv run cts1_processing_pipeline daemon --idle-backfill
@@ -33,6 +34,7 @@ __all__ = ["Args", "main"]
 import os
 import shlex
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -53,6 +55,9 @@ from .step_5_reassemble_tcmd_responses import (
     pipeline as step_5_reassemble_tcmd_responses,
 )
 from .step_6_extract_mpi_frames import pipeline as step_6_extract_mpi_frames
+from .step_7_summarize_mpi_collections import (
+    pipeline as step_7_summarize_mpi_collections,
+)
 
 DEFAULT_DATA_DIR = step_0_list_observations.DEFAULT_DATA_DIR
 
@@ -140,15 +145,20 @@ class Step5Args:
 @dataclass(frozen=True, slots=True)
 class Step6Args:
     """Step 6: extract MPI telemetry frames, with interpolated collection
-    times, from bulk file downlinks in everything_decoded into mpi_frames,
-    and summarize them per MPI collection (merged with any analyze_mpi_data
-    responses from reassembled_tcmd_responses) into mpi_collections."""
+    times, from bulk file downlinks in everything_decoded into mpi_frames."""
+
+
+@dataclass(frozen=True, slots=True)
+class Step7Args:
+    """Step 7: collect every analyze_mpi_data response from
+    reassembled_tcmd_responses into mpi_analyses, and summarize mpi_frames
+    per MPI collection (merged with those analyses) into mpi_collections."""
 
 
 @dataclass(frozen=True, slots=True)
 class DaemonArgs:
-    """Daemon: run steps 0-6 continuously -- an initial backfill of
-    `--start`, then a full steps 0-6 rerun every `--interval` minutes."""
+    """Daemon: run steps 0-7 continuously -- an initial backfill of
+    `--start`, then a full steps 0-7 rerun every `--interval` minutes."""
 
     norad_id: Annotated[str, tyro.conf.Positional] = "69015"
     """NORAD catalog ID of the satellite (default: 69015, CTS-SAT-1)."""
@@ -198,8 +208,24 @@ Command = (
     | Annotated[Step4Args, tyro.conf.subcommand(name="step_4", prefix_name=False)]
     | Annotated[Step5Args, tyro.conf.subcommand(name="step_5", prefix_name=False)]
     | Annotated[Step6Args, tyro.conf.subcommand(name="step_6", prefix_name=False)]
+    | Annotated[Step7Args, tyro.conf.subcommand(name="step_7", prefix_name=False)]
     | Annotated[DaemonArgs, tyro.conf.subcommand(name="daemon", prefix_name=False)]
 )
+
+
+# The steps that take nothing but `--data-dir` (the parquet-in-parquet-out
+# ones), by their args type.
+_DATA_DIR_ONLY_STEPS: dict[
+    type[Step2Args | Step3Args | Step4Args | Step5Args | Step6Args | Step7Args],
+    Callable[..., None],
+] = {
+    Step2Args: step_2_deduplicate_packets.run,
+    Step3Args: step_3_decode_packets.run,
+    Step4Args: step_4_detect_satellite_events.run,
+    Step5Args: step_5_reassemble_tcmd_responses.run,
+    Step6Args: step_6_extract_mpi_frames.run,
+    Step7Args: step_7_summarize_mpi_collections.run,
+}
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -266,16 +292,11 @@ def main() -> None:
                 force_rerun=args.command.force_rerun_decoders,
                 tools=args.command.tools,
             )
-        elif isinstance(args.command, Step2Args):
-            step_2_deduplicate_packets.run(data_dir=args.data_dir)
-        elif isinstance(args.command, Step3Args):
-            step_3_decode_packets.run(data_dir=args.data_dir)
-        elif isinstance(args.command, Step4Args):
-            step_4_detect_satellite_events.run(data_dir=args.data_dir)
-        elif isinstance(args.command, Step5Args):
-            step_5_reassemble_tcmd_responses.run(data_dir=args.data_dir)
-        elif isinstance(args.command, Step6Args):
-            step_6_extract_mpi_frames.run(data_dir=args.data_dir)
+        elif isinstance(
+            args.command,
+            (Step2Args, Step3Args, Step4Args, Step5Args, Step6Args, Step7Args),
+        ):
+            _DATA_DIR_ONLY_STEPS[type(args.command)](data_dir=args.data_dir)
         elif isinstance(args.command, DaemonArgs):  # pyright: ignore[reportUnnecessaryIsInstance]
             daemon.run(
                 norad_id=args.command.norad_id,
