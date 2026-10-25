@@ -337,14 +337,13 @@ def _build_single_entries(
     ctx: _RowContext,
     repeat: int,
     random_repeat: int,
+    row_index: int,
 ) -> tuple[list[tuple[int, str]], list[str]]:
-    tssent = parse_time(ctx.mission_date, ctx.mission_start, ctx.row["tssent (UTC)"])
-    if tssent is None:
-        msg = f"Missing tssent for {ctx.cmd}"
-        raise ValueError(msg)
-    if tssent <= datetime.now(UTC):
-        logger.warning(f"tssent for {ctx.cmd} is in the past: {tssent.isoformat()}")
+    """Unique tssent values are generated using the pass start time, incremented by 1 s
+    for each row. Error handling is handled in _parse_mission_start()."""
+    tssent = ctx.mission_start + timedelta(seconds=row_index)
 
+    """Schedule custom tsexec values"""
     tsexec = parse_time(
         ctx.mission_date, ctx.mission_start, ctx.row["tsexec Start (UTC)"]
     )
@@ -362,7 +361,10 @@ def _build_single_entries(
     return entries, random_entries
 
 
-def _build_interval_entries(ctx: _RowContext) -> list[tuple[int, str]]:
+def _build_interval_entries(
+        ctx: _RowContext,
+        row_index: int,
+) -> list[tuple[int, str]]:
     tsexec_start = parse_time(
         ctx.mission_date, ctx.mission_start, ctx.row["tsexec Start (UTC)"]
     )
@@ -407,7 +409,7 @@ def build_agenda(
     ] = []  # Tuple of (epoch_ms of tssent, the formatted command line)
     random_commands: list[str] = []
 
-    for row in rows:
+    for row_index, row in enumerate(rows):
         mode = row["Mode"].strip().lower()
         cmd = substitute(row["Telecommand"], mission_date)
         resp = substitute(row["resp_fname"], mission_date)
@@ -422,12 +424,13 @@ def build_agenda(
         if mode == "single":
             repeat = parse_repeat_random(row["Repeat"], cmd)
             random_repeat = parse_repeat_random(row["Random"], cmd)
-            entries, random_entries = _build_single_entries(ctx, repeat, random_repeat)
+            entries, random_entries = _build_single_entries(ctx, repeat, random_repeat,
+                                                             row_index)
             agenda.extend(entries)
             random_commands.extend(random_entries)
 
         elif mode == "interval":
-            agenda.extend(_build_interval_entries(ctx))
+            agenda.extend(_build_interval_entries(ctx, row_index))
             if (row["Repeat"].strip() != "") or (row["Random"].strip() != ""):
                 logger.warning(
                     f"Repeat and random values are ignored for interval mode for"
