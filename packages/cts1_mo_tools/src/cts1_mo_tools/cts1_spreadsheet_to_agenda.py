@@ -362,7 +362,7 @@ def _build_single_entries(
 
 
 def _build_interval_entries(
-        ctx: _RowContext,
+    ctx: _RowContext,
 ) -> list[tuple[int, str]]:
     tsexec_start = parse_time(
         ctx.mission_date, ctx.mission_start, ctx.row["tsexec Start (UTC)"]
@@ -423,8 +423,9 @@ def build_agenda(
         if mode == "single":
             repeat = parse_repeat_random(row["Repeat"], cmd)
             random_repeat = parse_repeat_random(row["Random"], cmd)
-            entries, random_entries = _build_single_entries(ctx, repeat, random_repeat,
-                                                             row_index)
+            entries, random_entries = _build_single_entries(
+                ctx, repeat, random_repeat, row_index
+            )
             agenda.extend(entries)
             random_commands.extend(random_entries)
 
