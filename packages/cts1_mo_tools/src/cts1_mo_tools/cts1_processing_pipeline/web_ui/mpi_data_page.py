@@ -38,15 +38,6 @@ def _collection_timeline_card(timeline: pl.DataFrame | None) -> None:
     """`timeline` is None while it's still loading."""
     with ui.card().classes("w-full"):
         ui.label("Collection Timeline").classes("text-lg font-bold")
-        ui.label(
-            "When the satellite collected each packet/frame, by its own clock "
-            "-- not when it was downlinked. Beacons: the OBC's timestamp when "
-            "it built the beacon (ones stamped before launch, from before its "
-            "clock was first set, are left out). MPI frames: interpolated (or "
-            "extrapolated) from the timestamps in the MPI data file. GNSS "
-            "samples: the receiver's solution time. Scroll or drag the slider "
-            "to zoom."
-        ).classes("text-caption text-grey")
 
         if timeline is None:
             with ui.row().classes("items-center gap-2 p-2"):
@@ -351,30 +342,6 @@ def _collections_card(
             ui.label("MPI Collections").classes("text-lg font-bold")
             if collections is not None and not collections.is_empty():
                 _export_buttons(collections)
-        ui.label(
-            "One row per MPI recording, newest first. On-Board Analysis: the "
-            "satellite's own summary of the whole MPI data file on board (an "
-            "analyze_mpi_data telecommand response), when one was received. "
-            "Frames Received: only the frames actually downlinked and timed so "
-            "far -- expected/missing are from the first to the last frame "
-            "counter present, so frames lost before the first or after the "
-            "last aren't counted. Start/end come from the analysis's "
-            "earliest/latest timestamps when there is one (Times From: "
-            "analyze_mpi_data_v<N>), otherwise the first/last frame received "
-            "(Times From: frames). Without an analysis, a new collection "
-            "starts 20 minutes after the last one's first frame, or when the "
-            "frame counter drops (a new recording, or the counter wrapping "
-            "around). Strong Signals: the count at each DN threshold the file "
-            "was analyzed with. Orbit: where the satellite was at the start/end, "
-            "and whether it was in sunlight throughout (yes), in Earth's shadow "
-            "throughout (no), or partly -- SGP4-propagated from the TLE "
-            "published right before each time. Integration period(s), time "
-            "sync source(s) (what the satellite's clock was last set from when "
-            "the frames were timestamped), time sync age (how long the clock "
-            "had gone since it was set, at the start -- flagged ⚠ if it was "
-            "set again during the recording) and MPI temperature are from the "
-            "frames received. Click a row for every analysis of its file."
-        ).classes("text-caption text-grey")
 
         if collections is None or analyses is None:
             with ui.row().classes("items-center gap-2 p-2"):

@@ -52,10 +52,11 @@ MAX_COLUMN_WIDTH_PX = 420
 # given a ~100-character starting width instead of the cap above.
 GENERAL_MESSAGE_WIDTH_PX = 760
 
-# Step 1/2 decoding/deduplication bookkeeping -- rarely what anyone is
-# looking for, so shoved to the far right of the grid (in this order) rather
-# than crowding out the decoded fields.
+# Step 1/2 decoding/deduplication bookkeeping (and the derived boringness)
+# -- rarely what anyone is looking for, so shoved to the far right of the
+# grid (in this order) rather than crowding out the decoded fields.
 METADATA_COLUMNS = (
+    "boringness",
     "packet_id",
     "packet_ids",  # the reassembled-TCMD view's stand-in for packet_id
     "data_length_bytes",
@@ -199,11 +200,6 @@ def _filters_section(
 ) -> None:
     with ui.card().classes("w-full"):
         ui.label("Filters").classes("text-lg font-bold")
-        ui.label(
-            "Applied server-side before any rows are sent to the browser. "
-            "Press Enter in any text box (or Search) to apply; packet type, "
-            "boringness and rows/page apply immediately."
-        ).classes("text-caption text-grey")
 
         def _set_and_search(attr: str, value: object) -> None:
             setattr(state, attr, value)
@@ -568,16 +564,6 @@ def build_packet_browser_page(data_dir: Path) -> None:  # noqa: C901, PLR0915
                 ui.button(
                     "Export Excel", icon="download", on_click=_export_excel
                 ).props("outline")
-        ui.label(
-            "Every decoded packet, every column -- filtering and sorting "
-            "happen server-side, so this stays responsive no matter how much "
-            "history has piled up. Drag to select text in any cell to copy "
-            "it, or click a row to see (and copy) all of its fields. Routine "
-            '"Boring"/"Very Boring" messages are hidden unless picked in the '
-            "Boringness filter. With "
-            '"Reassemble TCMD responses" on, multi-packet telecommand '
-            "responses show as one row each."
-        ).classes("text-caption text-grey")
 
         _filters_section(
             state,

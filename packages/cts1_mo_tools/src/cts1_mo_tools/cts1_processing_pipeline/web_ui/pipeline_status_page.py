@@ -382,12 +382,6 @@ def _daemon_section(data_dir: Path) -> None:
 def _decoder_tools_table(stats: list[status_data.DecoderToolStats]) -> None:
     with ui.card().classes("w-full"):
         ui.label("Decoder Tool Scoreboard").classes("text-lg font-bold")
-        ui.label(
-            '"Distinct Packets" is each tool\'s share of every distinct '
-            "(post-dedup) packet ever seen -- the meaningful score, since "
-            '"Raw Decodes" double-counts the same packet across every '
-            "ground station that caught it."
-        ).classes("text-caption text-grey")
         if not stats:
             ui.label("No decoder runs recorded yet.").classes("text-caption text-grey")
             return
