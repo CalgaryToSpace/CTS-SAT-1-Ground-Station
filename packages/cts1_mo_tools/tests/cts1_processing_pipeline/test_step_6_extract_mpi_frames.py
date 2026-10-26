@@ -12,7 +12,6 @@ from cts1_mo_tools.cts1_processing_pipeline.step_6_extract_mpi_frames.pipeline i
     compute_mpi_frames,
     compute_mpi_frames_with_outcomes,
     mpi_crc16,
-    summarize_mpi_collections,
 )
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
@@ -469,32 +468,6 @@ def test_collection_ends_after_twenty_minutes() -> None:
     assert _collection_starts(frames) == [(_RECORDED_AT, 0), (later, 40_000)]
 
 
-def test_collection_summary_counts_frames_and_largest_gap() -> None:
-    second_start = _RECORDED_AT + timedelta(minutes=5)
-    present = [0, 1, 2, 6, 7, 9, 10]  # Gaps of 3 (3..5) and 1 (8).
-    frames = assign_mpi_collections(
-        _frames((_RECORDED_AT, present), (second_start, [0, 1, 2]))
-    )
-    summary = summarize_mpi_collections(frames)
-
-    first, second = summary.rows(named=True)
-    assert first == {
-        "collection_started_at": _RECORDED_AT,
-        "collection_ended_at": _RECORDED_AT + timedelta(milliseconds=31 * 6),
-        "frames_present": 7,
-        "frames_expected": 11,
-        "frames_missing": 4,
-        "first_frame_counter": 0,
-        "last_frame_counter": 10,
-        "largest_gap_frames": 3,
-        "largest_gap_started_at": _RECORDED_AT + timedelta(milliseconds=31 * 2),
-        "largest_gap_duration_ms": 31,
-    }
-    assert second["frames_missing"] == 0
-    assert second["largest_gap_frames"] == 0
-    assert second["largest_gap_duration_ms"] is None
-
-
 def test_full_downlink_is_one_collection() -> None:
     recording = _Recording()
     result = compute_mpi_frames(pl.DataFrame(_downlink(recording)))
@@ -502,12 +475,4 @@ def test_full_downlink_is_one_collection() -> None:
         result["collected_at"].min()
     ]
     assert set(result["collection_first_frame_counter"]) == {0}
-    (summary,) = summarize_mpi_collections(result).rows(named=True)
-    assert summary["frames_present"] == summary["frames_expected"] == result.height
-    assert summary["frames_missing"] == 0
-
-
-def test_empty_frames_summarize_to_empty_collections() -> None:
-    summary = summarize_mpi_collections(compute_mpi_frames(pl.DataFrame()))
-    assert summary.height == 0
-    assert summary.schema["collection_started_at"] == pl.Datetime("us", "UTC")
+    assert result["frame_counter"].n_unique() == result.height

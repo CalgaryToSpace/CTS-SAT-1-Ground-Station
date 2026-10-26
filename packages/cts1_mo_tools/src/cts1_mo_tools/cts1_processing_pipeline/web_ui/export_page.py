@@ -47,7 +47,17 @@ flowchart LR
     step5 --> reassembled_tcmd_responses[("reassembled_tcmd_responses")]
     everything_decoded --> step6["Step 6\\nExtract MPI Frames"]
     step6 --> mpi_frames[("mpi_frames")]
-    step6 --> mpi_collections[("mpi_collections")]
+    huggingface[("Hugging Face\\nSpace-Track TLEs")] --> step7["Step 7\\nFetch TLEs"]
+    step7 --> tle_history[("tle_history")]
+    mpi_frames --> step8["Step 8\\nSummarize MPI Collections"]
+    tle_history --> step8
+    reassembled_tcmd_responses --> step8
+    step8 --> mpi_collections[("mpi_collections")]
+    step8 --> mpi_analyses[("mpi_analyses")]
+    %% Invisible links holding step 7 (which only step 8 reads) at the far
+    %% left with step 0 -- the layout otherwise pulls it right, next to step 8.
+    huggingface ~~~ step0
+    step7 ~~~ raw_observations
 """
 
 RANGE_INPUT_MASK = "####-##-## ##:##:##"
@@ -118,12 +128,6 @@ def _tables_section(selected: dict[str, bool]) -> None:
 def _packet_type_filter(selected_types: dict[str, bool]) -> None:
     with ui.card().classes("w-full"):
         ui.label("Packet type filter").classes("text-lg font-bold")
-        ui.label(
-            "Only applies to tables with a packet_type column (currently "
-            "just everything_decoded) -- ignored for every other table. "
-            "Leave every box checked (or uncheck them all) to include "
-            "every packet type."
-        ).classes("text-caption text-grey")
         with ui.row().classes("gap-4 flex-wrap mt-2"):
             for packet_type in export_tables.PACKET_TYPES:
                 ui.checkbox(
@@ -138,13 +142,6 @@ def _packet_type_filter(selected_types: dict[str, bool]) -> None:
 def _time_filter_section(time_state: dict[str, str | None]) -> None:
     with ui.card().classes("w-full"):
         ui.label("Time range filter").classes("text-lg font-bold")
-        ui.label(
-            "Applied to each table's own timestamp column -- received_at "
-            "for most tables, start for raw_observations, window_start for "
-            "observation_listing_windows, started_at for "
-            "observation_listing_history, run_at for decoder_runs, "
-            "detected_at for satellite_events_from_beacons."
-        ).classes("text-caption text-grey")
 
         start_input: ui.input
         end_input: ui.input
@@ -217,6 +214,10 @@ def _options_section(options: _ExportOptions) -> None:
                 "Zip output",
                 value=options.zip_output,
                 on_change=lambda e: setattr(options, "zip_output", bool(e.value)),
+            ).tooltip(
+                "CSV and Parquet write one file per table -- selecting more "
+                "than one of them requires this. Excel/SQLite/DuckDB always "
+                "bundle every selected table into a single file."
             )
             ui.checkbox(
                 "Drop irrelevant columns (all-null after filtering)",
@@ -236,11 +237,6 @@ def _options_section(options: _ExportOptions) -> None:
                 "observation_ids) in distinct_packets_over_time and "
                 "everything_decoded."
             )
-        ui.label(
-            "CSV and Parquet write one file per table -- selecting more "
-            'than one of them requires "Zip output". Excel/SQLite/DuckDB '
-            "always bundle every selected table into a single file."
-        ).classes("text-caption text-grey mt-2")
 
 
 def build_export_page(data_dir: Path) -> None:

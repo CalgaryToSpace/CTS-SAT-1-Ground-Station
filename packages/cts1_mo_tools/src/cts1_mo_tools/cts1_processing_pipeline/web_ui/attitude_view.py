@@ -229,13 +229,14 @@ class AttitudeView:
                             self._readout[name] = ui.label().classes(
                                 "text-base font-medium font-mono"
                             )
-                    ui.label(
+                    ui.icon("info_outline", size="sm").classes(
+                        "text-grey cursor-help"
+                    ).tooltip(
                         "Orbit frame: +X ram, +Z nadir, -Y orbit normal. "
-                        "Euler 3-2-1 "
-                        "(yaw, pitch, roll). Body rates drawn in body axes; "
-                        "yellow arrow = angular velocity vector (log-scaled). "
-                        "Drag to orbit the camera."
-                    ).classes("text-caption text-grey max-w-xs")
+                        "Euler 3-2-1 (yaw, pitch, roll). Body rates drawn in "
+                        "body axes; yellow arrow = angular velocity vector "
+                        "(log-scaled). Drag to orbit the camera."
+                    )
         self._scene.move_camera(3.4, -4.6, 2.6, 0.3, 0, -0.2, duration=0)
 
     def _on_expand(self, e: events.ValueChangeEventArguments) -> None:

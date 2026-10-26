@@ -35,6 +35,12 @@ from cts1_mo_tools.cts1_processing_pipeline.step_5_reassemble_tcmd_responses imp
 from cts1_mo_tools.cts1_processing_pipeline.step_6_extract_mpi_frames import (
     pipeline as step_6_pipeline,
 )
+from cts1_mo_tools.cts1_processing_pipeline.step_7_fetch_tle_history import (
+    pipeline as step_7_pipeline,
+)
+from cts1_mo_tools.cts1_processing_pipeline.step_8_summarize_mpi_collections import (
+    pipeline as step_8_pipeline,
+)
 from loguru import logger
 
 # ---------------------------------------------------------------------------
@@ -362,7 +368,7 @@ def test_sleeping_publishes_a_next_run_time(tmp_path: Path) -> None:
 def test_every_step_announces_itself(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Each step logs a "Starting step N/6: <name> -- <run label>." line
+    """Each step logs a "Starting step N/8: <name> -- <run label>." line
     before it runs, and publishes the same name to the web UI's status
     indicator.
     """
@@ -378,6 +384,8 @@ def test_every_step_announces_itself(
         step_4_pipeline,
         step_5_pipeline,
         step_6_pipeline,
+        step_7_pipeline,
+        step_8_pipeline,
     ):
         monkeypatch.setattr(module, "run", do_nothing)
 
@@ -411,10 +419,10 @@ def test_every_step_announces_itself(
 
     log = "\n".join(messages)
     for number, name in daemon.STEP_NAMES.items():
-        assert f"Starting step {number}/6: {name} -- backfill." in log
+        assert f"Starting step {number}/8: {name} -- backfill." in log
         assert f"backfill: step {number} ({name})" in details
 
-    assert "Finished steps 0-6 -- backfill." in log
+    assert "Finished steps 0-8 -- backfill." in log
     # In order, and once each.
     starts = [m for m in messages if m.startswith("Starting step ")]
     assert [m.split("/")[0] for m in starts] == [

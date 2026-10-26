@@ -101,10 +101,9 @@ distinct CRC-valid frame received but not kept is tallied by why (see
 
 Frames are then grouped into MPI collections (`assign_mpi_collections`):
 runs of frames from one recording, at most `MPI_COLLECTION_MAX_DURATION`
-long, each identified by its first frame (time and counter). A second
-output, `mpi_collections.parquet`, summarizes each one: its start/end,
-frames present vs expected from the counters, and its largest gap
-(`summarize_mpi_collections`).
+long, each identified by its first frame (time and counter). Step 8
+summarizes each collection, alongside the satellite's own analyses of its
+MPI data files.
 
 Like steps 2-5, this step is parquet-in-parquet-out and reprocesses from
 scratch on every run.
@@ -114,7 +113,6 @@ from __future__ import annotations
 
 __all__ = [
     "BLOCK_DURATION_TOLERANCE",
-    "COLLECTIONS_OUTPUT_FILENAME",
     "DEFAULT_DATA_DIR",
     "MAX_BRIDGED_CHUNKS",
     "MPI_BUFFER_LEN",
@@ -128,7 +126,6 @@ __all__ = [
     "compute_mpi_frames_with_outcomes",
     "mpi_crc16",
     "run",
-    "summarize_mpi_collections",
 ]
 
 import binascii
@@ -163,7 +160,6 @@ if TYPE_CHECKING:
 
 DEFAULT_DATA_DIR = step_3_pipeline.DEFAULT_DATA_DIR
 OUTPUT_FILENAME = "mpi_frames.parquet"
-COLLECTIONS_OUTPUT_FILENAME = "mpi_collections.parquet"
 
 MPI_SYNC = b"\x0c\xff\xff\x0c"
 # Bytes of MPI data the firmware writes between two timestamp JSONs.
@@ -1250,75 +1246,6 @@ def assign_mpi_collections(frames: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-_COLLECTIONS_SCHEMA = {
-    "collection_started_at": pl.Datetime("us", "UTC"),
-    "collection_ended_at": pl.Datetime("us", "UTC"),
-    "frames_present": pl.Int64,
-    # From the counters: every frame from the first present to the last.
-    "frames_expected": pl.Int64,
-    "frames_missing": pl.Int64,
-    "first_frame_counter": pl.Int64,
-    "last_frame_counter": pl.Int64,
-    # The longest run of missing frames (by counter), when there is one: how
-    # many frames, the time of the frame before it, and the time between
-    # the frames either side of it.
-    "largest_gap_frames": pl.Int64,
-    "largest_gap_started_at": pl.Datetime("us", "UTC"),
-    "largest_gap_duration_ms": pl.Int64,
-}
-
-
-def summarize_mpi_collections(frames: pl.DataFrame) -> pl.DataFrame:
-    """One row per MPI collection in `frames` (as labelled by
-    `assign_mpi_collections`), oldest first -- see `_COLLECTIONS_SCHEMA`.
-    """
-    if frames.is_empty():
-        return pl.DataFrame(schema=_COLLECTIONS_SCHEMA)
-    collection = "collection_started_at"
-    gap_frames = pl.col("frame_counter").diff().over(collection) - 1
-    has_gap = gap_frames > 0
-    gaps = frames.sort(collection, "frame_counter").with_columns(
-        gap_frames=pl.when(has_gap).then(gap_frames),
-        gap_started_at=pl.when(has_gap).then(
-            pl.col("collected_at").shift().over(collection)
-        ),
-        gap_ended_at=pl.when(has_gap).then(pl.col("collected_at")),
-    )
-
-    def at_largest_gap(column: str) -> pl.Expr:
-        return (
-            pl.col(column)
-            .sort_by("gap_frames", descending=True, nulls_last=True)
-            .first()
-        )
-
-    return (
-        gaps.group_by(collection)
-        .agg(
-            collection_ended_at=pl.col("collected_at").max(),
-            frames_present=pl.len(),
-            first_frame_counter=pl.col("frame_counter").min(),
-            last_frame_counter=pl.col("frame_counter").max(),
-            largest_gap_frames=pl.col("gap_frames").max().fill_null(0),
-            largest_gap_started_at=at_largest_gap("gap_started_at"),
-            largest_gap_ended_at=at_largest_gap("gap_ended_at"),
-        )
-        .with_columns(
-            frames_expected=pl.col("last_frame_counter")
-            - pl.col("first_frame_counter")
-            + 1,
-            largest_gap_duration_ms=(
-                pl.col("largest_gap_ended_at") - pl.col("largest_gap_started_at")
-            ).dt.total_milliseconds(),
-        )
-        .with_columns(
-            frames_missing=pl.col("frames_expected") - pl.col("frames_present")
-        )
-        .select(pl.col(name).cast(dtype) for name, dtype in _COLLECTIONS_SCHEMA.items())
-        .sort(collection)
-    )
-
-
 def _outcome_table(outcomes: Counter[str]) -> pl.DataFrame:
     """One row per outcome: kept ones first, then the biggest losses."""
     ordered = sorted(
@@ -1486,8 +1413,7 @@ def _write_parquet_atomic(df: pl.DataFrame, path: Path) -> None:
 
 
 def run(*, data_dir: Path = DEFAULT_DATA_DIR) -> None:
-    """Recompute `mpi_frames.parquet` and `mpi_collections.parquet` from
-    step 3's output.
+    """Recompute `mpi_frames.parquet` from step 3's output.
 
     Reads `everything_decoded.parquet` from `data_dir` (where step 3
     writes it) and writes the result back into the same directory --
@@ -1520,8 +1446,6 @@ def run(*, data_dir: Path = DEFAULT_DATA_DIR) -> None:
 
     out_path = data_dir / OUTPUT_FILENAME
     _write_parquet_atomic(result_df, out_path)
-    collections_df = summarize_mpi_collections(result_df)
-    _write_parquet_atomic(collections_df, data_dir / COLLECTIONS_OUTPUT_FILENAME)
     logger.info(f"MPI chunk linking/anchoring stats: {dict(sorted(tally.items()))}")
     received = tally["frames_received"]
     with pl.Config(
@@ -1535,10 +1459,6 @@ def run(*, data_dir: Path = DEFAULT_DATA_DIR) -> None:
         logger.info(
             f"What became of the {received:,} distinct CRC-valid MPI frames "
             f"received:\n{_outcome_table(outcomes)}"
-        )
-        logger.info(
-            f"{collections_df.height:,} MPI collection(s):\n"
-            f"{collections_df.drop('largest_gap_started_at')}"
         )
     utilized = f"{result_df.height / received:.1%}" if received else "n/a"
     logger.info(

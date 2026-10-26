@@ -504,11 +504,6 @@ def build_overpasses_page() -> None:  # noqa: C901, PLR0915
 
         with ui.card().classes("w-full"):
             ui.label("Notifications").classes("text-lg font-bold")
-            ui.label(
-                "Tick a pass's Notify box to get a browser notification before "
-                "its AOS, and again at AOS. Keep this page open (a background "
-                "tab is fine) for notifications to arrive."
-            ).classes("text-caption text-grey")
             with ui.row().classes("gap-4 flex-wrap items-center mt-2"):
                 ui.number(
                     "Minutes before AOS", min=0, max=120, step=1, format="%.0f"

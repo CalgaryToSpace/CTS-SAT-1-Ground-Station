@@ -63,7 +63,7 @@ def _events_table(events: pl.DataFrame) -> None:
         ui.label(
             "Every OBC reboot, EPS reboot, and uplinked-commands event, "
             "detected as the first beacon where the applicable onboard "
-            "counter drops -- the event itself is estimated to have "
+            "counter drops. The event itself is estimated to have "
             'happened "Event to Beacon ΔT" before that beacon.'
         ).classes("text-caption text-grey")
 

@@ -399,12 +399,13 @@ def _coverage_map(result: ReassemblyResult) -> None:
         ui.image(data_uri).style(
             f"width: {width_px}px; height: {height_px}px; image-rendering: pixelated;"
         )
-    ui.label(
-        f"One pixel per byte, {COVERAGE_ROW_WIDTH_BYTES:,} bytes "
-        f"({COVERAGE_PACKETS_PER_ROW} packets) per row. Top ruler: byte offset "
-        "within a row, ticked once per packet. Left: byte offset of the row."
-    ).classes("text-caption text-grey")
     with ui.row().classes("items-center gap-4"):
+        ui.icon("info_outline", size="xs").classes("text-grey cursor-help").tooltip(
+            f"One pixel per byte, {COVERAGE_ROW_WIDTH_BYTES:,} bytes "
+            f"({COVERAGE_PACKETS_PER_ROW} packets) per row. Top ruler: byte "
+            "offset within a row, ticked once per packet. Left: byte offset of "
+            "the row."
+        )
         for status, label in (
             (ByteStatus.GOOD, "good"),
             (ByteStatus.MISSING, "missing (needs re-downlink)"),
@@ -1194,11 +1195,6 @@ def build_file_reassembler_page(data_dir: Path) -> None:
 
     with page_shell():
         ui.label("File Reassembler").classes("text-2xl font-bold")
-        ui.label(
-            "Pick UTC time ranges covering bulk file download(s). "
-            "Then, filter to just a single file to reassemble it. "
-            "Pro tip: Copy-and-paste time ranges from the Headers list."
-        ).classes("text-caption text-grey")
         with ui.card().classes("w-full"):
             range_editor()
         with ui.row().classes("items-center gap-2"):
