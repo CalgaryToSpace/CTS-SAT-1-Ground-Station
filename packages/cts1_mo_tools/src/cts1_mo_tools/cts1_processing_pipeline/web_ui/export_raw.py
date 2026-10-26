@@ -26,11 +26,11 @@ _SPECS_BY_KEY = {spec.key: spec for spec in export_tables.TABLE_SPECS}
 
 
 def raw_export_url(table_key: str) -> str:
-    return f"{RAW_EXPORT_PATH}/{table_key}"
+    return f"{RAW_EXPORT_PATH}/{table_key}.parquet"
 
 
 def register_raw_export_route(app: FastAPI, data_dir: Path) -> None:
-    """Register `GET {RAW_EXPORT_PATH}/{table_key}` on `app`, streaming
+    """Register `GET {RAW_EXPORT_PATH}/{table_key}.parquet` on `app`, streaming
     that table's parquet file straight off disk via `FileResponse`.
     """
 
@@ -54,4 +54,6 @@ def register_raw_export_route(app: FastAPI, data_dir: Path) -> None:
     # form so `raw_export` is passed as an argument (visibly "used") instead
     # of a decorated-but-never-called nested function, which pyright's
     # `reportUnusedFunction` otherwise flags.
-    app.add_api_route(RAW_EXPORT_PATH + "/{table_key}", raw_export, methods=["GET"])
+    app.add_api_route(
+        RAW_EXPORT_PATH + "/{table_key}.parquet", raw_export, methods=["GET"]
+    )
