@@ -29,6 +29,7 @@ from cts1_mo_tools.time_str import duration_str
 from . import collection_timeline, mpi_collections
 from .charts import collection_timeline_option
 from .layout import page_shell
+from .mpi_strip_view import show_mpi_strip
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -66,6 +67,7 @@ def _collection_timeline_card(timeline: pl.DataFrame | None) -> None:
 # above the columns', so it's clear which come from the satellite's on-board
 # analysis of the file and which from the frames actually downlinked.
 _COLLECTION_COLUMN_GROUPS: tuple[tuple[str, tuple[tuple[str, str, bool], ...]], ...] = (
+    ("", (("_strip", "Strip", False),)),
     (
         "Collection",
         (
@@ -147,6 +149,16 @@ _COLLECTION_HEADER_SLOT = (
     '<q-th v-for="col in props.cols" :key="col.name" :props="props">'
     "{{ col.label }}</q-th>"
     "</q-tr>"
+)
+
+# A button opening the collection's frames as a strip (see `mpi_strip_view`),
+# for a collection with any frames downlinked.
+_STRIP_CELL_SLOT = (
+    '<q-td :props="props">'
+    '<q-btn v-if="props.row.frames_present" flat round dense icon="view_week" '
+    "@click=\"$parent.$emit('strip', props.row._row_index)\">"
+    "<q-tooltip>View its frames as a strip</q-tooltip></q-btn>"
+    "</q-td>"
 )
 
 
@@ -355,7 +367,7 @@ def _export_buttons(collections: pl.DataFrame) -> None:
 
 
 def _collections_card(
-    collections: pl.DataFrame | None, analyses: pl.DataFrame | None
+    data_dir: Path, collections: pl.DataFrame | None, analyses: pl.DataFrame | None
 ) -> None:
     """`collections`/`analyses` are None while they're still loading."""
     with ui.card().classes("w-full"):
@@ -407,7 +419,12 @@ def _collections_card(
         table.props("dense flat")
         table.add_slot("header", _COLLECTION_HEADER_SLOT)
         table.add_slot(f"body-cell-{_DETAILS_COLUMN}", _DETAILS_CELL_SLOT)
-        # Its arg is the row's `_row_index`.
+        table.add_slot("body-cell-_strip", _STRIP_CELL_SLOT)
+        # Both events' arg is the row's `_row_index`.
+        table.on(
+            "strip",
+            lambda e: show_mpi_strip(data_dir, collection_rows[e.args], collections),
+        )
         table.on(
             "show_analyses",
             lambda e: _show_analyses(collection_rows[e.args], analyses),
@@ -441,6 +458,7 @@ def build_mpi_data_page(data_dir: Path) -> None:
     @ui.refreshable
     def collections_content(collections_data: _CollectionsData | None) -> None:
         _collections_card(
+            data_dir,
             collections_data and collections_data.collections,
             collections_data and collections_data.analyses,
         )

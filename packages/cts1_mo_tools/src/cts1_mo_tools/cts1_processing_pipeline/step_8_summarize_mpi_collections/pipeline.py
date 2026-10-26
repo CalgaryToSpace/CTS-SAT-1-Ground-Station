@@ -45,6 +45,7 @@ __all__ = [
     "count_downlinked_strong_signal_frames",
     "extract_all_mpi_analyses",
     "extract_mpi_analyses",
+    "frame_collections_in",
     "primary_mpi_analyses",
     "run",
     "sort_mpi_analyses_by_preference",
@@ -578,6 +579,43 @@ def _matching_analysis(
         if overlap >= timedelta(0) and (best is None or overlap > best[0]):
             best = (overlap, i)
     return None if best is None else best[1]
+
+
+def _analysis_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        row.get("analysis_started_at"),
+        row.get("analysis_ended_at"),
+        row.get("analysis_file"),
+        row.get("analysis_received_at"),
+    )
+
+
+def frame_collections_in(
+    collection: dict[str, Any],
+    collections: pl.DataFrame,
+    frame_collections: pl.DataFrame,
+) -> list[datetime]:
+    """The `collection_started_at` of every frame collection (as labelled by
+    `step_6_pipeline.assign_mpi_collections`) that `summarize_mpi_collections`
+    merged into `collection` -- one row of its output, `collections` being
+    all of them. `frame_collections` needs one row per frame collection,
+    with its `collection_started_at` and `collection_ended_at` (its last
+    frame's `collected_at`).
+    """
+    if collection.get("collection_time_source") != "analysis":
+        return [collection["collection_started_at"]]
+    if "collection_time_source" not in collections.columns:
+        return []
+    analysis_rows = collections.filter(
+        pl.col("collection_time_source") == "analysis"
+    ).to_dicts()
+    key = _analysis_key(collection)
+    return [
+        frame_collection["collection_started_at"]
+        for frame_collection in frame_collections.iter_rows(named=True)
+        if (i := _matching_analysis(frame_collection, analysis_rows)) is not None
+        and _analysis_key(analysis_rows[i]) == key
+    ]
 
 
 def _merged_time_syncs(
