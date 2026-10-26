@@ -2,6 +2,9 @@
 the uplink ground station (RAO by default), predicted from SatNOGS DB's latest
 TLE -- see `overpasses` for the data layer.
 
+Past passes also show how many telecommands were uplinked during them, from
+the beacons around each one -- see `uplinks.tcmds_uplinked_per_pass`.
+
 Each pass can be ticked to get a browser notification shortly before (and
 at) its AOS. Notifications are sent from this page, so it has to stay open
 (a background tab is fine) for them to arrive.
@@ -18,19 +21,25 @@ import json
 import zoneinfo
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path  # noqa: TC003 -- tyro needs this at runtime elsewhere
 from typing import Any
 
+import polars as pl
 import requests
 from loguru import logger
 from nicegui import app, events, run, ui
 
+from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
+    pipeline as step_3_pipeline,
+)
 from cts1_mo_tools.time_str import duration_str
 
-from . import overpasses
+from . import overpasses, uplinks
 from .layout import page_shell
 
 DEFAULT_DAYS_AHEAD = 2.0
-DEFAULT_DAYS_BACK = 1.0
+DEFAULT_DAYS_BACK = 3.0
+DEFAULT_MIN_ELEVATION_DEG = 5.0
 COUNTDOWN_REFRESH_INTERVAL_SEC = 1.0
 
 DEFAULT_NOTIFY_LEAD_MIN = 5.0
@@ -61,14 +70,20 @@ _ROW_CSS = """
     }
     .overpass-row-upcoming { background: rgba(25, 118, 210, 0.07); }
     .overpass-row-upcoming > td:first-child { box-shadow: inset 4px 0 0 #1976d2; }
+    .overpass-row-used { background: rgba(0, 150, 136, 0.12); }
+    .overpass-row-used > td:first-child { box-shadow: inset 4px 0 0 #009688; }
 """
 _ROW_CLASS_FN = """
     row => ({
-        'In progress': 'overpass-row-in-progress',
+        'In Pass': 'overpass-row-in-progress',
         'Upcoming': 'overpass-row-upcoming',
-        'Done': 'overpass-row-done',
+        'Over': 'overpass-row-done',
+        'Used': 'overpass-row-used',
     })[row.status] || ''
 """
+# Statuses of a pass that's over: "Used" if telecommands were uplinked during
+# it, else "Over".
+_PAST_STATUSES = ("Over", "Used")
 
 _UTC_DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 _LOCAL_DATETIME_FORMAT = "%a %Y-%m-%d %H:%M:%S"
@@ -131,6 +146,17 @@ _PERMISSION_DESCRIPTIONS = {
 }
 
 
+@dataclass(frozen=True, slots=True)
+class _PassTcmds:
+    """One row of `uplinks.tcmds_uplinked_per_pass` -- see there for each
+    field.
+    """
+
+    tcmd_count_before: int | None
+    tcmd_count_after: int | None
+    tcmd_count_delta: int | None
+
+
 @dataclass(slots=True)
 class _Prediction:
     """The last successful prediction this page rendered."""
@@ -138,13 +164,16 @@ class _Prediction:
     tle: overpasses.SatnogsTle
     station: overpasses.GroundStation
     passes: list[overpasses.Overpass]
+    tcmds: list[_PassTcmds]
+    """Per pass."""
 
 
-def _pass_status(p: overpasses.Overpass, now: datetime) -> str:
+def _pass_status(p: overpasses.Overpass, now: datetime, tcmds: _PassTcmds) -> str:
     if p.aos <= now < p.los:
-        return "In progress"
+        return "In Pass"
     if p.los <= now:
-        return "Done"
+        delta = tcmds.tcmd_count_delta
+        return "Used" if delta is not None and delta > 0 else "Over"
     return "Upcoming"
 
 
@@ -152,6 +181,22 @@ def _time_until_aos_str(p: overpasses.Overpass, now: datetime) -> str:
     if p.aos <= now:
         return "—"
     return duration_str(p.aos - now)
+
+
+def _tcmds_uplinked_str(status: str, tcmds: _PassTcmds) -> str:
+    if status not in _PAST_STATUSES:
+        return "—"
+    delta = tcmds.tcmd_count_delta
+    return "" if delta is None else f"{delta:,}"
+
+
+def _tcmd_counts_str(status: str, tcmds: _PassTcmds) -> str:
+    if status not in _PAST_STATUSES:
+        return "—"
+    return " → ".join(
+        "?" if count is None else f"{count:,}"
+        for count in (tcmds.tcmd_count_before, tcmds.tcmd_count_after)
+    )
 
 
 def _direction_str(azimuth_deg: float) -> str:
@@ -216,26 +261,33 @@ def _pass_rows(
     now: datetime,
     notify_aos: list[datetime],
 ) -> list[dict[str, Any]]:
-    return [
-        {
-            "index": i,
-            "notify": _matching_notify_aos(p.aos, notify_aos) is not None,
-            "aos_iso": p.aos.isoformat(),
-            "status": _pass_status(p, now),
-            "time_until_aos": _time_until_aos_str(p, now),
-            "aos_utc": p.aos.strftime(_UTC_DATETIME_FORMAT),
-            "los_utc": p.los.strftime(_UTC_DATETIME_FORMAT),
-            "aos_local": p.aos.astimezone(tz).strftime(_LOCAL_DATETIME_FORMAT),
-            "los_local": p.los.astimezone(tz).strftime(_LOCAL_DATETIME_FORMAT),
-            "duration": duration_str(p.duration),
-            "max_elevation": f"{p.max_elevation_deg:.1f}°",
-            "direction": (
-                f"{_direction_str(p.aos_azimuth_deg)} → "
-                f"{_direction_str(p.los_azimuth_deg)}"
-            ),
-        }
-        for i, p in enumerate(prediction.passes, start=1)
-    ]
+    rows: list[dict[str, Any]] = []
+    for i, (p, tcmds) in enumerate(
+        zip(prediction.passes, prediction.tcmds, strict=True), start=1
+    ):
+        status = _pass_status(p, now, tcmds)
+        rows.append(
+            {
+                "index": i,
+                "notify": _matching_notify_aos(p.aos, notify_aos) is not None,
+                "aos_iso": p.aos.isoformat(),
+                "status": status,
+                "time_until_aos": _time_until_aos_str(p, now),
+                "aos_utc": p.aos.strftime(_UTC_DATETIME_FORMAT),
+                "los_utc": p.los.strftime(_UTC_DATETIME_FORMAT),
+                "aos_local": p.aos.astimezone(tz).strftime(_LOCAL_DATETIME_FORMAT),
+                "los_local": p.los.astimezone(tz).strftime(_LOCAL_DATETIME_FORMAT),
+                "duration": duration_str(p.duration),
+                "max_elevation": f"{p.max_elevation_deg:.1f}°",
+                "direction": (
+                    f"{_direction_str(p.aos_azimuth_deg)} → "
+                    f"{_direction_str(p.los_azimuth_deg)}"
+                ),
+                "tcmd_counts": _tcmd_counts_str(status, tcmds),
+                "tcmds_uplinked": _tcmds_uplinked_str(status, tcmds),
+            }
+        )
+    return rows
 
 
 def _passes_table(
@@ -251,10 +303,9 @@ def _passes_table(
         ui.label(
             f"{station.latitude_deg:.4f}°, {station.longitude_deg:.4f}°, "
             f"{station.altitude_m:.0f} m -- AOS/LOS are when "
-            f"{prediction.tle.name} crosses the horizon (or the minimum "
-            "elevation set above). Past passes are back-predicted from the "
-            "same TLE, so get less accurate the further they are from its "
-            "epoch."
+            f"{prediction.tle.name} crosses the horizon. TCMDs Uplinked is the change "
+            "in the beacons' total "
+            "telecommand count from beacons before AOS vs. after LOS."
         ).classes("text-caption text-grey")
 
         if not prediction.passes:
@@ -268,6 +319,24 @@ def _passes_table(
             {"name": "notify", "label": "Notify", "field": "notify"},
             {"name": "status", "label": "Status", "field": "status"},
             {
+                "name": "tcmd_counts",
+                "label": "Total TCMD Count (Before → After)",
+                "field": "tcmd_counts",
+                "align": "right",
+            },
+            {
+                "name": "tcmds_uplinked",
+                "label": "TCMDs Uplinked",
+                "field": "tcmds_uplinked",
+                "align": "right",
+            },
+            {
+                "name": "max_elevation",
+                "label": "Max Elevation",
+                "field": "max_elevation",
+                "align": "right",
+            },
+            {
                 "name": "time_until_aos",
                 "label": "Time Until AOS",
                 "field": "time_until_aos",
@@ -278,12 +347,6 @@ def _passes_table(
             {"name": "aos_utc", "label": "AOS (UTC)", "field": "aos_utc"},
             {"name": "los_utc", "label": "LOS (UTC)", "field": "los_utc"},
             {"name": "duration", "label": "Duration", "field": "duration"},
-            {
-                "name": "max_elevation",
-                "label": "Max Elevation",
-                "field": "max_elevation",
-                "align": "right",
-            },
             {
                 "name": "direction",
                 "label": "Direction (AOS → LOS)",
@@ -304,9 +367,10 @@ def _passes_table(
             r"""
                 <q-td :props="props">
                     <q-badge :color="{
-                        'In progress': 'positive',
+                        'In Pass': 'positive',
                         'Upcoming': 'primary',
-                        'Done': 'grey',
+                        'Over': 'grey',
+                        'Used': 'teal',
                     }[props.value] || 'grey'">
                         {{ props.value }}
                     </q-badge>
@@ -320,7 +384,7 @@ def _passes_table(
                     <q-checkbox
                         dense
                         :model-value="props.value"
-                        :disable="props.row.status === 'Done'"
+                        :disable="['Over', 'Used'].includes(props.row.status)"
                         @update:model-value="value => $parent.$emit(
                             'notify_toggle', {aos: props.row.aos_iso, value}
                         )"
@@ -331,15 +395,16 @@ def _passes_table(
         table.on(
             "notify_toggle", on_notify_toggle, js_handler=_NOTIFY_TOGGLE_JS_HANDLER
         )
-        n_done = sum(_pass_status(p, now) == "Done" for p in prediction.passes)
+        n_done = sum(p.los <= now for p in prediction.passes)
         with ui.row().classes("items-center gap-4 mt-2 text-caption text-grey"):
             ui.label(
                 f"{len(prediction.passes):,} pass(es): {n_done:,} past, "
-                f"{len(prediction.passes) - n_done:,} in progress or upcoming."
+                f"{len(prediction.passes) - n_done:,} in pass or upcoming."
             )
             for color, label in [
-                ("grey", "Past"),
-                ("positive", "In progress"),
+                ("teal", "Used (TCMDs uplinked)"),
+                ("grey", "Over"),
+                ("positive", "In Pass"),
                 ("primary", "Upcoming"),
             ]:
                 with ui.row().classes("items-center gap-1"):
@@ -381,20 +446,56 @@ def _tle_card(prediction: _Prediction) -> None:
         ui.code(f"{tle.line1}\n{tle.line2}", language="text").classes("w-full")
 
 
-def _fetch_and_predict(
+def _tcmds_per_pass(
+    parquet_path: Path, passes: list[overpasses.Overpass]
+) -> list[_PassTcmds]:
+    if not passes:
+        return []
+    per_pass = uplinks.tcmds_uplinked_per_pass(
+        uplinks.load_beacon_tcmd_counts(parquet_path, first_aos=passes[0].aos),
+        pl.DataFrame(
+            {"aos": [p.aos for p in passes], "los": [p.los for p in passes]},
+            schema={"aos": pl.Datetime("us", "UTC"), "los": pl.Datetime("us", "UTC")},
+        ),
+    )
+    return [
+        _PassTcmds(*row)
+        for row in per_pass.select(
+            "tcmd_count_before", "tcmd_count_after", "tcmd_count_delta"
+        ).iter_rows()
+    ]
+
+
+def _fetch_and_predict(  # noqa: PLR0913
+    parquet_path: Path,
     norad_id: str,
     station: overpasses.GroundStation,
     start: datetime,
     end: datetime,
     *,
-    min_elevation_deg: float,
+    min_max_elevation_deg: float,
 ) -> _Prediction:
-    """Blocking -- run it via `run.io_bound`."""
+    """Blocking -- run it via `run.io_bound`.
+
+    AOS/LOS are always the horizon crossings; `min_max_elevation_deg` only
+    filters out passes that never get that high. The telecommand counts are
+    worked out over every pass first, so a hidden low pass still keeps its
+    neighbours from counting its telecommands.
+    """
     tle = overpasses.fetch_satnogs_tle(norad_id)
-    passes = overpasses.compute_overpasses(
-        tle, station, start, end, min_elevation_deg=min_elevation_deg
+    passes = overpasses.compute_overpasses(tle, station, start, end)
+    tcmds = _tcmds_per_pass(parquet_path, passes)
+    shown = [
+        (p, t)
+        for p, t in zip(passes, tcmds, strict=True)
+        if p.max_elevation_deg >= min_max_elevation_deg
+    ]
+    return _Prediction(
+        tle=tle,
+        station=station,
+        passes=[p for p, _ in shown],
+        tcmds=[t for _, t in shown],
     )
-    return _Prediction(tle=tle, station=station, passes=passes)
 
 
 def _send_notification(
@@ -424,7 +525,8 @@ def _send_notification(
     ui.notify(f"{title}. {body}", type="info", timeout=0, close_button=True)
 
 
-def build_overpasses_page() -> None:  # noqa: C901, PLR0915
+def build_overpasses_page(data_dir: Path) -> None:  # noqa: C901, PLR0915
+    parquet_path = data_dir / step_3_pipeline.OUTPUT_FILENAME
     default = overpasses.RAO
     state: dict[str, _Prediction | None] = {"prediction": None}
     tables: dict[str, ui.table | None] = {"passes": None}
@@ -474,7 +576,11 @@ def build_overpasses_page() -> None:  # noqa: C901, PLR0915
                     "Days ahead", value=DEFAULT_DAYS_AHEAD, min=0.1, max=14, step=1
                 ).classes("w-28")
                 min_elevation = ui.number(
-                    "Min elevation (°)", value=0.0, min=0, max=90, step=1
+                    "Min elevation (°)",
+                    value=DEFAULT_MIN_ELEVATION_DEG,
+                    min=0,
+                    max=90,
+                    step=1,
                 ).classes("w-32")
 
             def _reset_station() -> None:
@@ -565,10 +671,17 @@ def build_overpasses_page() -> None:  # noqa: C901, PLR0915
             return
         now = datetime.now(UTC)
         changed = False
-        for row, p in zip(table.rows, prediction.passes, strict=True):
+        for row, p, tcmds in zip(
+            table.rows, prediction.passes, prediction.tcmds, strict=True
+        ):
+            # A pass that's ended since the prediction has no counts until
+            # the next one loads newer beacons.
+            status = _pass_status(p, now, tcmds)
             fresh = {
-                "status": _pass_status(p, now),
+                "status": status,
                 "time_until_aos": _time_until_aos_str(p, now),
+                "tcmd_counts": _tcmd_counts_str(status, tcmds),
+                "tcmds_uplinked": _tcmds_uplinked_str(status, tcmds),
             }
             if any(row[k] != v for k, v in fresh.items()):
                 row.update(fresh)
@@ -615,11 +728,12 @@ def build_overpasses_page() -> None:  # noqa: C901, PLR0915
         try:
             prediction = await run.io_bound(
                 _fetch_and_predict,
+                parquet_path,
                 sat_id,
                 station,
                 start,
                 end,
-                min_elevation_deg=float(min_elevation.value or 0.0),
+                min_max_elevation_deg=float(min_elevation.value or 0.0),
             )
         except (requests.RequestException, LookupError, ValueError, RuntimeError) as e:
             logger.exception("Overpass prediction failed")

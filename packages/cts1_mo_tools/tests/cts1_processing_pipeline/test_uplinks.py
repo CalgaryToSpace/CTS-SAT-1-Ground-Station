@@ -3,7 +3,9 @@ from typing import Any
 
 import polars as pl
 from cts1_mo_tools.cts1_processing_pipeline.web_ui.uplinks import (
+    PASS_TCMD_MARGIN,
     detect_finished_uplinks,
+    tcmds_uplinked_per_pass,
 )
 
 _BASE = datetime(2026, 1, 1, tzinfo=UTC)
@@ -192,3 +194,80 @@ def test_before_beacon_from_a_previous_boot_gives_null_delta() -> None:
     result = detect_finished_uplinks(pl.DataFrame(rows))
     assert result["uplink_finished_at"].to_list()[0] == _at(12)
     assert result["tcmd_count_delta"].to_list()[0] is None
+
+
+def _counts(*beacons: tuple[float, int]) -> pl.DataFrame:
+    """Beacon `(beacon_utc_time minutes, total_tcmd_queued_count)` pairs."""
+    return pl.DataFrame(
+        {
+            "beacon_utc_time": [_at(m) for m, _ in beacons],
+            "total_tcmd_queued_count": [c for _, c in beacons],
+        },
+        schema={
+            "beacon_utc_time": pl.Datetime("us", "UTC"),
+            "total_tcmd_queued_count": pl.Int64,
+        },
+    )
+
+
+def _passes(*aos_los_minutes: tuple[float, float]) -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "aos": [_at(aos) for aos, _ in aos_los_minutes],
+            "los": [_at(los) for _, los in aos_los_minutes],
+        },
+        schema={"aos": pl.Datetime("us", "UTC"), "los": pl.Datetime("us", "UTC")},
+    )
+
+
+def test_tcmds_per_pass_uses_beacons_outside_margin() -> None:
+    margin = PASS_TCMD_MARGIN.total_seconds() / 60
+    counts = _counts(
+        (-20, 10),
+        (-margin - 0.1, 11),  # Last one more than the margin before AOS.
+        (-margin + 0.1, 12),  # Within the margin: ignored.
+        (5, 14),  # Mid-pass: ignored.
+        (10 + margin - 0.1, 18),  # Within the margin after LOS: ignored.
+        (10 + margin, 20),  # First one at least the margin after LOS.
+        (30, 25),
+    )
+    result = tcmds_uplinked_per_pass(counts, _passes((0, 10)))
+    assert result.select(
+        "tcmd_count_before", "tcmd_count_after", "tcmd_count_delta"
+    ).row(0) == (11, 20, 9)
+
+
+def test_tcmds_per_pass_null_without_beacons_on_either_side() -> None:
+    counts = _counts((2, 10), (30, 12), (50, 15))
+    # Order preserved: the first pass has no beacon before, the last none after.
+    result = tcmds_uplinked_per_pass(counts, _passes((100, 110), (2, 12), (40, 44)))
+    assert result["tcmd_count_delta"].to_list() == [None, None, 3]
+
+
+def test_tcmds_per_pass_counts_from_zero_after_reboot() -> None:
+    # The count reset to 0 during the pass, then 3 more came in.
+    counts = _counts((-10, 40), (20, 3))
+    result = tcmds_uplinked_per_pass(counts, _passes((0, 10)))
+    assert result.select(
+        "tcmd_count_before", "tcmd_count_after", "tcmd_count_delta"
+    ).row(0) == (0, 3, 3)
+
+
+def test_tcmds_per_pass_not_shared_across_beaconless_gap() -> None:
+    counts = _counts((-10, 10), (20, 12), (80, 12), (200, 17))
+    result = tcmds_uplinked_per_pass(counts, _passes((0, 10), (90, 100)))
+    assert result["tcmd_count_delta"].to_list() == [2, 5]
+    # No beacon between the two passes (from 15 to 85): either side's nearest
+    # beacon is from beyond the other pass, so neither gets a count -- rather
+    # than both getting the same 7.
+    gapless = _counts((-10, 10), (200, 17))
+    result = tcmds_uplinked_per_pass(gapless, _passes((0, 10), (90, 100)))
+    assert result["tcmd_count_delta"].to_list() == [None, None]
+
+
+def test_tcmds_per_pass_shared_gap_beacon_counts_once() -> None:
+    # One beacon in the gap is "after" for the first pass and "before" for the
+    # second.
+    counts = _counts((-10, 10), (50, 12), (200, 17))
+    result = tcmds_uplinked_per_pass(counts, _passes((0, 10), (90, 100)))
+    assert result["tcmd_count_delta"].to_list() == [2, 5]

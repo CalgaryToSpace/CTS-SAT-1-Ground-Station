@@ -182,7 +182,7 @@ def _build_pages(args: Args) -> None:  # noqa: C901
     @ui.page("/overpasses", title=_page_title("/overpasses"))
     def overpasses_page() -> None:
         _nav()
-        build_overpasses_page()
+        build_overpasses_page(args.data_dir)
 
     @ui.page("/pipeline-status", title=_page_title("/pipeline-status"))
     def pipeline_status_page() -> None:
