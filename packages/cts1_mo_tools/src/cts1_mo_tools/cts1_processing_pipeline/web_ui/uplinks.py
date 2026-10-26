@@ -55,7 +55,7 @@ SAME_BOOT_TOLERANCE = timedelta(minutes=3)
 
 # `tcmds_uplinked_per_pass` compares the beacon from before AOS minus this
 # with the one from after LOS plus this.
-PASS_TCMD_MARGIN = timedelta(minutes=5)
+PASS_TCMD_MARGIN = timedelta(seconds=45)
 # How far before the first pass's AOS (minus `PASS_TCMD_MARGIN`)
 # `tcmds_uplinked_per_pass`'s beacons are loaded from -- a pass with no beacon
 # in that long before it gets no count, rather than one from a stale beacon.
@@ -306,7 +306,11 @@ def tcmds_uplinked_per_pass(
         - `tcmd_count_delta`: after minus before.
 
         Each is null when there's no such beacon (e.g. the pass isn't over
-        yet).
+        yet). Each beacon must also come from the gap between this pass and
+        the neighbouring one (the previous pass's `los + PASS_TCMD_MARGIN`
+        onwards, or before the next pass's `aos - PASS_TCMD_MARGIN`): with no
+        beacon in that gap, the nearest one is from beyond the neighbour, and
+        would count the neighbour's telecommands for both passes.
     """
     counts = beacon_counts.select(
         pl.col("beacon_utc_time").cast(passes.schema["aos"]),
@@ -319,22 +323,38 @@ def tcmds_uplinked_per_pass(
             _after_at=pl.col("los") + PASS_TCMD_MARGIN,
         )
         .sort("_before_at")
+        .with_columns(
+            _previous_after_at=pl.col("_after_at").shift(1),
+            _next_before_at=pl.col("_before_at").shift(-1),
+        )
         .join_asof(
-            counts.rename({"count": "tcmd_count_before"}),
+            counts.rename(
+                {"beacon_utc_time": "_before_beacon_at", "count": "tcmd_count_before"}
+            ),
             left_on="_before_at",
-            right_on="beacon_utc_time",
+            right_on="_before_beacon_at",
             strategy="backward",
             allow_exact_matches=False,
         )
-        .drop("beacon_utc_time")
         .sort("_after_at")
         .join_asof(
-            counts.rename({"count": "tcmd_count_after"}),
+            counts.rename(
+                {"beacon_utc_time": "_after_beacon_at", "count": "tcmd_count_after"}
+            ),
             left_on="_after_at",
-            right_on="beacon_utc_time",
+            right_on="_after_beacon_at",
             strategy="forward",
         )
-        .drop("beacon_utc_time")
+        .with_columns(
+            tcmd_count_before=pl.when(
+                pl.col("_previous_after_at").is_null()
+                | (pl.col("_before_beacon_at") >= pl.col("_previous_after_at"))
+            ).then(pl.col("tcmd_count_before")),
+            tcmd_count_after=pl.when(
+                pl.col("_next_before_at").is_null()
+                | (pl.col("_after_beacon_at") < pl.col("_next_before_at"))
+            ).then(pl.col("tcmd_count_after")),
+        )
         .with_columns(
             tcmd_count_before=pl.when(
                 pl.col("tcmd_count_before") > pl.col("tcmd_count_after")
@@ -349,5 +369,5 @@ def tcmds_uplinked_per_pass(
             pl.col(name).cast(dtype) for name, dtype in _PASS_TCMD_SCHEMA.items()
         )
         .sort("_order")
-        .drop("_order", "_before_at", "_after_at")
+        .drop(pl.selectors.starts_with("_"))
     )
