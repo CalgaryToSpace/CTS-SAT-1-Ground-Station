@@ -42,6 +42,8 @@ from typing import TYPE_CHECKING, Any
 import orjson
 from nicegui import run, ui
 
+from cts1_mo_tools.time_str import duration_str
+
 from . import data as beacon_data
 
 if TYPE_CHECKING:
@@ -455,15 +457,6 @@ _REAL_TIME_TICK_SEC = 0.1
 _MAX_HOLD_SEC = 1.5
 
 
-def _gap_str(delta: timedelta) -> str:
-    total_sec = int(delta.total_seconds())
-    if total_sec < 60:  # noqa: PLR2004
-        return f"{total_sec}s"
-    if total_sec < 3600:  # noqa: PLR2004
-        return f"{total_sec // 60}m {total_sec % 60}s"
-    return f"{total_sec // 3600}h {(total_sec % 3600) // 60}m"
-
-
 class AttitudePlayer:
     """`AttitudeView` plus playback: a scrubber over every extended beacon
     in a selectable window, play/pause, stepping, speed, and a `Pacing`
@@ -751,6 +744,6 @@ class AttitudePlayer:
             caption += " -- none in the playback window, showing the latest"
         elif self._index > 0:
             gap = received_at - self._times[self._index - 1]
-            caption += f" -- {_gap_str(gap)} after the previous frame"
+            caption += f" -- {duration_str(gap)} after the previous frame"
         self._view.update(row, caption)
         self._position.set_text(f"Frame {self._index + 1} of {len(self._frames)}")

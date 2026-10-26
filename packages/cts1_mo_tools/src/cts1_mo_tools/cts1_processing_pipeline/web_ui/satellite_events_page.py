@@ -11,7 +11,6 @@ from __future__ import annotations
 
 __all__ = ["build_satellite_events_page"]
 
-from datetime import UTC, datetime
 from pathlib import Path  # noqa: TC003 -- tyro needs this at runtime elsewhere
 from typing import TYPE_CHECKING
 
@@ -21,6 +20,7 @@ from nicegui import ui
 from cts1_mo_tools.cts1_processing_pipeline.step_4_detect_satellite_events.pipeline import (  # noqa: E501
     EVENT_SPECS,
 )
+from cts1_mo_tools.time_str import age_str, duration_str
 
 from . import satellite_events
 from .layout import page_shell
@@ -34,27 +34,6 @@ EVENT_TYPES = tuple(spec.event_type for spec in EVENT_SPECS)
 # much less operationally interesting than a reboot -- start with them
 # hidden so the table opens on the events worth looking at.
 DEFAULT_ENABLED_EVENT_TYPES = frozenset(EVENT_TYPES) - {"Uplinked Commands"}
-
-
-def _duration_str(total_ms: int) -> str:
-    total_sec = total_ms / 1000
-    if total_sec < 60:  # noqa: PLR2004
-        return f"{total_sec:.1f}s"
-    total_sec = int(total_sec)
-    if total_sec < 3600:  # noqa: PLR2004
-        return f"{total_sec // 60}m {total_sec % 60}s"
-    return f"{total_sec // 3600}h {(total_sec % 3600) // 60}m"
-
-
-def _time_since_str(value: datetime) -> str:
-    total_sec = int((datetime.now(UTC) - value).total_seconds())
-    if total_sec < 60:  # noqa: PLR2004
-        return f"{total_sec}s ago"
-    if total_sec < 3600:  # noqa: PLR2004
-        return f"{total_sec // 60}m ago"
-    if total_sec < 86400:  # noqa: PLR2004
-        return f"{total_sec // 3600}h {(total_sec % 3600) // 60}m ago"
-    return f"{total_sec // 86400}d {(total_sec % 86400) // 3600}h ago"
 
 
 def _events_table(events: pl.DataFrame) -> None:
@@ -116,9 +95,9 @@ def _events_table(events: pl.DataFrame) -> None:
                 "event_type": r["event_type"],
                 "detected_at": f"{r['detected_at']:%Y-%m-%d %H:%M:%S}",
                 "estimated_event_at": f"{r['estimated_event_at']:%Y-%m-%d %H:%M:%S}",
-                "time_since_event_estimated": _time_since_str(r["estimated_event_at"]),
-                "event_to_beacon_dt": _duration_str(
-                    r["time_since_event_when_detected_ms"]
+                "time_since_event_estimated": age_str(r["estimated_event_at"]),
+                "event_to_beacon_dt": duration_str(
+                    r["time_since_event_when_detected_ms"] / 1000
                 ),
                 "obc_reboot_reason": r["obc_reboot_reason"] or "",
                 "eps_reboot_reason": r["eps_reboot_reason"] or "",

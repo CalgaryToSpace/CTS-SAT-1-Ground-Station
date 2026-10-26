@@ -8,7 +8,6 @@ __all__ = [
     "connect_duckdb",
     "default_duckdb_memory_limit",
     "drop_timezones_for_excel",
-    "duration_str",
     "parse_start_filter",
 ]
 
@@ -74,19 +73,6 @@ def drop_timezones_for_excel(df: pl.DataFrame) -> pl.DataFrame:
         if isinstance(dtype, pl.Datetime) and dtype.time_zone is not None
     ]
     return df.with_columns(exprs) if exprs else df
-
-
-def duration_str(total_sec: int) -> str:
-    """A duration for display, in its two largest whole units: e.g. "42s",
-    "16m 5s", "1h 23m" or "2d 5h".
-    """
-    if total_sec < 60:  # noqa: PLR2004
-        return f"{total_sec}s"
-    if total_sec < 3600:  # noqa: PLR2004
-        return f"{total_sec // 60}m {total_sec % 60}s"
-    if total_sec < 86400:  # noqa: PLR2004
-        return f"{total_sec // 3600}h {(total_sec % 3600) // 60}m"
-    return f"{total_sec // 86400}d {(total_sec % 86400) // 3600}h"
 
 
 _DURATION_RE = re.compile(

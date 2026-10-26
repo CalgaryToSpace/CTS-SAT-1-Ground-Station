@@ -38,6 +38,8 @@ import requests
 import tyro
 from loguru import logger
 
+from cts1_mo_tools.time_str import duration_str
+
 from .satnogs_data import iter_future_observation_pages
 
 # ---------------------------------------------------------------------------
@@ -198,8 +200,7 @@ class CoverageWindow:
     @property
     def duration_str(self) -> str:
         """Human-readable duration, e.g. ``'23m 2s'``."""
-        total = int(self.duration.total_seconds())
-        return f"{total // 60}m {total % 60}s"
+        return duration_str(self.duration)
 
     @property
     def station_count(self) -> int:
@@ -364,7 +365,6 @@ def format_summary(
     df = pl.DataFrame(rows)
 
     total_coverage: timedelta = sum((w.duration for w in filtered), timedelta())
-    total_sec = int(total_coverage.total_seconds())
     max_peak = max(w.peak_simultaneous_stations for w in filtered)
 
     with pl.Config(
@@ -379,7 +379,7 @@ def format_summary(
     footer = (
         f"  {len(filtered)} window(s)  |  "
         f"Total coverage: "
-        f"{total_sec // 3600}h {(total_sec % 3600) // 60}m {total_sec % 60}s  |  "
+        f"{duration_str(total_coverage)}  |  "
         f"{max_peak} simultaneous station(s)"
     )
     return (
@@ -415,14 +415,13 @@ def format_detail(
             f"Window {idx:>3}  |  up to {w.peak_simultaneous_stations} stn (peak)  |  "
             f"{w.format_start()} → {w.format_end()}  |  {w.duration_str}"
         )
-        for iv in sorted(w.observations, key=lambda o: o.start):
-            dur_s = int((iv.end - iv.start).total_seconds())
-            lines.append(
-                f"          Obs {iv.observation_id!s:<8}  "
-                f"GS {iv.ground_station_id!s:<5}  "
-                f"{iv.start.strftime('%H:%M:%SZ')} → {iv.end.strftime('%H:%M:%SZ')}  "
-                f"({dur_s // 60}m {dur_s % 60}s)"
-            )
+        lines.extend(
+            f"          Obs {iv.observation_id!s:<8}  "
+            f"GS {iv.ground_station_id!s:<5}  "
+            f"{iv.start.strftime('%H:%M:%SZ')} → {iv.end.strftime('%H:%M:%SZ')}  "
+            f"({duration_str(iv.end - iv.start)})"
+            for iv in sorted(w.observations, key=lambda o: o.start)
+        )
 
     lines.append(_divider("═"))
     return "\n".join(lines)

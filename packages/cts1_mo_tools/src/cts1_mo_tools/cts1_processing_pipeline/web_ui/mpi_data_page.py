@@ -19,10 +19,10 @@ from typing import TYPE_CHECKING, Any, cast
 
 from nicegui import run, ui
 
-from cts1_mo_tools.cts1_processing_pipeline.common import duration_str
 from cts1_mo_tools.cts1_processing_pipeline.step_8_summarize_mpi_collections import (
     pipeline as step_8_pipeline,
 )
+from cts1_mo_tools.time_str import duration_str
 
 from . import collection_timeline, mpi_collections
 from .charts import collection_timeline_option

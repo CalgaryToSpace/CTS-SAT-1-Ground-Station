@@ -21,6 +21,7 @@ from nicegui import run, ui
 from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
     pipeline as step_3_pipeline,
 )
+from cts1_mo_tools.time_str import age_str
 
 from . import data as beacon_data
 from . import uplinks
@@ -57,16 +58,6 @@ WINDOW_CHOICES: dict[str, float] = {
     "Last 3d": 24.0 * 3,
     "Last 7d": 24.0 * 7,
 }
-
-
-def _age_str(received_at: datetime) -> str:
-    delta = datetime.now(UTC) - received_at.replace(tzinfo=UTC)
-    total_sec = int(delta.total_seconds())
-    if total_sec < 60:  # noqa: PLR2004
-        return f"{total_sec}s ago"
-    if total_sec < 3600:  # noqa: PLR2004
-        return f"{total_sec // 60}m ago"
-    return f"{total_sec // 3600}h {(total_sec % 3600) // 60}m ago"
 
 
 def _format_uptime(uptime_sec: float | None) -> str:
@@ -117,7 +108,7 @@ def _local_max_pending_str(local_max: tuple[int, datetime] | None) -> str:
     if local_max is None:
         return "?"
     count, received_at = local_max
-    return f"{count} (at {received_at:%Y-%m-%d %H:%M:%S} UTC, {_age_str(received_at)})"
+    return f"{count} (at {received_at:%Y-%m-%d %H:%M:%S} UTC, {age_str(received_at)})"
 
 
 def _latest_uplink_stats(
@@ -139,7 +130,7 @@ def _latest_uplink_stats(
     return [
         (
             "Latest Uplink Finished",
-            f"{finished_at:%Y-%m-%d %H:%M:%S} UTC ({_age_str(finished_at)})",
+            f"{finished_at:%Y-%m-%d %H:%M:%S} UTC ({age_str(finished_at)})",
         ),
         (
             "TCMDs in Latest Uplink",
@@ -200,7 +191,7 @@ def _latest_beacon_card(
                 )
                 received_at = row["received_at"]
                 ui.label(
-                    f"{received_at:%Y-%m-%d %H:%M:%S} UTC ({_age_str(received_at)})"
+                    f"{received_at:%Y-%m-%d %H:%M:%S} UTC ({age_str(received_at)})"
                 ).classes("text-caption text-grey")
             ui.label(row.get("friendly_message") or "").classes("text-sm italic")
 
@@ -247,7 +238,7 @@ def _latest_extended_beacon_card(latest: pl.DataFrame) -> None:
         row = latest.to_dicts()[0]
         received_at = row["received_at"]
         ui.label(
-            f"{received_at:%Y-%m-%d %H:%M:%S} UTC ({_age_str(received_at)})"
+            f"{received_at:%Y-%m-%d %H:%M:%S} UTC ({age_str(received_at)})"
         ).classes("text-caption text-grey")
 
         stats = [
@@ -482,7 +473,7 @@ def build_beacon_stats_page(data_dir: Path, hours: float) -> None:
             parquet_path,
             WINDOW_CHOICES,
             "Last 24h",
-            lambda t: f"{t:%Y-%m-%d %H:%M:%S} UTC ({_age_str(t)})",
+            lambda t: f"{t:%Y-%m-%d %H:%M:%S} UTC ({age_str(t)})",
         )
         chart_section()
 
