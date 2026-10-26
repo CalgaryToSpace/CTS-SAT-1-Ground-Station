@@ -2,7 +2,7 @@
 pipeline output instead of running the whole pipeline locally.
 
 Fetches every table in `export_tables.TABLE_SPECS` from the server's
-`/raw-export/{table_key}` route (see `export_raw`) into `--data-dir`, under
+`/raw-export/{table_key}.parquet` route (see `export_raw`) into `--data-dir`, under
 the same fixed filenames the pipeline itself writes -- so afterwards
 `cts1_serve_dashboard` finds them exactly as if they'd been produced here.
 
