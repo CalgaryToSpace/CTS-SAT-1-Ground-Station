@@ -41,6 +41,7 @@ __all__ = [
     "COLLECTIONS_OUTPUT_FILENAME",
     "DEFAULT_DATA_DIR",
     "MPI_ANALYSIS_ACTION_PREFIX",
+    "RESYNC_TOLERANCE",
     "count_downlinked_strong_signal_frames",
     "extract_all_mpi_analyses",
     "extract_mpi_analyses",
@@ -50,6 +51,7 @@ __all__ = [
     "summarize_mpi_collections",
 ]
 
+import itertools
 import json
 import re
 from datetime import UTC, datetime, timedelta
@@ -103,6 +105,25 @@ _FRAME_COLLECTIONS_SCHEMA = {
     # Every distinct integration period the frames reported, as a JSON
     # array, e.g. "[260]".
     "integration_periods": pl.String,
+    # Every distinct source of the time sync the frames' times were taken
+    # under (step 6's `time_sync_source`: the firmware's letter for it, e.g.
+    # "G" for GNSS over UART or "E" for the EPS's RTC), as a JSON array,
+    # e.g. '["E","G"]'.
+    "time_sync_sources": pl.String,
+    # When the satellite's clock was last set (synced), as of the first and
+    # the last frame received: each frame's `collected_at` minus step 6's
+    # `ms_since_time_sync`.
+    "time_synced_at": pl.Datetime("us", "UTC"),
+    "last_time_synced_at": pl.Datetime("us", "UTC"),
+    # How many times the clock was resynced during the recording, as seen in
+    # the frames received: between consecutive frames, or (for a collection
+    # timed by an analysis) between its start and the first frame received.
+    # A resync after the last frame received can't be seen.
+    "time_resyncs_during": pl.Int64,
+    # How long the clock had gone since it was last set, at
+    # `collection_started_at` -- or, when it was resynced between then and
+    # the first frame received, at that first frame instead.
+    "ms_since_time_sync_at_start": pl.Int64,
     # The range of the MPI's board temperature over the frames.
     "board_temperature_min_c": pl.Float64,
     "board_temperature_max_c": pl.Float64,
@@ -195,6 +216,11 @@ _COLLECTIONS_SCHEMA = {
     "orbit_tle_epoch": pl.Datetime("us", "UTC"),
     **_FILE_ANALYSES_SCHEMA,
 }
+
+# How far apart two frames' sync times (see `time_synced_at`) must be to
+# count as a resync -- each is exact to the millisecond, give or take
+# rounding.
+RESYNC_TOLERANCE = timedelta(seconds=1)
 
 # How often the satellite's lighting is sampled over a collection.
 _SUN_SAMPLE_STEP = timedelta(seconds=1)
@@ -459,7 +485,12 @@ def _summarize_frame_collections(frames: pl.DataFrame) -> pl.DataFrame:
     collection = "collection_started_at"
     gap_frames = pl.col("frame_counter").diff().over(collection) - 1
     has_gap = gap_frames > 0
+    synced_at = pl.col("collected_at") - pl.duration(
+        milliseconds=pl.col("ms_since_time_sync")
+    )
     gaps = frames.sort(collection, "frame_counter").with_columns(
+        synced_at=synced_at,
+        is_resync=(synced_at - synced_at.shift().over(collection)) > RESYNC_TOLERANCE,
         gap_frames=pl.when(has_gap).then(gap_frames),
         gap_started_at=pl.when(has_gap).then(
             pl.col("collected_at").shift().over(collection)
@@ -493,6 +524,15 @@ def _summarize_frame_collections(frames: pl.DataFrame) -> pl.DataFrame:
                 .cast(pl.String)
                 .str.join(","),
             ),
+            time_sync_sources=pl.format(
+                "[{}]",
+                pl.format(
+                    '"{}"', pl.col("time_sync_source").drop_nulls().unique().sort()
+                ).str.join(","),
+            ),
+            time_synced_at=pl.col("synced_at").drop_nulls().first(),
+            last_time_synced_at=pl.col("synced_at").drop_nulls().last(),
+            time_resyncs_during=pl.col("is_resync").sum(),
             board_temperature_min_c=pl.col("board_temperature_c").min(),
             board_temperature_max_c=pl.col("board_temperature_c").max(),
         )
@@ -505,7 +545,11 @@ def _summarize_frame_collections(frames: pl.DataFrame) -> pl.DataFrame:
             ).dt.total_milliseconds(),
         )
         .with_columns(
-            frames_missing=pl.col("frames_expected") - pl.col("frames_present")
+            frames_missing=pl.col("frames_expected") - pl.col("frames_present"),
+            # A frame collection starts at its first frame.
+            ms_since_time_sync_at_start=(
+                pl.col(collection) - pl.col("time_synced_at")
+            ).dt.total_milliseconds(),
         )
         .select(
             pl.col(name).cast(dtype)
@@ -534,6 +578,42 @@ def _matching_analysis(
         if overlap >= timedelta(0) and (best is None or overlap > best[0]):
             best = (overlap, i)
     return None if best is None else best[1]
+
+
+def _merged_time_syncs(
+    started_at: datetime, collections: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """The time sync columns of frame collections (oldest first) merged into
+    one collection starting at `started_at` -- see `_FRAME_COLLECTIONS_SCHEMA`.
+    """
+    synced = [c for c in collections if c["time_synced_at"] is not None]
+    if not synced:
+        return dict.fromkeys(
+            (
+                "time_synced_at",
+                "last_time_synced_at",
+                "time_resyncs_during",
+                "ms_since_time_sync_at_start",
+            )
+        )
+    first, last = synced[0], synced[-1]
+    resyncs = sum(c["time_resyncs_during"] for c in synced) + sum(
+        after["time_synced_at"] - before["last_time_synced_at"] > RESYNC_TOLERANCE
+        for before, after in itertools.pairwise(synced)
+    )
+    # The clock was set after the recording started, but before its first
+    # frame received: its age at the start is unknown, so it's given at that
+    # first frame instead.
+    resynced_first = first["time_synced_at"] - started_at > RESYNC_TOLERANCE
+    age_from = first["collection_started_at"] if resynced_first else started_at
+    return {
+        "time_synced_at": first["time_synced_at"],
+        "last_time_synced_at": last["last_time_synced_at"],
+        "time_resyncs_during": resyncs + resynced_first,
+        "ms_since_time_sync_at_start": max(
+            0, round((age_from - first["time_synced_at"]).total_seconds() * 1000)
+        ),
+    }
 
 
 def _merged_collection(
@@ -566,6 +646,13 @@ def _merged_collection(
             ),
             separators=(",", ":"),
         ),
+        "time_sync_sources": json.dumps(
+            sorted(
+                {s for c in collections for s in json.loads(c["time_sync_sources"])}
+            ),
+            separators=(",", ":"),
+        ),
+        **_merged_time_syncs(analysis["analysis_started_at"], collections),
         "board_temperature_min_c": min(
             (t for c in collections if (t := c["board_temperature_min_c"]) is not None),
             default=None,

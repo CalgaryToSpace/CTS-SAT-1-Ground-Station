@@ -9,6 +9,7 @@ from cts1_mo_tools.cts1_processing_pipeline.web_ui.mpi_collections import (
     collections_xlsx_bytes,
     strong_signal_counts_text,
     strong_signals_downlinked_text,
+    time_sync_sources_text,
 )
 
 _COLLECTIONS = pl.DataFrame(
@@ -65,3 +66,10 @@ def test_strong_signals_downlinked_text() -> None:
         "yes (3 frames)",
     ]
     assert strong_signals_downlinked_text(signals[:1], None) == ["unknown"]
+
+
+def test_time_sync_sources_text() -> None:
+    assert time_sync_sources_text('["E","G"]') == "EPS_RTC (E), GNSS_UART (G)"
+    assert time_sync_sources_text('["X"]') == "UNKNOWN (X)"
+    assert time_sync_sources_text("[]") == ""
+    assert time_sync_sources_text(None) == ""

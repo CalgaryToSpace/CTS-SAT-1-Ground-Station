@@ -26,32 +26,40 @@ def _epoch_ms(at: datetime) -> int:
 
 
 def _frames(
-    *runs: tuple[datetime, list[int]], integration_period: int = 260
+    *runs: tuple[datetime, list[int]],
+    integration_period: int = 260,
+    time_sync_source: str = "G",
 ) -> pl.DataFrame:
     """Frames 31ms apart from each (start time, counters) run, warming up by
-    0.5 C per frame from 10 C.
+    0.5 C per frame from 10 C, with the clock set 1 minute before the run.
     """
     times: list[datetime] = []
     counters: list[int] = []
     temperatures: list[float] = []
+    since_sync: list[int] = []
     for start, run_counters in runs:
         times += [
             start + timedelta(milliseconds=31 * i) for i in range(len(run_counters))
         ]
         counters += run_counters
         temperatures += [10 + 0.5 * i for i in range(len(run_counters))]
+        since_sync += [60_000 + 31 * i for i in range(len(run_counters))]
     return pl.DataFrame(
         {
             "collected_at": times,
             "frame_counter": counters,
             "board_temperature_c": temperatures,
             "integration_period": [integration_period] * len(times),
+            "time_sync_source": [time_sync_source] * len(times),
+            "ms_since_time_sync": since_sync,
         },
         schema={
             "collected_at": pl.Datetime("us", "UTC"),
             "frame_counter": pl.Int64,
             "board_temperature_c": pl.Float64,
             "integration_period": pl.Int64,
+            "time_sync_source": pl.String,
+            "ms_since_time_sync": pl.Int64,
         },
     )
 
@@ -90,6 +98,11 @@ def test_collection_summary_counts_frames_and_largest_gap() -> None:
         "largest_gap_started_at": _RECORDED_AT + timedelta(milliseconds=31 * 2),
         "largest_gap_duration_ms": 31,
         "integration_periods": "[260]",
+        "time_sync_sources": '["G"]',
+        "time_synced_at": _RECORDED_AT - timedelta(minutes=1),
+        "last_time_synced_at": _RECORDED_AT - timedelta(minutes=1),
+        "time_resyncs_during": 0,
+        "ms_since_time_sync_at_start": 60_000,
         "board_temperature_min_c": 10.0,
         "board_temperature_max_c": 13.0,
         "collection_time_source": "frames",
@@ -404,13 +417,17 @@ def test_counts_downlinked_frames_of_each_strong_signal() -> None:
     assert json.loads(counted["analysis_strong_signal_frames_downlinked"]) == [2, 1, 0]
 
 
-def test_analysis_merges_frame_temperatures_and_integration_periods() -> None:
+def test_analysis_merges_frame_temperatures_periods_and_sync_sources() -> None:
     second_start = _RECORDED_AT + timedelta(seconds=30)
     frames = assign_mpi_collections(
         pl.concat(
             [
                 _frames((_RECORDED_AT, [0, 1, 2])),
-                _frames((second_start, [0, 1]), integration_period=200),
+                _frames(
+                    (second_start, [0, 1]),
+                    integration_period=200,
+                    time_sync_source="E",
+                ),
             ]
         )
     )
@@ -423,6 +440,10 @@ def test_analysis_merges_frame_temperatures_and_integration_periods() -> None:
     )
     (merged,) = summarize_mpi_collections(frames, analyses).rows(named=True)
     assert merged["integration_periods"] == "[200,260]"
+    assert merged["time_sync_sources"] == '["E","G"]'
+    # The second run's clock was set 30s after the first's.
+    assert merged["time_resyncs_during"] == 1
+    assert merged["ms_since_time_sync_at_start"] == 60_000
     assert merged["board_temperature_min_c"] == 10.0
     assert merged["board_temperature_max_c"] == 11.0
 
@@ -451,3 +472,54 @@ def test_collections_are_placed_in_orbit_from_the_tle_history() -> None:
     # Placed in orbit even with no frames downlinked.
     assert analysis_only["start_latitude_deg"] is not None
     assert analysis_only["sunlit"] in {"yes", "no", "partly"}
+
+
+def test_resync_between_frames_is_counted() -> None:
+    frames = _frames((_RECORDED_AT, list(range(10)))).with_columns(
+        # The clock was set again just before frame 6.
+        ms_since_time_sync=pl.when(pl.col("frame_counter") >= 6)
+        .then(pl.col("ms_since_time_sync") - 60_000 - 31 * 5)
+        .otherwise(pl.col("ms_since_time_sync"))
+    )
+    (summary,) = summarize_mpi_collections(assign_mpi_collections(frames)).rows(
+        named=True
+    )
+    assert summary["time_resyncs_during"] == 1
+    assert summary["time_synced_at"] == _RECORDED_AT - timedelta(minutes=1)
+    assert summary["last_time_synced_at"] == _RECORDED_AT + timedelta(
+        milliseconds=31 * 5
+    )
+    assert summary["ms_since_time_sync_at_start"] == 60_000
+
+
+def test_resync_before_the_first_frame_received_is_counted() -> None:
+    # The recording started 2 minutes before the first frame received, and
+    # the clock was set 1 minute before that frame.
+    first_frame_at = _RECORDED_AT + timedelta(minutes=2)
+    frames = assign_mpi_collections(_frames((first_frame_at, [100, 101])))
+    analyses = extract_mpi_analyses(
+        _tcmd_responses(
+            _analysis_response(
+                earliest=_RECORDED_AT, latest=first_frame_at + timedelta(seconds=1)
+            )
+        )
+    )
+    (merged,) = summarize_mpi_collections(frames, analyses).rows(named=True)
+    assert merged["time_resyncs_during"] == 1
+    # So it's given at the first frame received.
+    assert merged["ms_since_time_sync_at_start"] == 60_000
+
+
+def test_age_at_start_is_extrapolated_back_from_the_first_frame() -> None:
+    first_frame_at = _RECORDED_AT + timedelta(seconds=20)
+    frames = assign_mpi_collections(_frames((first_frame_at, [100, 101])))
+    analyses = extract_mpi_analyses(
+        _tcmd_responses(
+            _analysis_response(
+                earliest=_RECORDED_AT, latest=first_frame_at + timedelta(seconds=1)
+            )
+        )
+    )
+    (merged,) = summarize_mpi_collections(frames, analyses).rows(named=True)
+    assert merged["time_resyncs_during"] == 0
+    assert merged["ms_since_time_sync_at_start"] == 40_000

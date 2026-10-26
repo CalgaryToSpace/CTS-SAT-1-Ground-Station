@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING
 from nicegui import run, ui
 
 from cts1_mo_tools.cts1_processing_pipeline import daemon_signals
+from cts1_mo_tools.cts1_processing_pipeline.common import duration_str
 from cts1_mo_tools.cts1_processing_pipeline.daemon_signals import DaemonState
 
 from . import pipeline_status as status_data
@@ -75,16 +76,6 @@ _DAEMON_STATE_DISPLAY = {
 }
 
 
-def _duration_str(total_sec: int) -> str:
-    if total_sec < 60:  # noqa: PLR2004
-        return f"{total_sec}s"
-    if total_sec < 3600:  # noqa: PLR2004
-        return f"{total_sec // 60}m"
-    if total_sec < 86400:  # noqa: PLR2004
-        return f"{total_sec // 3600}h {(total_sec % 3600) // 60}m"
-    return f"{total_sec // 86400}d {(total_sec % 86400) // 3600}h"
-
-
 def _age_str(value: datetime) -> str:
     """ "X ago" for a past `value`, "in X" for a future one -- `value` can
     legitimately be in the future for `latest_observation_end`: step 1
@@ -94,8 +85,8 @@ def _age_str(value: datetime) -> str:
     """
     delta = (datetime.now(UTC) - value).total_seconds()
     if delta < 0:
-        return f"in {_duration_str(int(-delta))}"
-    return f"{_duration_str(int(delta))} ago"
+        return f"in {duration_str(int(-delta))}"
+    return f"{duration_str(int(delta))} ago"
 
 
 def _source_icon(source: str) -> None:
@@ -168,7 +159,7 @@ def _largest_gap_value(summary: status_data.PacketCompletenessSummary) -> str | 
     ):
         return None
     return (
-        f"{_duration_str(int(summary.largest_gap.total_seconds()))} "
+        f"{duration_str(int(summary.largest_gap.total_seconds()))} "
         f"(from {summary.largest_gap_from:%Y-%m-%d %H:%M:%S} "
         f"to {summary.largest_gap_to:%Y-%m-%d %H:%M:%S} UTC)"
     )

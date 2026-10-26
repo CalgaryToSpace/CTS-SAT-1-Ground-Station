@@ -19,6 +19,11 @@ from typing import TYPE_CHECKING, Any, cast
 
 from nicegui import run, ui
 
+from cts1_mo_tools.cts1_processing_pipeline.common import duration_str
+from cts1_mo_tools.cts1_processing_pipeline.step_8_summarize_mpi_collections import (
+    pipeline as step_8_pipeline,
+)
+
 from . import collection_timeline, mpi_collections
 from .charts import collection_timeline_option
 from .layout import page_shell
@@ -103,6 +108,8 @@ _COLLECTION_COLUMN_GROUPS: tuple[tuple[str, tuple[tuple[str, str, bool], ...]], 
             ("frames_expected", "Expected", True),
             ("frames_missing", "Missing", True),
             ("integration_periods", "Integration Period(s)", True),
+            ("time_sync_sources", "Time Sync Source(s)", True),
+            ("_time_sync_age", "Time Sync Age", True),
             ("_temperature_range", "MPI Temp (°C)", True),
             ("first_frame_counter", "First Counter", True),
             ("last_frame_counter", "Last Counter", True),
@@ -139,12 +146,13 @@ def _seconds(duration_ms: int) -> str:
 
 # How the columns that need more than `str()` are shown.
 _CELL_FORMATTERS: dict[str, Callable[[Any], Any]] = {
-    "collection_duration_ms": _seconds,
+    "collection_duration_ms": lambda duration_ms: duration_str(duration_ms // 1000),
     "largest_gap_duration_ms": _seconds,
     "analysis_file_size": lambda size: f"{size:,} B",
     "analysis_sha256": lambda sha256: sha256[:12],
     "analysis_strong_signal_counts": mpi_collections.strong_signal_counts_text,
     "integration_periods": mpi_collections.integration_periods_text,
+    "time_sync_sources": mpi_collections.time_sync_sources_text,
 }
 
 
@@ -168,6 +176,28 @@ def _temperature_range_cell(row: dict[str, Any]) -> str:
     if low is None or high is None:
         return ""
     return f"{low:.1f}" if low == high else f"{low:.1f} to {high:.1f}"
+
+
+def _time_sync_age_cell(row: dict[str, Any]) -> str:
+    """How long since the clock was last set, at the recording's start --
+    e.g. "16m 5s" -- flagged if it was resynced during the recording, when
+    the age is at the first frame received instead if that's where it was.
+    """
+    age_ms = row.get("ms_since_time_sync_at_start")
+    if age_ms is None:
+        return ""
+    age = duration_str(age_ms // 1000)
+    resyncs = row.get("time_resyncs_during") or 0
+    if not resyncs:
+        return age
+    synced_at, started_at = row.get("time_synced_at"), row["collection_started_at"]
+    resynced_first = (
+        synced_at is not None
+        and synced_at - started_at > step_8_pipeline.RESYNC_TOLERANCE
+    )
+    at = "first frame" if resynced_first else "start"
+    times = "once" if resyncs == 1 else f"{resyncs} times"
+    return f"⚠ resynced {times} during; {age} at {at}"
 
 
 def _time_source_cell(row: dict[str, Any]) -> str:
@@ -338,9 +368,12 @@ def _collections_card(
             "was analyzed with. Orbit: where the satellite was at the start/end, "
             "and whether it was in sunlight throughout (yes), in Earth's shadow "
             "throughout (no), or partly -- SGP4-propagated from the TLE "
-            "published right before each time. Integration period(s) and MPI "
-            "temperature are from the frames received. Click a row for every "
-            "analysis of its file."
+            "published right before each time. Integration period(s), time "
+            "sync source(s) (what the satellite's clock was last set from when "
+            "the frames were timestamped), time sync age (how long the clock "
+            "had gone since it was set, at the start -- flagged ⚠ if it was "
+            "set again during the recording) and MPI temperature are from the "
+            "frames received. Click a row for every analysis of its file."
         ).classes("text-caption text-grey")
 
         if collections is None or analyses is None:
@@ -374,6 +407,7 @@ def _collections_card(
                 "_start_position": _position_cell(row, "start"),
                 "_end_position": _position_cell(row, "end"),
                 "_temperature_range": _temperature_range_cell(row),
+                "_time_sync_age": _time_sync_age_cell(row),
                 "_row_index": i,
             }
             for i, row in enumerate(collection_rows)

@@ -18,6 +18,7 @@ __all__ = [
     "response_properties",
     "strong_signal_counts_text",
     "strong_signals_downlinked_text",
+    "time_sync_sources_text",
 ]
 
 import io
@@ -139,6 +140,31 @@ def integration_periods_text(periods_json: str | None) -> str:
     if not periods_json:
         return ""
     return ", ".join(str(p) for p in cast("list[int]", json.loads(periods_json)))
+
+
+# The firmware's letter for each time sync source (see
+# `TIME_sync_source_enum_to_letter_char` in the OBC firmware's
+# timekeeping.c), by its `TIME_SYNC_SOURCE_*` enum name there.
+_TIME_SYNC_SOURCE_NAMES = {
+    "G": "GNSS_UART",
+    "P": "GNSS_PPS",
+    "T": "TELECOMMAND_ABSOLUTE",
+    "C": "TELECOMMAND_CORRECTION",
+    "E": "EPS_RTC",
+    "N": "NONE",
+}
+
+
+def time_sync_sources_text(sources_json: str | None) -> str:
+    """`time_sync_sources` (a JSON array of the firmware's letters) for
+    display, e.g. "EPS_RTC (E), GNSS_UART (G)".
+    """
+    if not sources_json:
+        return ""
+    return ", ".join(
+        f"{_TIME_SYNC_SOURCE_NAMES.get(letter, 'UNKNOWN')} ({letter})"
+        for letter in cast("list[str]", json.loads(sources_json))
+    )
 
 
 def response_properties(response_text: str) -> dict[str, Any]:
