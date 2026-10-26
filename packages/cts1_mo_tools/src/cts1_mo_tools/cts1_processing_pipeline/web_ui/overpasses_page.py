@@ -2,6 +2,9 @@
 the uplink ground station (RAO by default), predicted from SatNOGS DB's latest
 TLE -- see `overpasses` for the data layer.
 
+Past passes also show how many telecommands were uplinked during them, from
+the beacons around each one -- see `uplinks.tcmds_uplinked_per_pass`.
+
 Each pass can be ticked to get a browser notification shortly before (and
 at) its AOS. Notifications are sent from this page, so it has to stay open
 (a background tab is fine) for them to arrive.
@@ -18,15 +21,20 @@ import json
 import zoneinfo
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path  # noqa: TC003 -- tyro needs this at runtime elsewhere
 from typing import Any
 
+import polars as pl
 import requests
 from loguru import logger
 from nicegui import app, events, run, ui
 
+from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
+    pipeline as step_3_pipeline,
+)
 from cts1_mo_tools.time_str import duration_str
 
-from . import overpasses
+from . import overpasses, uplinks
 from .layout import page_shell
 
 DEFAULT_DAYS_AHEAD = 2.0
@@ -138,6 +146,8 @@ class _Prediction:
     tle: overpasses.SatnogsTle
     station: overpasses.GroundStation
     passes: list[overpasses.Overpass]
+    tcmds_uplinked: list[int | None]
+    """Per pass, see `uplinks.tcmds_uplinked_per_pass`'s `tcmd_count_delta`."""
 
 
 def _pass_status(p: overpasses.Overpass, now: datetime) -> str:
@@ -152,6 +162,12 @@ def _time_until_aos_str(p: overpasses.Overpass, now: datetime) -> str:
     if p.aos <= now:
         return "—"
     return duration_str(p.aos - now)
+
+
+def _tcmds_uplinked_str(status: str, tcmds_uplinked: int | None) -> str:
+    if status != "Done":
+        return "—"
+    return "?" if tcmds_uplinked is None else f"{tcmds_uplinked:,}"
 
 
 def _direction_str(azimuth_deg: float) -> str:
@@ -216,26 +232,32 @@ def _pass_rows(
     now: datetime,
     notify_aos: list[datetime],
 ) -> list[dict[str, Any]]:
-    return [
-        {
-            "index": i,
-            "notify": _matching_notify_aos(p.aos, notify_aos) is not None,
-            "aos_iso": p.aos.isoformat(),
-            "status": _pass_status(p, now),
-            "time_until_aos": _time_until_aos_str(p, now),
-            "aos_utc": p.aos.strftime(_UTC_DATETIME_FORMAT),
-            "los_utc": p.los.strftime(_UTC_DATETIME_FORMAT),
-            "aos_local": p.aos.astimezone(tz).strftime(_LOCAL_DATETIME_FORMAT),
-            "los_local": p.los.astimezone(tz).strftime(_LOCAL_DATETIME_FORMAT),
-            "duration": duration_str(p.duration),
-            "max_elevation": f"{p.max_elevation_deg:.1f}°",
-            "direction": (
-                f"{_direction_str(p.aos_azimuth_deg)} → "
-                f"{_direction_str(p.los_azimuth_deg)}"
-            ),
-        }
-        for i, p in enumerate(prediction.passes, start=1)
-    ]
+    rows: list[dict[str, Any]] = []
+    for i, (p, tcmds_uplinked) in enumerate(
+        zip(prediction.passes, prediction.tcmds_uplinked, strict=True), start=1
+    ):
+        status = _pass_status(p, now)
+        rows.append(
+            {
+                "index": i,
+                "notify": _matching_notify_aos(p.aos, notify_aos) is not None,
+                "aos_iso": p.aos.isoformat(),
+                "status": status,
+                "time_until_aos": _time_until_aos_str(p, now),
+                "aos_utc": p.aos.strftime(_UTC_DATETIME_FORMAT),
+                "los_utc": p.los.strftime(_UTC_DATETIME_FORMAT),
+                "aos_local": p.aos.astimezone(tz).strftime(_LOCAL_DATETIME_FORMAT),
+                "los_local": p.los.astimezone(tz).strftime(_LOCAL_DATETIME_FORMAT),
+                "duration": duration_str(p.duration),
+                "max_elevation": f"{p.max_elevation_deg:.1f}°",
+                "direction": (
+                    f"{_direction_str(p.aos_azimuth_deg)} → "
+                    f"{_direction_str(p.los_azimuth_deg)}"
+                ),
+                "tcmds_uplinked": _tcmds_uplinked_str(status, tcmds_uplinked),
+            }
+        )
+    return rows
 
 
 def _passes_table(
@@ -254,7 +276,12 @@ def _passes_table(
             f"{prediction.tle.name} crosses the horizon (or the minimum "
             "elevation set above). Past passes are back-predicted from the "
             "same TLE, so get less accurate the further they are from its "
-            "epoch."
+            "epoch. TCMDs Uplinked is the change in the beacons' total "
+            "telecommand count from the last beacon more than "
+            f"{duration_str(uplinks.PASS_TCMD_MARGIN)} before AOS to the first "
+            f"one at least {duration_str(uplinks.PASS_TCMD_MARGIN)} after LOS "
+            "by the beacons' own clocks (counted from 0 if the count dropped, "
+            "i.e. after a reboot)."
         ).classes("text-caption text-grey")
 
         if not prediction.passes:
@@ -288,6 +315,12 @@ def _passes_table(
                 "name": "direction",
                 "label": "Direction (AOS → LOS)",
                 "field": "direction",
+            },
+            {
+                "name": "tcmds_uplinked",
+                "label": "TCMDs Uplinked",
+                "field": "tcmds_uplinked",
+                "align": "right",
             },
         ]
         for column in columns:  # Quasar right-aligns by default.
@@ -381,7 +414,23 @@ def _tle_card(prediction: _Prediction) -> None:
         ui.code(f"{tle.line1}\n{tle.line2}", language="text").classes("w-full")
 
 
-def _fetch_and_predict(
+def _tcmds_uplinked(
+    parquet_path: Path, passes: list[overpasses.Overpass]
+) -> list[int | None]:
+    if not passes:
+        return []
+    per_pass = uplinks.tcmds_uplinked_per_pass(
+        uplinks.load_beacon_tcmd_counts(parquet_path, first_aos=passes[0].aos),
+        pl.DataFrame(
+            {"aos": [p.aos for p in passes], "los": [p.los for p in passes]},
+            schema={"aos": pl.Datetime("us", "UTC"), "los": pl.Datetime("us", "UTC")},
+        ),
+    )
+    return per_pass["tcmd_count_delta"].to_list()
+
+
+def _fetch_and_predict(  # noqa: PLR0913
+    parquet_path: Path,
     norad_id: str,
     station: overpasses.GroundStation,
     start: datetime,
@@ -394,7 +443,12 @@ def _fetch_and_predict(
     passes = overpasses.compute_overpasses(
         tle, station, start, end, min_elevation_deg=min_elevation_deg
     )
-    return _Prediction(tle=tle, station=station, passes=passes)
+    return _Prediction(
+        tle=tle,
+        station=station,
+        passes=passes,
+        tcmds_uplinked=_tcmds_uplinked(parquet_path, passes),
+    )
 
 
 def _send_notification(
@@ -424,7 +478,8 @@ def _send_notification(
     ui.notify(f"{title}. {body}", type="info", timeout=0, close_button=True)
 
 
-def build_overpasses_page() -> None:  # noqa: C901, PLR0915
+def build_overpasses_page(data_dir: Path) -> None:  # noqa: C901, PLR0915
+    parquet_path = data_dir / step_3_pipeline.OUTPUT_FILENAME
     default = overpasses.RAO
     state: dict[str, _Prediction | None] = {"prediction": None}
     tables: dict[str, ui.table | None] = {"passes": None}
@@ -566,10 +621,14 @@ def build_overpasses_page() -> None:  # noqa: C901, PLR0915
         now = datetime.now(UTC)
         changed = False
         for row, p in zip(table.rows, prediction.passes, strict=True):
+            status = _pass_status(p, now)
             fresh = {
-                "status": _pass_status(p, now),
+                "status": status,
                 "time_until_aos": _time_until_aos_str(p, now),
             }
+            if row["tcmds_uplinked"] == "—" and status == "Done":
+                # Not counted until the next prediction loads newer beacons.
+                fresh["tcmds_uplinked"] = "?"
             if any(row[k] != v for k, v in fresh.items()):
                 row.update(fresh)
                 changed = True
@@ -615,6 +674,7 @@ def build_overpasses_page() -> None:  # noqa: C901, PLR0915
         try:
             prediction = await run.io_bound(
                 _fetch_and_predict,
+                parquet_path,
                 sat_id,
                 station,
                 start,
