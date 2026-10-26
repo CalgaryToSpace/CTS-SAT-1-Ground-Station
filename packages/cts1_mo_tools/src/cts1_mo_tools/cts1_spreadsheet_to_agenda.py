@@ -361,7 +361,12 @@ def _build_single_entries(
 
 def _build_interval_entries(
     ctx: _RowContext,
+    row_index: int,
 ) -> list[tuple[int, str]]:
+    """Unique tssent values are generated using the pass start time, incremented by 1 s
+    for each row. Error handling is handled in _parse_pass_start()."""
+    tssent = ctx.pass_start + timedelta(seconds=row_index)
+
     tsexec_start = parse_time(
         ctx.pass_date, ctx.pass_start, ctx.row["tsexec Start (UTC)"]
     )
@@ -386,7 +391,7 @@ def _build_interval_entries(
     current = tsexec_start
 
     while current <= tsexec_end:
-        command = format_command(ctx.cmd, current, current, ctx.resp)
+        command = format_command(ctx.cmd, tssent, current, ctx.resp)
         entries.append((epoch_ms(current), command))
         current += interval
 
@@ -426,7 +431,7 @@ def build_agenda(
             random_commands.extend(random_entries)
 
         elif mode == "interval":
-            agenda.extend(_build_interval_entries(ctx))
+            agenda.extend(_build_interval_entries(ctx, row_index))
             if (row["Repeat"].strip() != "") or (row["Random"].strip() != ""):
                 logger.warning(
                     f"Repeat and random values are ignored for interval mode for"
