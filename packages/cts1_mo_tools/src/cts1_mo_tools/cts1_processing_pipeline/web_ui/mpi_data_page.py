@@ -77,6 +77,14 @@ _COLLECTION_COLUMN_GROUPS: tuple[tuple[str, tuple[tuple[str, str, bool], ...]], 
         ),
     ),
     (
+        "Orbit (SGP4)",
+        (
+            ("_start_position", "Start Lat/Lon", False),
+            ("_end_position", "End Lat/Lon", False),
+            ("sunlit", "Sunlit", False),
+        ),
+    ),
+    (
         "On-Board Analysis (analyze_mpi_data)",
         (
             ("analysis_file", "File", False),
@@ -94,6 +102,8 @@ _COLLECTION_COLUMN_GROUPS: tuple[tuple[str, tuple[tuple[str, str, bool], ...]], 
             ("frames_present", "Present", True),
             ("frames_expected", "Expected", True),
             ("frames_missing", "Missing", True),
+            ("integration_periods", "Integration Period(s)", True),
+            ("_temperature_range", "MPI Temp (°C)", True),
             ("first_frame_counter", "First Counter", True),
             ("last_frame_counter", "Last Counter", True),
             ("largest_gap_frames", "Largest Gap (Frames)", True),
@@ -134,6 +144,7 @@ _CELL_FORMATTERS: dict[str, Callable[[Any], Any]] = {
     "analysis_file_size": lambda size: f"{size:,} B",
     "analysis_sha256": lambda sha256: sha256[:12],
     "analysis_strong_signal_counts": mpi_collections.strong_signal_counts_text,
+    "integration_periods": mpi_collections.integration_periods_text,
 }
 
 
@@ -144,6 +155,19 @@ def _cell(field: str, value: Any) -> Any:
         return f"{value:%Y-%m-%d %H:%M:%S.%f}"[:-3]
     formatter = _CELL_FORMATTERS.get(field)
     return formatter(value) if formatter else value
+
+
+def _position_cell(row: dict[str, Any], prefix: str) -> str:
+    return mpi_collections.position_text(
+        row.get(f"{prefix}_latitude_deg"), row.get(f"{prefix}_longitude_deg")
+    )
+
+
+def _temperature_range_cell(row: dict[str, Any]) -> str:
+    low, high = row.get("board_temperature_min_c"), row.get("board_temperature_max_c")
+    if low is None or high is None:
+        return ""
+    return f"{low:.1f}" if low == high else f"{low:.1f} to {high:.1f}"
 
 
 def _time_source_cell(row: dict[str, Any]) -> str:
@@ -230,7 +254,7 @@ def _show_analyses(collection: dict[str, Any], analyses: pl.DataFrame) -> None:
         ui.notify(
             "No on-board analysis for this collection."
             if collection.get("analysis_action") is None
-            else "No analysis details -- rerun step 7 to write mpi_analyses.parquet."
+            else "No analysis details -- rerun step 8 to write mpi_analyses.parquet."
         )
         return
     with ui.dialog() as dialog, ui.card().classes("w-full max-w-5xl"):
@@ -311,7 +335,12 @@ def _collections_card(
             "starts 20 minutes after the last one's first frame, or when the "
             "frame counter drops (a new recording, or the counter wrapping "
             "around). Strong Signals: the count at each DN threshold the file "
-            "was analyzed with. Click a row for every analysis of its file."
+            "was analyzed with. Orbit: where the satellite was at the start/end, "
+            "and whether it was in sunlight throughout (yes), in Earth's shadow "
+            "throughout (no), or partly -- SGP4-propagated from the TLE "
+            "published right before each time. Integration period(s) and MPI "
+            "temperature are from the frames received. Click a row for every "
+            "analysis of its file."
         ).classes("text-caption text-grey")
 
         if collections is None or analyses is None:
@@ -322,7 +351,7 @@ def _collections_card(
         if collections.is_empty():
             ui.label(
                 "No MPI collections yet -- run the pipeline (step_1..step_3, "
-                "then step_6 and step_7) first."
+                "then step_6 through step_8) first."
             ).classes("text-caption text-grey mt-2")
             return
 
@@ -340,7 +369,13 @@ def _collections_card(
             # `.get`: an `mpi_collections.parquet` from before analyses were merged in
             # has no analysis columns.
             {field: _cell(field, row.get(field)) for field, _, _ in _COLLECTION_COLUMNS}
-            | {"collection_time_source": _time_source_cell(row), "_row_index": i}
+            | {
+                "collection_time_source": _time_source_cell(row),
+                "_start_position": _position_cell(row, "start"),
+                "_end_position": _position_cell(row, "end"),
+                "_temperature_range": _temperature_range_cell(row),
+                "_row_index": i,
+            }
             for i, row in enumerate(collection_rows)
         ]
         table = ui.table(columns=columns, rows=rows, row_key="_row_index").classes(

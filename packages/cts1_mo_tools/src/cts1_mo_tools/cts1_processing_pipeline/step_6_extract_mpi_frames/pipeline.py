@@ -101,7 +101,7 @@ distinct CRC-valid frame received but not kept is tallied by why (see
 
 Frames are then grouped into MPI collections (`assign_mpi_collections`):
 runs of frames from one recording, at most `MPI_COLLECTION_MAX_DURATION`
-long, each identified by its first frame (time and counter). Step 7
+long, each identified by its first frame (time and counter). Step 8
 summarizes each collection, alongside the satellite's own analyses of its
 MPI data files.
 

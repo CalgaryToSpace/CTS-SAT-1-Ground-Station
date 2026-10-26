@@ -7,12 +7,14 @@ from cts1_mo_tools.cts1_processing_pipeline.step_6_extract_mpi_frames.pipeline i
     assign_mpi_collections,
     compute_mpi_frames,
 )
-from cts1_mo_tools.cts1_processing_pipeline.step_7_summarize_mpi_collections.pipeline import (  # noqa: E501
+from cts1_mo_tools.cts1_processing_pipeline.step_8_summarize_mpi_collections.pipeline import (  # noqa: E501
     count_downlinked_strong_signal_frames,
     extract_all_mpi_analyses,
     extract_mpi_analyses,
     summarize_mpi_collections,
 )
+
+from .test_orbit import GNSS_FIX_AT, TLE_HISTORY
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _RECORDED_AT = datetime(2026, 8, 9, 6, 33, 10, tzinfo=UTC)
@@ -23,18 +25,34 @@ def _epoch_ms(at: datetime) -> int:
     return round((at - _EPOCH).total_seconds() * 1000)
 
 
-def _frames(*runs: tuple[datetime, list[int]]) -> pl.DataFrame:
-    """Frames 31ms apart from each (start time, counters) run."""
+def _frames(
+    *runs: tuple[datetime, list[int]], integration_period: int = 260
+) -> pl.DataFrame:
+    """Frames 31ms apart from each (start time, counters) run, warming up by
+    0.5 C per frame from 10 C.
+    """
     times: list[datetime] = []
     counters: list[int] = []
+    temperatures: list[float] = []
     for start, run_counters in runs:
         times += [
             start + timedelta(milliseconds=31 * i) for i in range(len(run_counters))
         ]
         counters += run_counters
+        temperatures += [10 + 0.5 * i for i in range(len(run_counters))]
     return pl.DataFrame(
-        {"collected_at": times, "frame_counter": counters},
-        schema={"collected_at": pl.Datetime("us", "UTC"), "frame_counter": pl.Int64},
+        {
+            "collected_at": times,
+            "frame_counter": counters,
+            "board_temperature_c": temperatures,
+            "integration_period": [integration_period] * len(times),
+        },
+        schema={
+            "collected_at": pl.Datetime("us", "UTC"),
+            "frame_counter": pl.Int64,
+            "board_temperature_c": pl.Float64,
+            "integration_period": pl.Int64,
+        },
     )
 
 
@@ -49,6 +67,17 @@ def test_collection_summary_counts_frames_and_largest_gap() -> None:
     first, second = summary.rows(named=True)
     analysis_columns = [c for c in summary.columns if c.startswith("analysis_")]
     assert analysis_columns
+    # No TLE history given, so not placed in orbit.
+    orbit_columns = [
+        "start_latitude_deg",
+        "start_longitude_deg",
+        "end_latitude_deg",
+        "end_longitude_deg",
+        "sun_fraction_min",
+        "sun_fraction_max",
+        "sunlit",
+        "orbit_tle_epoch",
+    ]
     assert first == {
         "collection_started_at": _RECORDED_AT,
         "collection_ended_at": _RECORDED_AT + timedelta(milliseconds=31 * 6),
@@ -60,9 +89,13 @@ def test_collection_summary_counts_frames_and_largest_gap() -> None:
         "largest_gap_frames": 3,
         "largest_gap_started_at": _RECORDED_AT + timedelta(milliseconds=31 * 2),
         "largest_gap_duration_ms": 31,
+        "integration_periods": "[260]",
+        "board_temperature_min_c": 10.0,
+        "board_temperature_max_c": 13.0,
         "collection_time_source": "frames",
         "collection_duration_ms": 31 * 6,
         "frame_collection_count": 1,
+        **dict.fromkeys(orbit_columns),
         **dict.fromkeys(analysis_columns),
     }
     assert second["frames_missing"] == 0
@@ -369,3 +402,52 @@ def test_counts_downlinked_frames_of_each_strong_signal() -> None:
         named=True
     )
     assert json.loads(counted["analysis_strong_signal_frames_downlinked"]) == [2, 1, 0]
+
+
+def test_analysis_merges_frame_temperatures_and_integration_periods() -> None:
+    second_start = _RECORDED_AT + timedelta(seconds=30)
+    frames = assign_mpi_collections(
+        pl.concat(
+            [
+                _frames((_RECORDED_AT, [0, 1, 2])),
+                _frames((second_start, [0, 1]), integration_period=200),
+            ]
+        )
+    )
+    analyses = extract_mpi_analyses(
+        _tcmd_responses(
+            _analysis_response(
+                earliest=_RECORDED_AT, latest=second_start + timedelta(seconds=10)
+            )
+        )
+    )
+    (merged,) = summarize_mpi_collections(frames, analyses).rows(named=True)
+    assert merged["integration_periods"] == "[200,260]"
+    assert merged["board_temperature_min_c"] == 10.0
+    assert merged["board_temperature_max_c"] == 11.0
+
+
+def test_collections_are_placed_in_orbit_from_the_tle_history() -> None:
+    frames = assign_mpi_collections(_frames((GNSS_FIX_AT, list(range(100)))))
+    analysis_only_at = GNSS_FIX_AT + timedelta(hours=1)
+    analyses = extract_mpi_analyses(
+        _tcmd_responses(
+            _analysis_response(
+                earliest=analysis_only_at,
+                latest=analysis_only_at + timedelta(minutes=1),
+            )
+        )
+    )
+    in_sun, analysis_only = summarize_mpi_collections(
+        frames, analyses, TLE_HISTORY
+    ).rows(named=True)
+    assert abs(in_sun["start_latitude_deg"] - 9.42) < 0.02
+    assert abs(in_sun["start_longitude_deg"] - 133.62) < 0.02
+    # 3.1 s later: a little further north.
+    assert in_sun["end_latitude_deg"] > in_sun["start_latitude_deg"]
+    assert in_sun["sunlit"] == "yes"
+    assert in_sun["sun_fraction_min"] == in_sun["sun_fraction_max"] == 1.0
+    assert in_sun["orbit_tle_epoch"] == TLE_HISTORY["epoch"][0]
+    # Placed in orbit even with no frames downlinked.
+    assert analysis_only["start_latitude_deg"] is not None
+    assert analysis_only["sunlit"] in {"yes", "no", "partly"}

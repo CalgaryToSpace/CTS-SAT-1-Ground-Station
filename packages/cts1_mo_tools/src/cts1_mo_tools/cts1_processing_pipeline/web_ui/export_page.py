@@ -47,10 +47,13 @@ flowchart LR
     step5 --> reassembled_tcmd_responses[("reassembled_tcmd_responses")]
     everything_decoded --> step6["Step 6\\nExtract MPI Frames"]
     step6 --> mpi_frames[("mpi_frames")]
-    mpi_frames --> step7["Step 7\\nSummarize MPI Collections"]
-    reassembled_tcmd_responses --> step7
-    step7 --> mpi_collections[("mpi_collections")]
-    step7 --> mpi_analyses[("mpi_analyses")]
+    huggingface[("Hugging Face\\nSpace-Track TLEs")] --> step7["Step 7\\nFetch TLEs"]
+    step7 --> tle_history[("tle_history")]
+    mpi_frames --> step8["Step 8\\nSummarize MPI Collections"]
+    tle_history --> step8
+    reassembled_tcmd_responses --> step8
+    step8 --> mpi_collections[("mpi_collections")]
+    step8 --> mpi_analyses[("mpi_analyses")]
 """
 
 RANGE_INPUT_MASK = "####-##-## ##:##:##"

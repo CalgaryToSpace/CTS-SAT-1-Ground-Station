@@ -1,4 +1,4 @@
-"""Loading `mpi_collections.parquet` (step 7's per-collection summary) for
+"""Loading `mpi_collections.parquet` (step 8's per-collection summary) for
 the web UI's MPI Data page.
 
 Pure data layer: no NiceGUI/rendering concerns live here, just polars -- see
@@ -11,8 +11,10 @@ __all__ = [
     "analyses_of",
     "collections_csv_bytes",
     "collections_xlsx_bytes",
+    "integration_periods_text",
     "load_analyses",
     "load_collections",
+    "position_text",
     "response_properties",
     "strong_signal_counts_text",
     "strong_signals_downlinked_text",
@@ -26,8 +28,8 @@ import polars as pl
 import xlsxwriter  # pyright: ignore[reportMissingTypeStubs]
 
 from cts1_mo_tools.cts1_processing_pipeline.common import drop_timezones_for_excel
-from cts1_mo_tools.cts1_processing_pipeline.step_7_summarize_mpi_collections import (
-    pipeline as step_7_pipeline,
+from cts1_mo_tools.cts1_processing_pipeline.step_8_summarize_mpi_collections import (
+    pipeline as step_8_pipeline,
 )
 
 if TYPE_CHECKING:
@@ -35,18 +37,18 @@ if TYPE_CHECKING:
 
 
 def load_collections(data_dir: Path) -> pl.DataFrame:
-    """Every MPI collection, newest first -- empty if step 7 hasn't run yet."""
-    path = data_dir / step_7_pipeline.COLLECTIONS_OUTPUT_FILENAME
+    """Every MPI collection, newest first -- empty if step 8 hasn't run yet."""
+    path = data_dir / step_8_pipeline.COLLECTIONS_OUTPUT_FILENAME
     if not path.exists():
         return pl.DataFrame()
     return pl.read_parquet(path).sort("collection_started_at", descending=True)
 
 
 def load_analyses(data_dir: Path) -> pl.DataFrame:
-    """Every distinct MPI analysis (step 7's `mpi_analyses.parquet`) --
-    empty if step 7 hasn't run (since analyses were added) yet.
+    """Every distinct MPI analysis (step 8's `mpi_analyses.parquet`) --
+    empty if step 8 hasn't run (since analyses were added) yet.
     """
-    path = data_dir / step_7_pipeline.ANALYSES_OUTPUT_FILENAME
+    path = data_dir / step_8_pipeline.ANALYSES_OUTPUT_FILENAME
     if not path.exists():
         return pl.DataFrame()
     return pl.read_parquet(path)
@@ -57,7 +59,7 @@ def analyses_of(
 ) -> list[dict[str, Any]]:
     """Every distinct analysis in `analyses` of `collection`'s file (one row
     of `mpi_collections.parquet`), the one the collection uses first -- see
-    `step_7_pipeline.sort_mpi_analyses_by_preference`.
+    `step_8_pipeline.sort_mpi_analyses_by_preference`.
     """
     if analyses.is_empty() or collection.get("analysis_action") is None:
         return []
@@ -69,7 +71,7 @@ def analyses_of(
         else pl.col("analysis_file").is_null()
         & (pl.col("analysis_received_at") == collection["analysis_received_at"])
     )
-    return step_7_pipeline.sort_mpi_analyses_by_preference(matching).to_dicts()
+    return step_8_pipeline.sort_mpi_analyses_by_preference(matching).to_dicts()
 
 
 def strong_signal_counts_text(counts_json: str | None) -> str:
@@ -122,9 +124,26 @@ def strong_signals_downlinked_text(
     return texts
 
 
+def position_text(latitude_deg: float | None, longitude_deg: float | None) -> str:
+    """A sub-satellite point for display, e.g. "64.98°N 48.35°E"."""
+    if latitude_deg is None or longitude_deg is None:
+        return ""
+    return (
+        f"{abs(latitude_deg):.2f}°{'N' if latitude_deg >= 0 else 'S'} "
+        f"{abs(longitude_deg):.2f}°{'E' if longitude_deg >= 0 else 'W'}"
+    )
+
+
+def integration_periods_text(periods_json: str | None) -> str:
+    """`integration_periods` (a JSON array) for display, e.g. "200, 260"."""
+    if not periods_json:
+        return ""
+    return ", ".join(str(p) for p in cast("list[int]", json.loads(periods_json)))
+
+
 def response_properties(response_text: str) -> dict[str, Any]:
     """Every property of an analysis's raw `analysis_response_text` (which
-    step 7 already checked is a JSON object), as sent.
+    step 8 already checked is a JSON object), as sent.
     """
     return cast("dict[str, Any]", json.loads(response_text))
 

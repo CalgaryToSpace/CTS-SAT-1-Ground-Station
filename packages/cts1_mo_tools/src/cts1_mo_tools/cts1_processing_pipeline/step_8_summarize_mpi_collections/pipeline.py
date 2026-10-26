@@ -1,4 +1,4 @@
-"""Step 7: summarize MPI collections, alongside the satellite's own
+"""Step 8: summarize MPI collections, alongside the satellite's own
 analyses of its MPI data files.
 
 Step 6 recovers MPI frames from bulk file downlinks and labels each with
@@ -22,12 +22,16 @@ Every frame collection overlapping an analysis's `earliest`..`latest` is
 merged into it, and the collection is then timed by the analysis -- the
 whole file on board, not just the frames that happened to be downlinked --
 with the file's metadata alongside. An analysis with no frames downlinked
-yet is still a collection. The result is `mpi_collections.parquet`
-(`summarize_mpi_collections`).
+yet is still a collection. Each collection also gets the integration
+period(s) and board temperature range its frames reported, and where the
+satellite was at its start/end and whether it was sunlit, propagated from
+step 7's TLE history (see `orbit.py`). The result is
+`mpi_collections.parquet` (`summarize_mpi_collections`).
 
-This step reads step 5's and step 6's output (step 5's is optional: without
-it, the collections just aren't merged with any analyses). Like steps 2-6,
-it's parquet-in-parquet-out and reprocesses from scratch on every run.
+This step reads the output of steps 5, 6 and 7 (5's and 7's are optional:
+without them, the collections just aren't merged with any analyses, or
+placed in orbit). Like steps 2-6, it's parquet-in-parquet-out and
+reprocesses from scratch on every run.
 """
 
 from __future__ import annotations
@@ -55,11 +59,15 @@ import polars as pl
 from loguru import logger
 
 from cts1_mo_tools.cts1_decode_satnogs_packets import MAX_VALID_EPOCH_MS
+from cts1_mo_tools.cts1_processing_pipeline import orbit
 from cts1_mo_tools.cts1_processing_pipeline.step_5_reassemble_tcmd_responses import (
     pipeline as step_5_pipeline,
 )
 from cts1_mo_tools.cts1_processing_pipeline.step_6_extract_mpi_frames import (
     pipeline as step_6_pipeline,
+)
+from cts1_mo_tools.cts1_processing_pipeline.step_7_fetch_tle_history import (
+    pipeline as step_7_pipeline,
 )
 
 if TYPE_CHECKING:
@@ -92,6 +100,12 @@ _FRAME_COLLECTIONS_SCHEMA = {
     "largest_gap_frames": pl.Int64,
     "largest_gap_started_at": pl.Datetime("us", "UTC"),
     "largest_gap_duration_ms": pl.Int64,
+    # Every distinct integration period the frames reported, as a JSON
+    # array, e.g. "[260]".
+    "integration_periods": pl.String,
+    # The range of the MPI's board temperature over the frames.
+    "board_temperature_min_c": pl.Float64,
+    "board_temperature_max_c": pl.Float64,
 }
 
 # One `analyze_mpi_data` telecommand response, as `extract_all_mpi_analyses`
@@ -162,8 +176,28 @@ _COLLECTIONS_SCHEMA = {
     # 0 for an analysis with no frames downlinked yet, more than 1 when one
     # file holds several recordings.
     "frame_collection_count": pl.Int64,
+    # Where the satellite was at `collection_started_at`/
+    # `collection_ended_at`, and whether it was in sunlight over that time --
+    # see `orbit.py`. Null without a TLE from before the collection started.
+    "start_latitude_deg": pl.Float64,
+    "start_longitude_deg": pl.Float64,
+    "end_latitude_deg": pl.Float64,
+    "end_longitude_deg": pl.Float64,
+    # The least/most of the Sun visible from the satellite over the
+    # collection (sampled every `_SUN_SAMPLE_STEP`): 0 in Earth's umbra, 1 in
+    # full sunlight.
+    "sun_fraction_min": pl.Float64,
+    "sun_fraction_max": pl.Float64,
+    # "yes" (in full sunlight throughout), "no" (in the umbra throughout), or
+    # "partly".
+    "sunlit": pl.String,
+    # The epoch of the TLE `collection_started_at` was propagated from.
+    "orbit_tle_epoch": pl.Datetime("us", "UTC"),
     **_FILE_ANALYSES_SCHEMA,
 }
+
+# How often the satellite's lighting is sampled over a collection.
+_SUN_SAMPLE_STEP = timedelta(seconds=1)
 
 # The `action` of an `analyze_mpi_data` telecommand's response -- any
 # version, e.g. "analyze_mpi_data_v1".
@@ -450,6 +484,17 @@ def _summarize_frame_collections(frames: pl.DataFrame) -> pl.DataFrame:
             largest_gap_frames=pl.col("gap_frames").max().fill_null(0),
             largest_gap_started_at=at_largest_gap("gap_started_at"),
             largest_gap_ended_at=at_largest_gap("gap_ended_at"),
+            integration_periods=pl.format(
+                "[{}]",
+                pl.col("integration_period")
+                .drop_nulls()
+                .unique()
+                .sort()
+                .cast(pl.String)
+                .str.join(","),
+            ),
+            board_temperature_min_c=pl.col("board_temperature_c").min(),
+            board_temperature_max_c=pl.col("board_temperature_c").max(),
         )
         .with_columns(
             frames_expected=pl.col("last_frame_counter")
@@ -515,6 +560,20 @@ def _merged_collection(
         },
         "first_frame_counter": collections[0]["first_frame_counter"],
         "last_frame_counter": collections[-1]["last_frame_counter"],
+        "integration_periods": json.dumps(
+            sorted(
+                {p for c in collections for p in json.loads(c["integration_periods"])}
+            ),
+            separators=(",", ":"),
+        ),
+        "board_temperature_min_c": min(
+            (t for c in collections if (t := c["board_temperature_min_c"]) is not None),
+            default=None,
+        ),
+        "board_temperature_max_c": max(
+            (t for c in collections if (t := c["board_temperature_max_c"]) is not None),
+            default=None,
+        ),
         **{
             key: largest_gap[key]
             for key in (
@@ -526,8 +585,73 @@ def _merged_collection(
     }
 
 
+def _sunlit(
+    sun_fraction_min: float | None, sun_fraction_max: float | None
+) -> str | None:
+    if sun_fraction_min is None or sun_fraction_max is None:
+        return None
+    if sun_fraction_min >= 1:
+        return "yes"
+    return "no" if sun_fraction_max <= 0 else "partly"
+
+
+def _with_orbit(collections: pl.DataFrame, tle_history: pl.DataFrame) -> pl.DataFrame:
+    """`collections` with their orbit columns filled in: each start/end, and
+    each `_SUN_SAMPLE_STEP` between, propagated from the TLE right before it.
+    """
+    starts = collections["collection_started_at"].to_list()
+    ends = collections["collection_ended_at"].to_list()
+    at_start = orbit.ephemeris(tle_history, starts)
+    at_end = orbit.ephemeris(tle_history, ends)
+    # Every sample time of every collection, start and end included.
+    samples = [
+        (i, t)
+        for i, (start, end) in enumerate(zip(starts, ends, strict=True))
+        for t in [
+            *(
+                start + k * _SUN_SAMPLE_STEP
+                for k in range(int((end - start) / _SUN_SAMPLE_STEP))
+            ),
+            end,
+        ]
+    ]
+    lighting = (
+        orbit.ephemeris(tle_history, [t for _, t in samples])
+        .with_columns(_collection=pl.Series([i for i, _ in samples], dtype=pl.Int64))
+        .group_by("_collection")
+        .agg(
+            sun_fraction_min=pl.col("sun_fraction").min(),
+            sun_fraction_max=pl.col("sun_fraction").max(),
+        )
+        .sort("_collection")
+    )
+    sun = pl.DataFrame({"_collection": range(collections.height)}).join(
+        lighting, on="_collection", how="left"
+    )
+    return collections.with_columns(
+        start_latitude_deg=at_start["latitude_deg"],
+        start_longitude_deg=at_start["longitude_deg"],
+        end_latitude_deg=at_end["latitude_deg"],
+        end_longitude_deg=at_end["longitude_deg"],
+        sun_fraction_min=sun["sun_fraction_min"],
+        sun_fraction_max=sun["sun_fraction_max"],
+        sunlit=pl.Series(
+            [
+                _sunlit(lo, hi)
+                for lo, hi in zip(
+                    sun["sun_fraction_min"], sun["sun_fraction_max"], strict=True
+                )
+            ],
+            dtype=pl.String,
+        ),
+        orbit_tle_epoch=at_start["tle_epoch"],
+    )
+
+
 def summarize_mpi_collections(
-    frames: pl.DataFrame, analyses: pl.DataFrame | None = None
+    frames: pl.DataFrame,
+    analyses: pl.DataFrame | None = None,
+    tle_history: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     """One row per MPI collection, oldest first -- see `_COLLECTIONS_SCHEMA`.
 
@@ -538,6 +662,10 @@ def summarize_mpi_collections(
     on board, rather than just whichever frames were downlinked -- and its
     file metadata comes along. Every analysis is a collection, even with no
     frames downlinked yet; every other frame collection stays as it was.
+
+    Each collection is then placed in orbit from `tle_history` (step 7's
+    `tle_history.parquet`) -- see `_with_orbit`. Without it, the orbit
+    columns are null.
     """
     frame_collections = _summarize_frame_collections(frames)
     analysis_rows = [] if analyses is None else analyses.to_dicts()
@@ -561,7 +689,7 @@ def summarize_mpi_collections(
     ]
     if not rows:
         return pl.DataFrame(schema=_COLLECTIONS_SCHEMA)
-    return (
+    collections = (
         pl.DataFrame(rows, schema=_COLLECTIONS_SCHEMA)
         .with_columns(
             collection_duration_ms=(
@@ -570,6 +698,9 @@ def summarize_mpi_collections(
         )
         .sort("collection_started_at")
     )
+    if tle_history is None or tle_history.is_empty():
+        return collections
+    return _with_orbit(collections, tle_history)
 
 
 def _write_parquet_atomic(df: pl.DataFrame, path: Path) -> None:
@@ -583,11 +714,12 @@ def _write_parquet_atomic(df: pl.DataFrame, path: Path) -> None:
 
 def run(*, data_dir: Path = DEFAULT_DATA_DIR) -> None:
     """Recompute `mpi_analyses.parquet` and `mpi_collections.parquet` from
-    step 6's (and, if it's there, step 5's) output.
+    step 6's (and, if they're there, steps 5 and 7's) output.
 
-    Reads `mpi_frames.parquet` and `reassembled_tcmd_responses.parquet` from
-    `data_dir` (where steps 6 and 5 write them) and writes the result back
-    into the same directory -- parquet-in-parquet-out, no database involved.
+    Reads `mpi_frames.parquet`, `reassembled_tcmd_responses.parquet` and
+    `tle_history.parquet` from `data_dir` (where steps 6, 5 and 7 write
+    them) and writes the result back into the same directory --
+    parquet-in-parquet-out, no database involved.
     """
     frames_path = data_dir / step_6_pipeline.OUTPUT_FILENAME
     if not frames_path.exists():
@@ -607,7 +739,16 @@ def run(*, data_dir: Path = DEFAULT_DATA_DIR) -> None:
     analyses_path = data_dir / ANALYSES_OUTPUT_FILENAME
     _write_parquet_atomic(all_analyses, analyses_path)
 
-    collections = summarize_mpi_collections(frames, primary_mpi_analyses(all_analyses))
+    tle_path = data_dir / step_7_pipeline.OUTPUT_FILENAME
+    if tle_path.exists():
+        logger.info(f"Reading {tle_path}")
+        tle_history = pl.read_parquet(tle_path)
+    else:
+        logger.warning(f"{tle_path} not found -- no orbit positions (run step_7).")
+        tle_history = None
+    collections = summarize_mpi_collections(
+        frames, primary_mpi_analyses(all_analyses), tle_history
+    )
     collections_path = data_dir / COLLECTIONS_OUTPUT_FILENAME
     _write_parquet_atomic(collections, collections_path)
 

@@ -55,8 +55,11 @@ from cts1_mo_tools.cts1_processing_pipeline.step_5_reassemble_tcmd_responses imp
 from cts1_mo_tools.cts1_processing_pipeline.step_6_extract_mpi_frames import (
     pipeline as step_6_pipeline,
 )
-from cts1_mo_tools.cts1_processing_pipeline.step_7_summarize_mpi_collections import (
+from cts1_mo_tools.cts1_processing_pipeline.step_7_fetch_tle_history import (
     pipeline as step_7_pipeline,
+)
+from cts1_mo_tools.cts1_processing_pipeline.step_8_summarize_mpi_collections import (
+    pipeline as step_8_pipeline,
 )
 
 from . import pipeline_status
@@ -216,22 +219,36 @@ TABLE_SPECS: tuple[TableSpec, ...] = (
         lineage_columns=("packet_ids",),
     ),
     TableSpec(
+        key="tle_history",
+        step="Step 7 -- Fetch TLE History",
+        description=(
+            "Every TLE Space-Track has published for the satellite (from the "
+            "juliensimon/space-track-tle-history Hugging Face dataset), one "
+            "row per TLE: its epoch and orbital elements."
+        ),
+        filename=step_7_pipeline.OUTPUT_FILENAME,
+        time_column="epoch",
+        has_packet_type=False,
+    ),
+    TableSpec(
         key="mpi_collections",
-        step="Step 7 -- Summarize MPI Collections",
+        step="Step 8 -- Summarize MPI Collections",
         description=(
             "MPI collections, one row per recording: start/end time and "
             "duration (from the on-board analyze_mpi_data analysis when "
             "there is one), the analysis's file metadata and frame counts, "
-            "and the frames received vs expected from the frame counters, "
-            "with the largest gap."
+            "the satellite's start/end position and lighting (SGP4, from the "
+            "TLE history), and the frames received vs expected from the frame "
+            "counters, with the largest gap, integration period(s) and MPI "
+            "temperature range."
         ),
-        filename=step_7_pipeline.COLLECTIONS_OUTPUT_FILENAME,
+        filename=step_8_pipeline.COLLECTIONS_OUTPUT_FILENAME,
         time_column="collection_started_at",
         has_packet_type=False,
     ),
     TableSpec(
         key="mpi_analyses",
-        step="Step 7 -- Summarize MPI Collections",
+        step="Step 8 -- Summarize MPI Collections",
         description=(
             "Every distinct analyze_mpi_data telecommand response (the "
             "satellite's own analysis of an MPI data file on board), one row "
@@ -239,7 +256,7 @@ TABLE_SPECS: tuple[TableSpec, ...] = (
             "earliest/latest timestamps, strong signals at the threshold "
             "used, and the raw response."
         ),
-        filename=step_7_pipeline.ANALYSES_OUTPUT_FILENAME,
+        filename=step_8_pipeline.ANALYSES_OUTPUT_FILENAME,
         time_column="analysis_started_at",
         has_packet_type=False,
     ),

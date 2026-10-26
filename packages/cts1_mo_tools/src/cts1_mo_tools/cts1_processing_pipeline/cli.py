@@ -18,6 +18,8 @@ Usage (uv):
     uv run cts1_processing_pipeline step_5
     uv run cts1_processing_pipeline step_6
     uv run cts1_processing_pipeline step_7
+    uv run cts1_processing_pipeline step_8
+    uv run cts1_processing_pipeline parquet_steps
     uv run cts1_processing_pipeline daemon
     uv run cts1_processing_pipeline daemon --start "3 days" --interval 5
     uv run cts1_processing_pipeline daemon --idle-backfill
@@ -55,8 +57,9 @@ from .step_5_reassemble_tcmd_responses import (
     pipeline as step_5_reassemble_tcmd_responses,
 )
 from .step_6_extract_mpi_frames import pipeline as step_6_extract_mpi_frames
-from .step_7_summarize_mpi_collections import (
-    pipeline as step_7_summarize_mpi_collections,
+from .step_7_fetch_tle_history import pipeline as step_7_fetch_tle_history
+from .step_8_summarize_mpi_collections import (
+    pipeline as step_8_summarize_mpi_collections,
 )
 
 DEFAULT_DATA_DIR = step_0_list_observations.DEFAULT_DATA_DIR
@@ -150,15 +153,33 @@ class Step6Args:
 
 @dataclass(frozen=True, slots=True)
 class Step7Args:
-    """Step 7: collect every analyze_mpi_data response from
+    """Step 7: fetch the satellite's TLE history (Space-Track's, via
+    Hugging Face) into tle_history -- at most every 6 hours."""
+
+    norad_id: Annotated[str, tyro.conf.Positional] = "69015"
+    """NORAD catalog ID of the satellite (default: 69015, CTS-SAT-1)."""
+
+
+@dataclass(frozen=True, slots=True)
+class Step8Args:
+    """Step 8: collect every analyze_mpi_data response from
     reassembled_tcmd_responses into mpi_analyses, and summarize mpi_frames
-    per MPI collection (merged with those analyses) into mpi_collections."""
+    per MPI collection (merged with those analyses, and placed in orbit from
+    tle_history) into mpi_collections."""
+
+
+@dataclass(frozen=True, slots=True)
+class ParquetStepsArgs:
+    """Run every parquet-in-parquet-out step (2-6 and 8) once, in order --
+    e.g. to regenerate their outputs after changing one of them. Unlike the
+    daemon, this doesn't list, download or fetch anything (steps 0, 1 and
+    7): step 8 uses whatever tle_history is already in --data-dir."""
 
 
 @dataclass(frozen=True, slots=True)
 class DaemonArgs:
-    """Daemon: run steps 0-7 continuously -- an initial backfill of
-    `--start`, then a full steps 0-7 rerun every `--interval` minutes."""
+    """Daemon: run steps 0-8 continuously -- an initial backfill of
+    `--start`, then a full steps 0-8 rerun every `--interval` minutes."""
 
     norad_id: Annotated[str, tyro.conf.Positional] = "69015"
     """NORAD catalog ID of the satellite (default: 69015, CTS-SAT-1)."""
@@ -209,23 +230,37 @@ Command = (
     | Annotated[Step5Args, tyro.conf.subcommand(name="step_5", prefix_name=False)]
     | Annotated[Step6Args, tyro.conf.subcommand(name="step_6", prefix_name=False)]
     | Annotated[Step7Args, tyro.conf.subcommand(name="step_7", prefix_name=False)]
+    | Annotated[Step8Args, tyro.conf.subcommand(name="step_8", prefix_name=False)]
+    | Annotated[
+        ParquetStepsArgs,
+        tyro.conf.subcommand(name="parquet_steps", prefix_name=False),
+    ]
     | Annotated[DaemonArgs, tyro.conf.subcommand(name="daemon", prefix_name=False)]
 )
 
 
 # The steps that take nothing but `--data-dir` (the parquet-in-parquet-out
-# ones), by their args type.
+# ones), by their args type, with their step number -- in the order
+# `parquet_steps` runs them.
 _DATA_DIR_ONLY_STEPS: dict[
-    type[Step2Args | Step3Args | Step4Args | Step5Args | Step6Args | Step7Args],
-    Callable[..., None],
+    type[Step2Args | Step3Args | Step4Args | Step5Args | Step6Args | Step8Args],
+    tuple[int, Callable[..., None]],
 ] = {
-    Step2Args: step_2_deduplicate_packets.run,
-    Step3Args: step_3_decode_packets.run,
-    Step4Args: step_4_detect_satellite_events.run,
-    Step5Args: step_5_reassemble_tcmd_responses.run,
-    Step6Args: step_6_extract_mpi_frames.run,
-    Step7Args: step_7_summarize_mpi_collections.run,
+    Step2Args: (2, step_2_deduplicate_packets.run),
+    Step3Args: (3, step_3_decode_packets.run),
+    Step4Args: (4, step_4_detect_satellite_events.run),
+    Step5Args: (5, step_5_reassemble_tcmd_responses.run),
+    Step6Args: (6, step_6_extract_mpi_frames.run),
+    Step8Args: (8, step_8_summarize_mpi_collections.run),
 }
+
+
+def _run_parquet_steps(data_dir: Path) -> None:
+    """Run every step in `_DATA_DIR_ONLY_STEPS`, in order."""
+    for number, run in _DATA_DIR_ONLY_STEPS.values():
+        logger.info(f"Starting step {number}: {daemon.STEP_NAMES[number]}.")
+        run(data_dir=data_dir)
+    logger.info("Finished the parquet-in-parquet-out steps.")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -294,9 +329,16 @@ def main() -> None:
             )
         elif isinstance(
             args.command,
-            (Step2Args, Step3Args, Step4Args, Step5Args, Step6Args, Step7Args),
+            (Step2Args, Step3Args, Step4Args, Step5Args, Step6Args, Step8Args),
         ):
-            _DATA_DIR_ONLY_STEPS[type(args.command)](data_dir=args.data_dir)
+            _, run = _DATA_DIR_ONLY_STEPS[type(args.command)]
+            run(data_dir=args.data_dir)
+        elif isinstance(args.command, Step7Args):
+            step_7_fetch_tle_history.run(
+                norad_id=args.command.norad_id, data_dir=args.data_dir
+            )
+        elif isinstance(args.command, ParquetStepsArgs):
+            _run_parquet_steps(args.data_dir)
         elif isinstance(args.command, DaemonArgs):  # pyright: ignore[reportUnnecessaryIsInstance]
             daemon.run(
                 norad_id=args.command.norad_id,
