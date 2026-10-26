@@ -26,8 +26,8 @@ from typing import TYPE_CHECKING
 from nicegui import run, ui
 
 from cts1_mo_tools.cts1_processing_pipeline import daemon_signals
-from cts1_mo_tools.cts1_processing_pipeline.common import duration_str
 from cts1_mo_tools.cts1_processing_pipeline.daemon_signals import DaemonState
+from cts1_mo_tools.time_str import age_str, duration_str
 
 from . import pipeline_status as status_data
 from .layout import page_shell
@@ -76,19 +76,6 @@ _DAEMON_STATE_DISPLAY = {
 }
 
 
-def _age_str(value: datetime) -> str:
-    """ "X ago" for a past `value`, "in X" for a future one -- `value` can
-    legitimately be in the future for `latest_observation_end`: step 1
-    pulls every SatNOGS observation with `start < now`, not `end < now`,
-    so an observation that's already started but hasn't finished yet
-    (status "future"/in-progress) has an `end` still ahead of "now".
-    """
-    delta = (datetime.now(UTC) - value).total_seconds()
-    if delta < 0:
-        return f"in {duration_str(int(-delta))}"
-    return f"{duration_str(int(delta))} ago"
-
-
 def _source_icon(source: str) -> None:
     """A small info icon carrying a tooltip naming the pipeline step + table
     (+ column, where relevant) a value was pulled from, so a viewer can
@@ -117,7 +104,7 @@ def _freshness_row(label: str, value: datetime | None, *, source: str) -> None:
             color, icon = "positive", "check_circle"
         with ui.row().classes("items-center gap-1"):
             ui.icon(icon, color=color)
-            ui.label(f"{value:%Y-%m-%d %H:%M:%S} UTC ({_age_str(value)})").classes(
+            ui.label(f"{value:%Y-%m-%d %H:%M:%S} UTC ({age_str(value)})").classes(
                 f"text-{color}"
             )
 
@@ -148,7 +135,7 @@ def _plain_row(label: str, value: str | None, *, source: str) -> None:
 def _first_packet_value(value: datetime | None) -> str | None:
     if value is None:
         return None
-    return f"{value:%Y-%m-%d %H:%M:%S} UTC ({_age_str(value)})"
+    return f"{value:%Y-%m-%d %H:%M:%S} UTC ({age_str(value)})"
 
 
 def _largest_gap_value(summary: status_data.PacketCompletenessSummary) -> str | None:
@@ -159,7 +146,7 @@ def _largest_gap_value(summary: status_data.PacketCompletenessSummary) -> str | 
     ):
         return None
     return (
-        f"{duration_str(int(summary.largest_gap.total_seconds()))} "
+        f"{duration_str(summary.largest_gap)} "
         f"(from {summary.largest_gap_from:%Y-%m-%d %H:%M:%S} "
         f"to {summary.largest_gap_to:%Y-%m-%d %H:%M:%S} UTC)"
     )
@@ -287,9 +274,9 @@ def _daemon_detail_text(status: daemon_signals.DaemonStatus | None) -> str | Non
     if status.progress is not None and status.is_processing:
         parts.append(str(status.progress))
     if status.updated_at is not None:
-        parts.append(f"last heartbeat {_age_str(status.updated_at)}")
+        parts.append(f"last heartbeat {age_str(status.updated_at)}")
     if status.last_run_finished_at is not None and not status.is_processing:
-        parts.append(f"last run finished {_age_str(status.last_run_finished_at)}")
+        parts.append(f"last run finished {age_str(status.last_run_finished_at)}")
     return " · ".join(parts) if parts else None
 
 
@@ -331,7 +318,7 @@ def _daemon_section(data_dir: Path) -> None:
                 # request raised mid-run legitimately sits here for a while
                 # -- say so, rather than leaving the button looking stuck.
                 requested = (
-                    f" (requested {_age_str(pending.requested_at)})"
+                    f" (requested {age_str(pending.requested_at)})"
                     if pending.requested_at is not None
                     else ""
                 )
@@ -418,7 +405,7 @@ def _decoder_tools_table(stats: list[status_data.DecoderToolStats]) -> None:
                 ),
                 "last_version": s.last_version or "",
                 "last_run_at": (
-                    f"{s.last_run_at:%Y-%m-%d %H:%M:%S} ({_age_str(s.last_run_at)})"
+                    f"{s.last_run_at:%Y-%m-%d %H:%M:%S} ({age_str(s.last_run_at)})"
                     if s.last_run_at is not None
                     else "never"
                 ),

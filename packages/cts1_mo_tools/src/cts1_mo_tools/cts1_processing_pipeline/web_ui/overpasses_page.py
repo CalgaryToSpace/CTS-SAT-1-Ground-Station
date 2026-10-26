@@ -24,6 +24,8 @@ import requests
 from loguru import logger
 from nicegui import app, events, run, ui
 
+from cts1_mo_tools.time_str import duration_str
+
 from . import overpasses
 from .layout import page_shell
 
@@ -138,18 +140,6 @@ class _Prediction:
     passes: list[overpasses.Overpass]
 
 
-def _duration_str(delta: timedelta) -> str:
-    total_sec = int(delta.total_seconds())
-    days, rem = divmod(total_sec, 86400)
-    hours, rem = divmod(rem, 3600)
-    minutes, seconds = divmod(rem, 60)
-    if days:
-        return f"{days}d {hours}h {minutes}m"
-    if hours:
-        return f"{hours}h {minutes}m {seconds}s"
-    return f"{minutes}m {seconds}s"
-
-
 def _pass_status(p: overpasses.Overpass, now: datetime) -> str:
     if p.aos <= now < p.los:
         return "In progress"
@@ -161,7 +151,7 @@ def _pass_status(p: overpasses.Overpass, now: datetime) -> str:
 def _time_until_aos_str(p: overpasses.Overpass, now: datetime) -> str:
     if p.aos <= now:
         return "—"
-    return _duration_str(p.aos - now)
+    return duration_str(p.aos - now)
 
 
 def _direction_str(azimuth_deg: float) -> str:
@@ -237,7 +227,7 @@ def _pass_rows(
             "los_utc": p.los.strftime(_UTC_DATETIME_FORMAT),
             "aos_local": p.aos.astimezone(tz).strftime(_LOCAL_DATETIME_FORMAT),
             "los_local": p.los.astimezone(tz).strftime(_LOCAL_DATETIME_FORMAT),
-            "duration": _duration_str(p.duration),
+            "duration": duration_str(p.duration),
             "max_elevation": f"{p.max_elevation_deg:.1f}°",
             "direction": (
                 f"{_direction_str(p.aos_azimuth_deg)} → "
@@ -365,15 +355,15 @@ def _next_pass_summary(prediction: _Prediction) -> str:
         if p.aos <= now < p.los:
             return (
                 f"Pass in progress over {prediction.station.name}: LOS in "
-                f"{_duration_str(p.los - now)} (max elevation "
+                f"{duration_str(p.los - now)} (max elevation "
                 f"{p.max_elevation_deg:.1f}°)."
             )
         if now < p.aos:
             return (
                 f"Next pass over {prediction.station.name}: AOS in "
-                f"{_duration_str(p.aos - now)}, at "
+                f"{duration_str(p.aos - now)}, at "
                 f"{p.aos.astimezone(tz):%a %H:%M:%S %Z} (max elevation "
-                f"{p.max_elevation_deg:.1f}°, {_duration_str(p.duration)} long)."
+                f"{p.max_elevation_deg:.1f}°, {duration_str(p.duration)} long)."
             )
     return "No upcoming passes in the selected window."
 
@@ -385,7 +375,7 @@ def _tle_card(prediction: _Prediction) -> None:
         ui.label("TLE (from SatNOGS DB)").classes("text-lg font-bold")
         ui.label(
             f"{tle.name} -- epoch {tle.epoch:%Y-%m-%d %H:%M:%S} UTC "
-            f"({_duration_str(now - tle.epoch)} old), source: {tle.source}, "
+            f"({duration_str(now - tle.epoch)} old), source: {tle.source}, "
             f"last updated in SatNOGS DB {tle.updated_at:%Y-%m-%d %H:%M:%S} UTC."
         ).classes("text-caption text-grey")
         ui.code(f"{tle.line1}\n{tle.line2}", language="text").classes("w-full")
@@ -416,12 +406,12 @@ def _send_notification(
     title = (
         f"{where}: AOS now"
         if kind == "aos"
-        else f"{where}: AOS in {_duration_str(p.aos - now)}"
+        else f"{where}: AOS in {duration_str(p.aos - now)}"
     )
     body = (
         f"AOS {p.aos.astimezone(tz):%H:%M:%S %Z}, "
         f"LOS {p.los.astimezone(tz):%H:%M:%S %Z} "
-        f"({_duration_str(p.duration)}), max elevation "
+        f"({duration_str(p.duration)}), max elevation "
         f"{p.max_elevation_deg:.1f}°, "
         f"{overpasses.compass_direction(p.aos_azimuth_deg)} → "
         f"{overpasses.compass_direction(p.los_azimuth_deg)}."
