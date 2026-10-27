@@ -196,16 +196,20 @@ def test_before_beacon_from_a_previous_boot_gives_null_delta() -> None:
     assert result["tcmd_count_delta"].to_list()[0] is None
 
 
-def _counts(*beacons: tuple[float, int]) -> pl.DataFrame:
-    """Beacon `(beacon_utc_time minutes, total_tcmd_queued_count)` pairs."""
+def _counts(*beacons: tuple[float, int] | tuple[float, int, float]) -> pl.DataFrame:
+    """Beacon `(beacon_utc_time minutes, total_tcmd_queued_count)` pairs,
+    optionally with a third `count_since` minutes (null if left out).
+    """
     return pl.DataFrame(
         {
-            "beacon_utc_time": [_at(m) for m, _ in beacons],
-            "total_tcmd_queued_count": [c for _, c in beacons],
+            "beacon_utc_time": [_at(b[0]) for b in beacons],
+            "total_tcmd_queued_count": [b[1] for b in beacons],
+            "count_since": [_at(b[2]) if len(b) > 2 else None for b in beacons],
         },
         schema={
             "beacon_utc_time": pl.Datetime("us", "UTC"),
             "total_tcmd_queued_count": pl.Int64,
+            "count_since": pl.Datetime("us", "UTC"),
         },
     )
 
@@ -271,3 +275,37 @@ def test_tcmds_per_pass_shared_gap_beacon_counts_once() -> None:
     counts = _counts((-10, 10), (50, 12), (200, 17))
     result = tcmds_uplinked_per_pass(counts, _passes((0, 10), (90, 100)))
     assert result["tcmd_count_delta"].to_list() == [2, 5]
+
+
+def test_tcmds_per_pass_count_since_spans_beaconless_gap() -> None:
+    # No beacon between the passes, but the one after the second shows its
+    # count unchanged since minute 10.5 -- within the first pass's margin -- so
+    # the first pass uplinked all 7 and the second none.
+    counts = _counts((-10, 10), (200, 17, 10.5))
+    result = tcmds_uplinked_per_pass(counts, _passes((0, 10), (90, 100)))
+    assert result.select("tcmd_count_before", "tcmd_count_after").rows() == [
+        (10, 17),
+        (17, 17),
+    ]
+
+
+def test_tcmds_per_pass_count_since_after_the_instant_is_not_used() -> None:
+    # The count last changed at minute 95, during the second pass: it's no
+    # help for either side of the gap.
+    counts = _counts((-10, 10), (200, 17, 95))
+    result = tcmds_uplinked_per_pass(counts, _passes((0, 10), (90, 100)))
+    assert result.select("tcmd_count_before", "tcmd_count_after").rows() == [
+        (10, None),
+        (None, 17),
+    ]
+
+
+def test_tcmds_per_pass_count_since_late_uplink_counts_for_earlier_pass() -> None:
+    # The last uplink came in at minute 20, well past the first pass's
+    # LOS + margin but long before the second pass: it's the first pass's.
+    counts = _counts((-10, 10), (200, 17, 20))
+    result = tcmds_uplinked_per_pass(counts, _passes((0, 10), (90, 100)))
+    assert result.select("tcmd_count_before", "tcmd_count_after").rows() == [
+        (10, 17),
+        (17, 17),
+    ]
