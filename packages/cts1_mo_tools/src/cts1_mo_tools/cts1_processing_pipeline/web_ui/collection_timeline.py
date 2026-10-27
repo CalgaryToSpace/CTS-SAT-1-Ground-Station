@@ -17,11 +17,16 @@ self-reported timestamps), never when the ground station received it:
 Something downlinked many times (a re-sent beacon, a GNSS sample in more
 than one ring buffer dump) still only has one collection time, so each
 source is deduplicated by it.
+
+The distinct times are then binned (`BIN_SECONDS`), keeping how many fell in
+each bin: there can be ~100k of them, far more than the chart can show
+apart or the browser can take quickly.
 """
 
 from __future__ import annotations
 
 __all__ = [
+    "BIN_SECONDS",
     "FALLBACK_LAUNCHED_AT",
     "TIMELINE_SOURCES",
     "launched_at",
@@ -60,7 +65,14 @@ GNSS_SAMPLES = "GNSS samples"
 TIMELINE_SOURCES = (BASIC_BEACONS, EXTENDED_BEACONS, MPI_FRAMES, GNSS_SAMPLES)
 
 _SOURCE_ENUM = pl.Enum(TIMELINE_SOURCES)
-_SCHEMA = {"source": _SOURCE_ENUM, "collected_at": pl.Datetime("us", "UTC")}
+_SCHEMA = {
+    "source": _SOURCE_ENUM,
+    "collected_at": pl.Datetime("us", "UTC"),
+    "count": pl.UInt32,
+}
+
+# The width of each timeline bin.
+BIN_SECONDS = 15
 
 # What SatNOGS DB said when this was written -- used until it answers.
 FALLBACK_LAUNCHED_AT = datetime(2026, 5, 3, 6, 59, tzinfo=UTC)
@@ -143,10 +155,12 @@ def _mpi_frames(mpi_frames: pl.LazyFrame) -> pl.LazyFrame:
 
 @cached(TTLCache(maxsize=2, ttl=_CACHE_TTL_SECONDS))
 def load_collection_timeline(data_dir: Path) -> pl.DataFrame:
-    """One row per distinct (`source`, `collected_at`) -- see the module
-    docstring -- ordered by source (`TIMELINE_SOURCES`), then time. Sources
-    whose pipeline output doesn't exist yet are just left out. Blocking (it
-    may fetch the launch date) -- call it off the event loop.
+    """One row per `BIN_SECONDS` bin of each source with anything in it:
+    `collected_at` (the bin's start) and `count`, how many distinct
+    collection times fell in it -- see the module docstring -- ordered by
+    source (`TIMELINE_SOURCES`), then time. Sources whose pipeline output
+    doesn't exist yet are just left out. Blocking (it may fetch the launch
+    date) -- call it off the event loop.
     """
     parts: list[pl.LazyFrame] = []
     decoded_path = data_dir / step_3_pipeline.OUTPUT_FILENAME
@@ -162,6 +176,8 @@ def load_collection_timeline(data_dir: Path) -> pl.DataFrame:
         pl.concat(parts)
         .drop_nulls("collected_at")
         .unique()
+        .group_by("source", pl.col("collected_at").dt.truncate(f"{BIN_SECONDS}s"))
+        .agg(count=pl.len().cast(pl.UInt32))
         .sort("source", "collected_at")
         .collect()
     )
