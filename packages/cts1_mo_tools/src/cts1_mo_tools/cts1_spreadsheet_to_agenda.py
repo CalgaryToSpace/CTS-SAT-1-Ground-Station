@@ -356,17 +356,8 @@ def _build_single_entries(
 
     command = format_command(ctx.cmd, state.tssent, tsexec, ctx.resp)
 
-    entries: list[tuple[int, str]] = []
-    for _ in range(repeat):
-        state.tssent += timedelta(seconds=1)
-        command = format_command(ctx.cmd, state.tssent, tsexec, ctx.resp)
-        entries.append((epoch_ms(state.tssent), command))
-
-    random_entries: list[str] = []
-    for _ in range(random_repeat):
-        state.tssent += timedelta(seconds=1)
-        command = format_command(ctx.cmd, state.tssent, tsexec, ctx.resp)
-        random_entries.append(command)
+    entries = [(epoch_ms(state.tssent), command) for _ in range(repeat)]
+    random_entries = [command for _ in range(random_repeat)]
 
     return entries, random_entries
 
