@@ -333,15 +333,18 @@ class _RowContext:
     resp: str
 
 
+@dataclass
+class _TimestampState:
+    tssent: datetime
+
+
 def _build_single_entries(
     ctx: _RowContext,
     repeat: int,
     random_repeat: int,
-    row_index: int,
+    state: _TimestampState,
 ) -> tuple[list[tuple[int, str]], list[str]]:
-    """Unique tssent values are generated using the pass start time, incremented by 1 s
-    for each row. Error handling is handled in _parse_pass_start()."""
-    tssent = ctx.pass_start + timedelta(seconds=row_index)
+    state.tssent += timedelta(seconds=1)
 
     """Schedule custom tsexec values"""
     tsexec = parse_time(ctx.pass_date, ctx.pass_start, ctx.row["tsexec Start (UTC)"])
@@ -351,9 +354,9 @@ def _build_single_entries(
     if tsexec <= datetime.now(UTC):
         logger.warning(f"tsexec for {ctx.cmd} is in the past: {tsexec.isoformat()}")
 
-    command = format_command(ctx.cmd, tssent, tsexec, ctx.resp)
+    command = format_command(ctx.cmd, state.tssent, tsexec, ctx.resp)
 
-    entries = [(epoch_ms(tssent), command) for _ in range(repeat)]
+    entries = [(epoch_ms(state.tssent), command) for _ in range(repeat)]
     random_entries = [command for _ in range(random_repeat)]
 
     return entries, random_entries
@@ -361,11 +364,9 @@ def _build_single_entries(
 
 def _build_interval_entries(
     ctx: _RowContext,
-    row_index: int,
+    state: _TimestampState,
 ) -> list[tuple[int, str]]:
-    """Unique tssent values are generated using the pass start time, incremented by 1 s
-    for each row. Error handling is handled in _parse_pass_start()."""
-    tssent = ctx.pass_start + timedelta(seconds=row_index)
+    state.tssent += timedelta(seconds=1)
 
     tsexec_start = parse_time(
         ctx.pass_date, ctx.pass_start, ctx.row["tsexec Start (UTC)"]
@@ -391,9 +392,10 @@ def _build_interval_entries(
     current = tsexec_start
 
     while current <= tsexec_end:
-        command = format_command(ctx.cmd, tssent, current, ctx.resp)
+        command = format_command(ctx.cmd, state.tssent, current, ctx.resp)
         entries.append((epoch_ms(current), command))
         current += interval
+        state.tssent += timedelta(seconds=1)
 
     return entries
 
@@ -409,7 +411,9 @@ def build_agenda(
     ] = []  # Tuple of (epoch_ms of tssent, the formatted command line)
     random_commands: list[str] = []
 
-    for row_index, row in enumerate(rows):
+    state = _TimestampState(pass_start)
+
+    for row in rows:
         mode = row["Mode"].strip().lower()
         cmd = substitute(row["Telecommand"], pass_date)
         resp = substitute(row["resp_fname"], pass_date)
@@ -425,13 +429,13 @@ def build_agenda(
             repeat = parse_repeat_random(row["Repeat"], cmd)
             random_repeat = parse_repeat_random(row["Random"], cmd)
             entries, random_entries = _build_single_entries(
-                ctx, repeat, random_repeat, row_index
+                ctx, repeat, random_repeat, state
             )
             agenda.extend(entries)
             random_commands.extend(random_entries)
 
         elif mode == "interval":
-            agenda.extend(_build_interval_entries(ctx, row_index))
+            agenda.extend(_build_interval_entries(ctx, state))
             if (row["Repeat"].strip() != "") or (row["Random"].strip() != ""):
                 logger.warning(
                     f"Repeat and random values are ignored for interval mode for"
