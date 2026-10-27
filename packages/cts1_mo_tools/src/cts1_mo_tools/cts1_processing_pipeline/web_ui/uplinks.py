@@ -55,7 +55,7 @@ SAME_BOOT_TOLERANCE = timedelta(minutes=3)
 
 # `tcmds_uplinked_per_pass` compares the beacon from before AOS minus this
 # with the one from after LOS plus this.
-PASS_TCMD_MARGIN = timedelta(seconds=45)
+PASS_TCMD_MARGIN = timedelta(seconds=1)
 # How far before the first pass's AOS (minus `PASS_TCMD_MARGIN`)
 # `tcmds_uplinked_per_pass`'s beacons are loaded from -- a pass with no beacon
 # in that long before it gets no count, rather than one from a stale beacon.
@@ -323,10 +323,12 @@ def tcmds_uplinked_per_pass(
         onwards, or before the next pass's `aos - PASS_TCMD_MARGIN`): with no
         beacon in that gap, the nearest one is from beyond the neighbour, and
         would count the neighbour's telecommands for both passes. The
-        exception is a beacon whose `count_since` shows its count already
-        held at `aos - PASS_TCMD_MARGIN` (or `los + PASS_TCMD_MARGIN`), which
-        gives the count at that instant whichever side of the neighbour it was
-        received on.
+        exceptions use a beacon's `count_since`, whichever side of the
+        neighbour it was received on: its count is the count before if it
+        already held at `aos - PASS_TCMD_MARGIN`, and the count after if it
+        held from before the next pass's `aos - PASS_TCMD_MARGIN` -- an uplink
+        between the two passes (e.g. a little past a predicted LOS) counts
+        for the earlier one, as it would with a beacon in the gap.
     """
     counts = beacon_counts.select(
         pl.col("beacon_utc_time").cast(passes.schema["aos"]),
@@ -389,7 +391,7 @@ def tcmds_uplinked_per_pass(
             tcmd_count_after=pl.when(
                 pl.col("_next_before_at").is_null()
                 | (pl.col("_after_beacon_at") < pl.col("_next_before_at"))
-                | (pl.col("_after_since") <= pl.col("_after_at"))
+                | (pl.col("_after_since") < pl.col("_next_before_at"))
             ).then(pl.col("tcmd_count_after")),
         )
         .with_columns(

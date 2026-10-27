@@ -298,3 +298,14 @@ def test_tcmds_per_pass_count_since_after_the_instant_is_not_used() -> None:
         (10, None),
         (None, 17),
     ]
+
+
+def test_tcmds_per_pass_count_since_late_uplink_counts_for_earlier_pass() -> None:
+    # The last uplink came in at minute 20, well past the first pass's
+    # LOS + margin but long before the second pass: it's the first pass's.
+    counts = _counts((-10, 10), (200, 17, 20))
+    result = tcmds_uplinked_per_pass(counts, _passes((0, 10), (90, 100)))
+    assert result.select("tcmd_count_before", "tcmd_count_after").rows() == [
+        (10, 17),
+        (17, 17),
+    ]
