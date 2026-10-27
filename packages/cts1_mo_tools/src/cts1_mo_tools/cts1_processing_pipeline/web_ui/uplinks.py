@@ -235,6 +235,9 @@ _PASS_TCMD_SCHEMA = {
     "tcmd_count_before": pl.Int64,
     "tcmd_count_after": pl.Int64,
     "tcmd_count_delta": pl.Int64,
+    "pending_tcmd_count_before": pl.Int64,
+    "pending_tcmd_count_after": pl.Int64,
+    "pending_tcmd_count_delta": pl.Int64,
 }
 
 
@@ -244,6 +247,7 @@ def _load_beacon_tcmd_counts_since(path: Path, since: datetime) -> pl.DataFrame:
         "beacon_utc_time": pl.Datetime("us", "UTC"),
         "total_tcmd_queued_count": pl.Int64,
         "count_since": pl.Datetime("us", "UTC"),
+        "pending_queued_tcmd_count": pl.Int64,
     }
     if not path.exists():
         return pl.DataFrame(schema=schema)
@@ -272,6 +276,9 @@ def _load_beacon_tcmd_counts_since(path: Path, since: datetime) -> pl.DataFrame:
             count_since=pl.from_epoch(count_since_ms, time_unit="ms")
             .dt.replace_time_zone("UTC")
             .cast(schema["count_since"]),
+            pending_queued_tcmd_count=pl.col("pending_queued_tcmd_count").cast(
+                pl.Int64
+            ),
         )
         .drop_nulls(["beacon_utc_time", "total_tcmd_queued_count"])
         .sort("beacon_utc_time")
@@ -286,7 +293,8 @@ def load_beacon_tcmd_counts(
     `unix_epoch_time_ms` -- not `received_at`, which some decoders only know
     to the observation), `total_tcmd_queued_count`, and `count_since` (when
     that count last changed, on the same clock: the last uplink, or boot if
-    the count is 0; null if unknown), oldest first --
+    the count is 0; null if unknown), and `pending_queued_tcmd_count`,
+    oldest first --
     everything `tcmds_uplinked_per_pass` needs for passes from `first_aos`
     on. Only those columns (plus the ones filtered on) are read, and only
     from beacons timestamped in the last `PASS_TCMD_LOOKBACK` before
@@ -316,6 +324,10 @@ def tcmds_uplinked_per_pass(
         - `tcmd_count_after`: the count from the first beacon timestamped at
           or after `los + PASS_TCMD_MARGIN`.
         - `tcmd_count_delta`: after minus before.
+        - `pending_tcmd_count_before`/`_after`/`_delta`: the same for
+          `pending_queued_tcmd_count`, from the same beacons -- but never via
+          `count_since`, which only says when the total last changed (the
+          pending count also drops as queued telecommands run).
 
         Each is null when there's no such beacon (e.g. the pass isn't over
         yet). Each beacon must also come from the gap between this pass and
@@ -334,6 +346,7 @@ def tcmds_uplinked_per_pass(
         pl.col("beacon_utc_time").cast(passes.schema["aos"]),
         count=pl.col("total_tcmd_queued_count"),
         count_since=pl.col("count_since").cast(passes.schema["aos"]),
+        pending=pl.col("pending_queued_tcmd_count"),
     ).sort("beacon_utc_time")
     return (
         passes.with_row_index("_order")
@@ -348,7 +361,9 @@ def tcmds_uplinked_per_pass(
         )
         .join_asof(
             counts.select(
-                _before_beacon_at="beacon_utc_time", tcmd_count_before="count"
+                _before_beacon_at="beacon_utc_time",
+                tcmd_count_before="count",
+                _pending_before="pending",
             ),
             left_on="_before_at",
             right_on="_before_beacon_at",
@@ -375,24 +390,33 @@ def tcmds_uplinked_per_pass(
                 _after_beacon_at="beacon_utc_time",
                 tcmd_count_after="count",
                 _after_since="count_since",
+                _pending_after="pending",
             ),
             left_on="_after_at",
             right_on="_after_beacon_at",
             strategy="forward",
         )
         .with_columns(
+            _before_in_gap=pl.col("_previous_after_at").is_null()
+            | (pl.col("_before_beacon_at") >= pl.col("_previous_after_at")),
+            _after_in_gap=pl.col("_next_before_at").is_null()
+            | (pl.col("_after_beacon_at") < pl.col("_next_before_at")),
+        )
+        .with_columns(
             tcmd_count_before=pl.when(pl.col("_held_since") <= pl.col("_before_at"))
             .then(pl.col("_held_count"))
-            .when(
-                pl.col("_previous_after_at").is_null()
-                | (pl.col("_before_beacon_at") >= pl.col("_previous_after_at"))
-            )
+            .when("_before_in_gap")
             .then(pl.col("tcmd_count_before")),
             tcmd_count_after=pl.when(
-                pl.col("_next_before_at").is_null()
-                | (pl.col("_after_beacon_at") < pl.col("_next_before_at"))
+                pl.col("_after_in_gap")
                 | (pl.col("_after_since") < pl.col("_next_before_at"))
             ).then(pl.col("tcmd_count_after")),
+            pending_tcmd_count_before=pl.when("_before_in_gap").then(
+                pl.col("_pending_before")
+            ),
+            pending_tcmd_count_after=pl.when("_after_in_gap").then(
+                pl.col("_pending_after")
+            ),
         )
         .with_columns(
             tcmd_count_before=pl.when(
@@ -402,7 +426,9 @@ def tcmds_uplinked_per_pass(
             .otherwise(pl.col("tcmd_count_before"))
         )
         .with_columns(
-            tcmd_count_delta=pl.col("tcmd_count_after") - pl.col("tcmd_count_before")
+            tcmd_count_delta=pl.col("tcmd_count_after") - pl.col("tcmd_count_before"),
+            pending_tcmd_count_delta=pl.col("pending_tcmd_count_after")
+            - pl.col("pending_tcmd_count_before"),
         )
         .with_columns(
             pl.col(name).cast(dtype) for name, dtype in _PASS_TCMD_SCHEMA.items()

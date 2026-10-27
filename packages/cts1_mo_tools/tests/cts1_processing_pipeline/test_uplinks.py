@@ -205,11 +205,13 @@ def _counts(*beacons: tuple[float, int] | tuple[float, int, float]) -> pl.DataFr
             "beacon_utc_time": [_at(b[0]) for b in beacons],
             "total_tcmd_queued_count": [b[1] for b in beacons],
             "count_since": [_at(b[2]) if len(b) > 2 else None for b in beacons],
+            "pending_queued_tcmd_count": [None] * len(beacons),
         },
         schema={
             "beacon_utc_time": pl.Datetime("us", "UTC"),
             "total_tcmd_queued_count": pl.Int64,
             "count_since": pl.Datetime("us", "UTC"),
+            "pending_queued_tcmd_count": pl.Int64,
         },
     )
 
@@ -309,3 +311,24 @@ def test_tcmds_per_pass_count_since_late_uplink_counts_for_earlier_pass() -> Non
         (10, 17),
         (17, 17),
     ]
+
+
+def test_tcmds_per_pass_pending_counts_from_gap_beacons_only() -> None:
+    counts = _counts((-10, 10), (200, 17, 20)).with_columns(
+        pending_queued_tcmd_count=pl.Series([4, 1])
+    )
+    result = tcmds_uplinked_per_pass(counts, _passes((0, 10), (90, 100)))
+    # The minute-200 beacon's total held since minute 20, but its pending
+    # count says nothing about minute 20 -- so the first pass gets no pending
+    # after, nor the second a pending before.
+    assert result.select(
+        "pending_tcmd_count_before",
+        "pending_tcmd_count_after",
+        "pending_tcmd_count_delta",
+    ).rows() == [(4, None, None), (None, 1, None)]
+    one_pass = tcmds_uplinked_per_pass(counts, _passes((0, 10)))
+    assert one_pass.select(
+        "pending_tcmd_count_before",
+        "pending_tcmd_count_after",
+        "pending_tcmd_count_delta",
+    ).row(0) == (4, 1, -3)

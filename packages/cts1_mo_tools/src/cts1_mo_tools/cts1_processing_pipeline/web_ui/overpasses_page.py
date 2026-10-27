@@ -155,6 +155,9 @@ class _PassTcmds:
     tcmd_count_before: int | None
     tcmd_count_after: int | None
     tcmd_count_delta: int | None
+    pending_tcmd_count_before: int | None
+    pending_tcmd_count_after: int | None
+    pending_tcmd_count_delta: int | None
 
 
 @dataclass(slots=True)
@@ -197,6 +200,20 @@ def _tcmd_counts_str(status: str, tcmds: _PassTcmds) -> str:
         "?" if count is None else f"{count:,}"
         for count in (tcmds.tcmd_count_before, tcmds.tcmd_count_after)
     )
+
+
+def _pending_tcmd_counts_str(status: str, tcmds: _PassTcmds) -> str:
+    if status not in _PAST_STATUSES:
+        return "—"
+    before, after, delta = (
+        "?" if count is None else f"{count:,}"
+        for count in (
+            tcmds.pending_tcmd_count_before,
+            tcmds.pending_tcmd_count_after,
+            tcmds.pending_tcmd_count_delta,
+        )
+    )
+    return f"{before} → {after} = {delta}"
 
 
 def _direction_str(azimuth_deg: float) -> str:
@@ -285,6 +302,7 @@ def _pass_rows(
                 ),
                 "tcmd_counts": _tcmd_counts_str(status, tcmds),
                 "tcmds_uplinked": _tcmds_uplinked_str(status, tcmds),
+                "pending_tcmd_counts": _pending_tcmd_counts_str(status, tcmds),
             }
         )
     return rows
@@ -305,7 +323,8 @@ def _passes_table(
             f"{station.altitude_m:.0f} m -- AOS/LOS are when "
             f"{prediction.tle.name} crosses the horizon. TCMDs Uplinked is the change "
             "in the beacons' total "
-            "telecommand count from beacons before AOS vs. after LOS."
+            "telecommand count from beacons before AOS vs. after LOS; Pending "
+            "TCMD Count compares the same beacons' pending telecommand count."
         ).classes("text-caption text-grey")
 
         if not prediction.passes:
@@ -328,6 +347,12 @@ def _passes_table(
                 "name": "tcmds_uplinked",
                 "label": "TCMDs Uplinked",
                 "field": "tcmds_uplinked",
+                "align": "right",
+            },
+            {
+                "name": "pending_tcmd_counts",
+                "label": "Pending TCMD Count (Before → After = Change)",
+                "field": "pending_tcmd_counts",
                 "align": "right",
             },
             {
@@ -461,7 +486,12 @@ def _tcmds_per_pass(
     return [
         _PassTcmds(*row)
         for row in per_pass.select(
-            "tcmd_count_before", "tcmd_count_after", "tcmd_count_delta"
+            "tcmd_count_before",
+            "tcmd_count_after",
+            "tcmd_count_delta",
+            "pending_tcmd_count_before",
+            "pending_tcmd_count_after",
+            "pending_tcmd_count_delta",
         ).iter_rows()
     ]
 
@@ -682,6 +712,7 @@ def build_overpasses_page(data_dir: Path) -> None:  # noqa: C901, PLR0915
                 "time_until_aos": _time_until_aos_str(p, now),
                 "tcmd_counts": _tcmd_counts_str(status, tcmds),
                 "tcmds_uplinked": _tcmds_uplinked_str(status, tcmds),
+                "pending_tcmd_counts": _pending_tcmd_counts_str(status, tcmds),
             }
             if any(row[k] != v for k, v in fresh.items()):
                 row.update(fresh)
