@@ -332,9 +332,11 @@ class _RowContext:
     cmd: str
     resp: str
 
+
 @dataclass
 class _TimestampState:
     tssent: datetime
+
 
 def _build_single_entries(
     ctx: _RowContext,
@@ -435,7 +437,9 @@ def build_agenda(
         if mode == "single":
             repeat = parse_repeat_random(row["Repeat"], cmd)
             random_repeat = parse_repeat_random(row["Random"], cmd)
-            entries, random_entries = _build_single_entries(ctx, repeat, random_repeat, state)
+            entries, random_entries = _build_single_entries(
+                ctx, repeat, random_repeat, state
+            )
             agenda.extend(entries)
             random_commands.extend(random_entries)
 
