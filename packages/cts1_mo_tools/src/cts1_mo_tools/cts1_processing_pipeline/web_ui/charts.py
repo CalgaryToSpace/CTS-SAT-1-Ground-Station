@@ -575,31 +575,45 @@ def channel_states_option(
 
 
 def collection_timeline_option(
-    timeline: pl.DataFrame, *, sources: Sequence[str], title: str
+    timeline: pl.DataFrame,
+    *,
+    sources: Sequence[str],
+    title: str,
+    bin_label: str,
 ) -> dict[str, Any] | None:
     """ECharts `option` with one swimlane per source, a mark at each
-    `collected_at` -- or None if `timeline` has no rows.
+    `collected_at` bin -- or None if `timeline` has no rows.
 
-    `timeline` is `source` + `collected_at` (see
-    `collection_timeline.load_collection_timeline`); lanes run top to bottom
-    in `sources` order, each labelled with its count. Points go out as epoch
-    ms rather than ISO strings, as there can be ~100k of them, so the
+    `timeline` is `source` + `collected_at` (each bin's start) + `count`
+    (see `collection_timeline.load_collection_timeline`), with `bin_label`
+    the bins' width for the tooltip, e.g. "15 sec"; lanes run top to bottom in
+    `sources` order, each labelled with its total count. There can be tens
+    of thousands of points, so each goes out as compactly as it can -- epoch
+    ms, the lane's index on the y axis, and the bin's count -- and the
     tooltip formats them itself.
     """
     if timeline.is_empty():
         return None
-    counts = dict(timeline["source"].cast(pl.String).value_counts().iter_rows())
+    counts = dict(
+        timeline.group_by(pl.col("source").cast(pl.String))
+        .agg(pl.col("count").sum())
+        .iter_rows()
+    )
     lanes = {source: f"{source} ({counts.get(source, 0):,})" for source in sources}
     series: list[dict[str, Any]] = []
     for index, source in enumerate(sources):
-        times = timeline.filter(pl.col("source") == source)["collected_at"]
+        # Category axes run bottom-up, so the first source is the last index.
+        lane_index = len(sources) - 1 - index
+        points = timeline.filter(pl.col("source") == source).select(
+            pl.col("collected_at").dt.epoch("ms"), "count"
+        )
         series.append(
             {
                 "name": lanes[source],
                 "type": "scatter",
                 "symbol": "rect",
                 "symbolSize": [2, 18],
-                "data": [[ms, lanes[source]] for ms in times.dt.epoch("ms")],
+                "data": [[ms, lane_index, count] for ms, count in points.iter_rows()],
                 "color": _SERIES_COLORS[index % len(_SERIES_COLORS)],
                 "large": True,
                 "largeThreshold": 2000,
@@ -614,6 +628,7 @@ def collection_timeline_option(
             ":formatter": (
                 "p => p.seriesName.replace(/ \\(.*/, '') + '<br>' + new Date("
                 "p.value[0]).toISOString().replace('T', ' ').replace('Z', ' UTC')"
+                f" + '<br>' + p.value[2].toLocaleString() + 'x over {bin_label}'"
             ),
         },
         "xAxis": {"type": "time"},

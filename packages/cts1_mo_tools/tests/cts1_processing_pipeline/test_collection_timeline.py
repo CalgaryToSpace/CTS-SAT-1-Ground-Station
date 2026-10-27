@@ -86,34 +86,59 @@ def _write_inputs(data_dir: Path) -> None:
     ).write_parquet(data_dir / "mpi_frames.parquet")
 
 
-def test_timeline_uses_collection_times_deduplicated(tmp_path: Path) -> None:
+def test_timeline_bins_deduplicated_collection_times(tmp_path: Path) -> None:
     _write_inputs(tmp_path)
     timeline = load_collection_timeline(tmp_path)
 
     by_source = {
-        source: part["collected_at"].to_list()
+        source: part.select("collected_at", "count").rows()
         for (source,), part in timeline.group_by("source")
     }
     assert by_source == {
-        "Basic beacons": [_COLLECTED],
-        "Extended beacons": [_COLLECTED + timedelta(seconds=10)],
-        "MPI frames": [_COLLECTED + timedelta(milliseconds=31 * i) for i in range(3)],
-        "GNSS samples": [datetime(2026, 8, 9, 5, 0, 0, 500_000, tzinfo=UTC)],
+        "Basic beacons": [(_COLLECTED, 1)],
+        # 10s after a 15s bin's start, so still in it.
+        "Extended beacons": [(_COLLECTED, 1)],
+        # Three frames, all in one bin.
+        "MPI frames": [(_COLLECTED, 3)],
+        "GNSS samples": [(datetime(2026, 8, 9, 5, 0, tzinfo=UTC), 1)],
     }
+
+
+def test_timeline_bins_split_on_bin_boundaries(tmp_path: Path) -> None:
+    pl.DataFrame(
+        {
+            "collected_at": [
+                _COLLECTED + timedelta(seconds=s) for s in (0, 14.9, 15, 31)
+            ]
+        },
+        schema_overrides={"collected_at": pl.Datetime("us", "UTC")},
+    ).write_parquet(tmp_path / "mpi_frames.parquet")
+    timeline = load_collection_timeline(tmp_path)
+    assert timeline.select("collected_at", "count").rows() == [
+        (_COLLECTED, 2),
+        (_COLLECTED + timedelta(seconds=15), 1),
+        (_COLLECTED + timedelta(seconds=30), 1),
+    ]
 
 
 def test_timeline_without_pipeline_output_is_empty(tmp_path: Path) -> None:
     timeline = load_collection_timeline(tmp_path)
     assert timeline.is_empty()
     assert (
-        collection_timeline_option(timeline, sources=TIMELINE_SOURCES, title="") is None
+        collection_timeline_option(
+            timeline, sources=TIMELINE_SOURCES, title="", bin_label="15 sec"
+        )
+        is None
     )
 
 
 def test_timeline_option_has_a_lane_per_source(tmp_path: Path) -> None:
     _write_inputs(tmp_path)
     option = collection_timeline_option(
-        load_collection_timeline(tmp_path), sources=TIMELINE_SOURCES, title=""
+        load_collection_timeline(tmp_path),
+        sources=TIMELINE_SOURCES,
+        title="",
+        bin_label="15 sec",
     )
     assert option is not None
     assert option["yAxis"]["data"] == [
@@ -123,7 +148,8 @@ def test_timeline_option_has_a_lane_per_source(tmp_path: Path) -> None:
         "Basic beacons (1)",
     ]
     mpi = next(s for s in option["series"] if s["name"] == "MPI frames (3)")
-    assert mpi["data"][0] == [_ms(_COLLECTED), "MPI frames (3)"]
+    # Epoch ms, the lane's index on the (bottom-up) y axis, and the bin's count.
+    assert mpi["data"] == [[_ms(_COLLECTED), 1, 3]]
 
 
 def test_launch_date_is_fetched_once(launch_fetches: list[str]) -> None:

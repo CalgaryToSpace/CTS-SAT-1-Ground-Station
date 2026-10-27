@@ -11,6 +11,7 @@ from __future__ import annotations
 
 __all__ = ["build_mpi_data_page"]
 
+import asyncio
 import json
 from dataclasses import dataclass
 from datetime import datetime
@@ -48,6 +49,7 @@ def _collection_timeline_card(timeline: pl.DataFrame | None) -> None:
             timeline,
             sources=collection_timeline.TIMELINE_SOURCES,
             title="",
+            bin_label=f"{collection_timeline.BIN_SECONDS} sec",
         )
         if option is None:
             ui.label(
@@ -397,42 +399,57 @@ def _collections_card(
 
 
 @dataclass(frozen=True, slots=True)
-class _PageData:
-    timeline: pl.DataFrame
+class _CollectionsData:
     collections: pl.DataFrame
     analyses: pl.DataFrame
 
 
-def _load_page_data(data_dir: Path) -> _PageData:
-    """Blocking (it may fetch the launch date) -- run it via `run.io_bound`."""
-    return _PageData(
-        timeline=collection_timeline.load_collection_timeline(data_dir),
+def _load_collections_data(data_dir: Path) -> _CollectionsData:
+    """Blocking -- run it via `run.io_bound`."""
+    return _CollectionsData(
         collections=mpi_collections.load_collections(data_dir),
         analyses=mpi_collections.load_analyses(data_dir),
     )
 
 
 def build_mpi_data_page(data_dir: Path) -> None:
+    # The timeline and the collections table load and render independently,
+    # so the (small, quick) table doesn't wait on the (big) timeline.
     @ui.refreshable
-    def content(page_data: _PageData | None) -> None:
-        _collection_timeline_card(page_data and page_data.timeline)
+    def timeline_content(timeline: pl.DataFrame | None) -> None:
+        _collection_timeline_card(timeline)
+
+    @ui.refreshable
+    def collections_content(collections_data: _CollectionsData | None) -> None:
         _collections_card(
-            page_data and page_data.collections, page_data and page_data.analyses
+            collections_data and collections_data.collections,
+            collections_data and collections_data.analyses,
         )
 
+    # Each loads in a thread, then rebuilds synchronously -- see
+    # `pipeline_status_page.build_pipeline_status_page._reload`. A None
+    # result is only when the server's shutting down.
+    async def _reload_timeline() -> None:
+        # Can also wait on SatNOGS DB, for the launch date.
+        timeline = await run.io_bound(
+            collection_timeline.load_collection_timeline, data_dir
+        )
+        if timeline is not None:
+            timeline_content.refresh(timeline)
+
+    async def _reload_collections() -> None:
+        collections_data = await run.io_bound(_load_collections_data, data_dir)
+        if collections_data is not None:
+            collections_content.refresh(collections_data)
+
     async def _reload() -> None:
-        # Load in a thread, then rebuild synchronously -- see
-        # `pipeline_status_page.build_pipeline_status_page._reload`. Loading
-        # can also wait on SatNOGS DB, for the launch date.
-        page_data = await run.io_bound(_load_page_data, data_dir)
-        if page_data is None:  # Only when the server's shutting down.
-            return
-        content.refresh(page_data)
+        await asyncio.gather(_reload_timeline(), _reload_collections())
 
     with page_shell():
         with ui.row().classes("w-full items-center justify-between"):
             ui.label("MPI Data").classes("text-2xl font-bold")
             ui.button("Refresh", icon="refresh", on_click=_reload)
-        content(None)
+        timeline_content(None)
+        collections_content(None)
 
     ui.timer(0, _reload, once=True)
