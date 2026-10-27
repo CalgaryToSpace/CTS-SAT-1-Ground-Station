@@ -243,11 +243,18 @@ def _load_beacon_tcmd_counts_since(path: Path, since: datetime) -> pl.DataFrame:
     schema = {
         "beacon_utc_time": pl.Datetime("us", "UTC"),
         "total_tcmd_queued_count": pl.Int64,
+        "count_since": pl.Datetime("us", "UTC"),
     }
     if not path.exists():
         return pl.DataFrame(schema=schema)
     since_ms = int(since.timestamp() * 1000)
     epoch_ms = pl.col("unix_epoch_time_ms")
+    count = pl.col("total_tcmd_queued_count").cast(pl.Int64)
+    count_since_ms = (
+        pl.when(count > 0)
+        .then(epoch_ms - pl.col("duration_since_last_uplink_ms"))
+        .otherwise(epoch_ms - (pl.col("uptime_sec") * 1000).cast(pl.Int64))
+    )
     return (
         pl.scan_parquet(path)
         .filter(
@@ -261,9 +268,12 @@ def _load_beacon_tcmd_counts_since(path: Path, since: datetime) -> pl.DataFrame:
             beacon_utc_time=pl.from_epoch(epoch_ms, time_unit="ms")
             .dt.replace_time_zone("UTC")
             .cast(schema["beacon_utc_time"]),
-            total_tcmd_queued_count=pl.col("total_tcmd_queued_count").cast(pl.Int64),
+            total_tcmd_queued_count=count,
+            count_since=pl.from_epoch(count_since_ms, time_unit="ms")
+            .dt.replace_time_zone("UTC")
+            .cast(schema["count_since"]),
         )
-        .drop_nulls()
+        .drop_nulls(["beacon_utc_time", "total_tcmd_queued_count"])
         .sort("beacon_utc_time")
         .collect()
     )
@@ -274,7 +284,9 @@ def load_beacon_tcmd_counts(
 ) -> pl.DataFrame:
     """CRC-valid beacons' own clock time (`beacon_utc_time`, from
     `unix_epoch_time_ms` -- not `received_at`, which some decoders only know
-    to the observation) and `total_tcmd_queued_count`, oldest first --
+    to the observation), `total_tcmd_queued_count`, and `count_since` (when
+    that count last changed, on the same clock: the last uplink, or boot if
+    the count is 0; null if unknown), oldest first --
     everything `tcmds_uplinked_per_pass` needs for passes from `first_aos`
     on. Only those columns (plus the ones filtered on) are read, and only
     from beacons timestamped in the last `PASS_TCMD_LOOKBACK` before
@@ -310,11 +322,16 @@ def tcmds_uplinked_per_pass(
         the neighbouring one (the previous pass's `los + PASS_TCMD_MARGIN`
         onwards, or before the next pass's `aos - PASS_TCMD_MARGIN`): with no
         beacon in that gap, the nearest one is from beyond the neighbour, and
-        would count the neighbour's telecommands for both passes.
+        would count the neighbour's telecommands for both passes. The
+        exception is a beacon whose `count_since` shows its count already
+        held at `aos - PASS_TCMD_MARGIN` (or `los + PASS_TCMD_MARGIN`), which
+        gives the count at that instant whichever side of the neighbour it was
+        received on.
     """
     counts = beacon_counts.select(
         pl.col("beacon_utc_time").cast(passes.schema["aos"]),
         count=pl.col("total_tcmd_queued_count"),
+        count_since=pl.col("count_since").cast(passes.schema["aos"]),
     ).sort("beacon_utc_time")
     return (
         passes.with_row_index("_order")
@@ -328,31 +345,51 @@ def tcmds_uplinked_per_pass(
             _next_before_at=pl.col("_before_at").shift(-1),
         )
         .join_asof(
-            counts.rename(
-                {"beacon_utc_time": "_before_beacon_at", "count": "tcmd_count_before"}
+            counts.select(
+                _before_beacon_at="beacon_utc_time", tcmd_count_before="count"
             ),
             left_on="_before_at",
             right_on="_before_beacon_at",
             strategy="backward",
             allow_exact_matches=False,
         )
+        # The first beacon from `_before_at` on: if its count already held
+        # then, it's the count at `_before_at` exactly. (A later beacon's
+        # count can only have changed more recently, so this is the only one
+        # worth checking.)
+        .join_asof(
+            counts.select(
+                _held_beacon_at="beacon_utc_time",
+                _held_count="count",
+                _held_since="count_since",
+            ),
+            left_on="_before_at",
+            right_on="_held_beacon_at",
+            strategy="forward",
+        )
         .sort("_after_at")
         .join_asof(
-            counts.rename(
-                {"beacon_utc_time": "_after_beacon_at", "count": "tcmd_count_after"}
+            counts.select(
+                _after_beacon_at="beacon_utc_time",
+                tcmd_count_after="count",
+                _after_since="count_since",
             ),
             left_on="_after_at",
             right_on="_after_beacon_at",
             strategy="forward",
         )
         .with_columns(
-            tcmd_count_before=pl.when(
+            tcmd_count_before=pl.when(pl.col("_held_since") <= pl.col("_before_at"))
+            .then(pl.col("_held_count"))
+            .when(
                 pl.col("_previous_after_at").is_null()
                 | (pl.col("_before_beacon_at") >= pl.col("_previous_after_at"))
-            ).then(pl.col("tcmd_count_before")),
+            )
+            .then(pl.col("tcmd_count_before")),
             tcmd_count_after=pl.when(
                 pl.col("_next_before_at").is_null()
                 | (pl.col("_after_beacon_at") < pl.col("_next_before_at"))
+                | (pl.col("_after_since") <= pl.col("_after_at"))
             ).then(pl.col("tcmd_count_after")),
         )
         .with_columns(
