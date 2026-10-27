@@ -337,11 +337,9 @@ def _build_single_entries(
     ctx: _RowContext,
     repeat: int,
     random_repeat: int,
-    row_index: int,
 ) -> tuple[list[tuple[int, str]], list[str]]:
-    """Unique tssent values are generated using the pass start time, incremented by 1 s
-    for each row. Error handling is handled in _parse_pass_start()."""
-    tssent = ctx.pass_start + timedelta(seconds=row_index)
+    global tssent
+    tssent += timedelta(seconds=1)
 
     """Schedule custom tsexec values"""
     tsexec = parse_time(ctx.pass_date, ctx.pass_start, ctx.row["tsexec Start (UTC)"])
@@ -353,19 +351,25 @@ def _build_single_entries(
 
     command = format_command(ctx.cmd, tssent, tsexec, ctx.resp)
 
-    entries = [(epoch_ms(tssent), command) for _ in range(repeat)]
-    random_entries = [command for _ in range(random_repeat)]
+    entries: list[tuple[int, str]] = []
+    for _ in range(repeat):
+        tssent += timedelta(seconds=1)
+        command = format_command(ctx.cmd, tssent, tsexec, ctx.resp)
+        entries.append((epoch_ms(tssent), command))
+
+    random_entries: list[str] = []
+    for _ in range(random_repeat):
+        tssent += timedelta(seconds=1)
+        command = format_command(ctx.cmd, tssent, tsexec, ctx.resp)
+        random_entries.append(command)
 
     return entries, random_entries
 
-
 def _build_interval_entries(
     ctx: _RowContext,
-    row_index: int,
 ) -> list[tuple[int, str]]:
-    """Unique tssent values are generated using the pass start time, incremented by 1 s
-    for each row. Error handling is handled in _parse_pass_start()."""
-    tssent = ctx.pass_start + timedelta(seconds=row_index)
+    global tssent
+    tssent+= timedelta(seconds=1)
 
     tsexec_start = parse_time(
         ctx.pass_date, ctx.pass_start, ctx.row["tsexec Start (UTC)"]
@@ -394,6 +398,7 @@ def _build_interval_entries(
         command = format_command(ctx.cmd, tssent, current, ctx.resp)
         entries.append((epoch_ms(current), command))
         current += interval
+        tssent += timedelta(seconds=1)
 
     return entries
 
@@ -409,7 +414,10 @@ def build_agenda(
     ] = []  # Tuple of (epoch_ms of tssent, the formatted command line)
     random_commands: list[str] = []
 
-    for row_index, row in enumerate(rows):
+    global tssent 
+    tssent = pass_start  # Used to maintain a unique tssent across all rows
+
+    for row in rows:
         mode = row["Mode"].strip().lower()
         cmd = substitute(row["Telecommand"], pass_date)
         resp = substitute(row["resp_fname"], pass_date)
@@ -425,13 +433,13 @@ def build_agenda(
             repeat = parse_repeat_random(row["Repeat"], cmd)
             random_repeat = parse_repeat_random(row["Random"], cmd)
             entries, random_entries = _build_single_entries(
-                ctx, repeat, random_repeat, row_index
+                ctx, repeat, random_repeat
             )
             agenda.extend(entries)
             random_commands.extend(random_entries)
 
         elif mode == "interval":
-            agenda.extend(_build_interval_entries(ctx, row_index))
+            agenda.extend(_build_interval_entries(ctx))
             if (row["Repeat"].strip() != "") or (row["Random"].strip() != ""):
                 logger.warning(
                     f"Repeat and random values are ignored for interval mode for"
