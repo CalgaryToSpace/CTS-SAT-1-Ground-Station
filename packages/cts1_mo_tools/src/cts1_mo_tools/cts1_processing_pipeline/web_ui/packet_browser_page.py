@@ -21,6 +21,7 @@ from datetime import UTC, datetime
 from pathlib import Path  # noqa: TC003 -- tyro needs this at runtime elsewhere
 from typing import TYPE_CHECKING
 
+import fracturedjson
 import polars as pl
 from nicegui import ui
 
@@ -157,7 +158,7 @@ def _pretty_json(value: object) -> str | None:
     if not isinstance(value, str) or not value.startswith(("[", "{")):
         return None
     try:
-        return json.dumps(json.loads(value), indent=2)
+        return fracturedjson.dumps(json.loads(value), indent=2)
     except ValueError:
         return None
 
@@ -465,7 +466,7 @@ def build_packet_browser_page(data_dir: Path) -> None:  # noqa: C901, PLR0915
                         "JSON",
                         icon="content_copy",
                         on_click=lambda: _copy_to_clipboard(
-                            json.dumps(present, indent=2), what="row as JSON"
+                            fracturedjson.dumps(present, indent=2), what="row as JSON"
                         ),
                     ).props("flat dense").tooltip("Copy every field as JSON")
                     ui.button(icon="close", on_click=lambda: _show_detail(None)).props(
