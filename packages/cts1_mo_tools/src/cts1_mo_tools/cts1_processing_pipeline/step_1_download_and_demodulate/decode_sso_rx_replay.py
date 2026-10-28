@@ -15,9 +15,9 @@ from __future__ import annotations
 __all__ = ["parse_forensics_line", "run_sso_rx_replay"]
 
 import base64
-import json
 from typing import TYPE_CHECKING, Any
 
+import orjson
 from loguru import logger
 
 from cts1_mo_tools.cts1_decode_satnogs_packets import verify_csp_packet_crc32c
@@ -46,8 +46,8 @@ def parse_forensics_line(line: str) -> dict[str, Any] | None:
     if not line:
         return None
     try:
-        obj: dict[str, Any] = json.loads(line)
-    except json.JSONDecodeError:
+        obj: dict[str, Any] = orjson.loads(line)
+    except orjson.JSONDecodeError:
         logger.warning(f"sso_rx_replay: could not parse forensics line: {line!r}")
         return None
 

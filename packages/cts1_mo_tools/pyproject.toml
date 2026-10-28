@@ -25,6 +25,7 @@ dependencies = [
     "satkit>=0.22.0",
     "orjson>=3.11.9",
     "cachetools>=7.2.1",
+    "pyfracturedjson>=2.2.2"
 ]
 
 [project.scripts]

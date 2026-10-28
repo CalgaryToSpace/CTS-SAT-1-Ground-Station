@@ -23,9 +23,9 @@ __all__ = [
 ]
 
 import io
-import json
 from typing import TYPE_CHECKING, Any, cast
 
+import orjson
 import polars as pl
 import xlsxwriter  # pyright: ignore[reportMissingTypeStubs]
 
@@ -82,7 +82,7 @@ def strong_signal_counts_text(counts_json: str | None) -> str:
     """
     if not counts_json:
         return ""
-    counts = cast("dict[str, int]", json.loads(counts_json))
+    counts = cast("dict[str, int]", orjson.loads(counts_json))
     return " · ".join(f"≥{dn} DN: {count}" for dn, count in counts.items())
 
 
@@ -110,7 +110,7 @@ def strong_signals_downlinked_text(
     `analysis_strong_signal_frames_downlinked`; "unknown" for every signal
     without it (an `mpi_analyses.parquet` from before it was added).
     """
-    counts = cast("list[int | None]", json.loads(downlinked_json or "[]"))
+    counts = cast("list[int | None]", orjson.loads(downlinked_json or "[]"))
     texts: list[str] = []
     for i, signal in enumerate(signals):
         count = counts[i] if i < len(counts) else None
@@ -155,7 +155,7 @@ def integration_periods_text(periods_json: str | None) -> str:
     """`integration_periods` (a JSON array) for display, e.g. "200, 260"."""
     if not periods_json:
         return ""
-    return ", ".join(str(p) for p in cast("list[int]", json.loads(periods_json)))
+    return ", ".join(str(p) for p in cast("list[int]", orjson.loads(periods_json)))
 
 
 # The firmware's letter for each time sync source (see
@@ -179,7 +179,7 @@ def time_sync_sources_text(sources_json: str | None) -> str:
         return ""
     return ", ".join(
         f"{_TIME_SYNC_SOURCE_NAMES.get(letter, 'UNKNOWN')} ({letter})"
-        for letter in cast("list[str]", json.loads(sources_json))
+        for letter in cast("list[str]", orjson.loads(sources_json))
     )
 
 
@@ -187,7 +187,7 @@ def response_properties(response_text: str) -> dict[str, Any]:
     """Every property of an analysis's raw `analysis_response_text` (which
     step 8 already checked is a JSON object), as sent.
     """
-    return cast("dict[str, Any]", json.loads(response_text))
+    return cast("dict[str, Any]", orjson.loads(response_text))
 
 
 def collections_csv_bytes(collections: pl.DataFrame) -> bytes:

@@ -52,11 +52,11 @@ __all__ = [
 ]
 
 import itertools
-import json
 import re
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
+import orjson
 import polars as pl
 from loguru import logger
 
@@ -292,7 +292,9 @@ def _analysis_row(
         "analysis_first_frame_byte": first_byte,
         "analysis_last_frame_byte": last_byte,
         "analysis_strong_signals": (
-            json.dumps(strong_signals) if isinstance(strong_signals, list) else None
+            orjson.dumps(strong_signals).decode()
+            if isinstance(strong_signals, list)
+            else None
         ),
         "analysis_action": properties["action"],
         "analysis_version": (
@@ -330,7 +332,7 @@ def extract_all_mpi_analyses(tcmd_responses: pl.DataFrame) -> pl.DataFrame:
         .iter_rows()
     ):
         try:
-            properties = json.loads(text)
+            properties = orjson.loads(text)
         except ValueError:
             continue
         if not isinstance(properties, dict):
@@ -370,7 +372,7 @@ def count_downlinked_strong_signal_frames(
     for started_at, ended_at, signals_json in all_analyses.select(
         "analysis_started_at", "analysis_ended_at", "analysis_strong_signals"
     ).iter_rows():
-        signals = cast("list[Any]", json.loads(signals_json) if signals_json else [])
+        signals = cast("list[Any]", orjson.loads(signals_json) if signals_json else [])
         window = (
             frames.filter(
                 pl.col("collected_at").is_between(
@@ -403,9 +405,7 @@ def count_downlinked_strong_signal_frames(
                     pl.col("file_offset").is_between(start, end, "left")
                 )["frame_counter"].n_unique()
             )
-        counts.append(
-            json.dumps(row_counts, separators=(",", ":")) if signals else None
-        )
+        counts.append(orjson.dumps(row_counts).decode() if signals else None)
     return all_analyses.with_columns(
         analysis_strong_signal_frames_downlinked=pl.Series(counts, dtype=pl.String)
     )
@@ -640,18 +640,16 @@ def _merged_collection(
         },
         "first_frame_counter": collections[0]["first_frame_counter"],
         "last_frame_counter": collections[-1]["last_frame_counter"],
-        "integration_periods": json.dumps(
+        "integration_periods": orjson.dumps(
             sorted(
-                {p for c in collections for p in json.loads(c["integration_periods"])}
-            ),
-            separators=(",", ":"),
-        ),
-        "time_sync_sources": json.dumps(
+                {p for c in collections for p in orjson.loads(c["integration_periods"])}
+            )
+        ).decode(),
+        "time_sync_sources": orjson.dumps(
             sorted(
-                {s for c in collections for s in json.loads(c["time_sync_sources"])}
-            ),
-            separators=(",", ":"),
-        ),
+                {s for c in collections for s in orjson.loads(c["time_sync_sources"])}
+            )
+        ).decode(),
         **_merged_time_syncs(analysis["analysis_started_at"], collections),
         "board_temperature_min_c": min(
             (t for c in collections if (t := c["board_temperature_min_c"]) is not None),

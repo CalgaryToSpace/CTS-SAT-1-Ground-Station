@@ -33,10 +33,10 @@ __all__ = [
     "record_decoder_runs",
 ]
 
-import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+import orjson
 import polars as pl
 from loguru import logger
 
@@ -264,7 +264,7 @@ def load_observations(
             **obs,
             "start": obs["start"].astimezone(UTC),
             "end": obs["end"].astimezone(UTC),
-            "demoddata": json.loads(obs["demoddata"]) if obs["demoddata"] else [],
+            "demoddata": orjson.loads(obs["demoddata"]) if obs["demoddata"] else [],
         }
         for obs in observations_df.iter_rows(named=True)
     ]

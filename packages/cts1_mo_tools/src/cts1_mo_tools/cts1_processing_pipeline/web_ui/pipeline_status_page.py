@@ -17,12 +17,12 @@ from __future__ import annotations
 
 __all__ = ["build_pipeline_status_page"]
 
-import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import orjson
 from nicegui import run, ui
 
 from cts1_mo_tools.cts1_processing_pipeline import daemon_signals
@@ -420,8 +420,8 @@ def _decoders_display(decoders_json: str | None) -> str:
     if not decoders_json:
         return ""
     try:
-        return ", ".join(json.loads(decoders_json))
-    except (json.JSONDecodeError, TypeError):
+        return ", ".join(orjson.loads(decoders_json))
+    except (orjson.JSONDecodeError, TypeError):
         return decoders_json
 
 

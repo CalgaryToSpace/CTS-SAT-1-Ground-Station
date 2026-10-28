@@ -9,9 +9,9 @@ from __future__ import annotations
 
 __all__ = ["parse_askew_line", "run_askew_demod_from_file"]
 
-import json
 from typing import TYPE_CHECKING, Any
 
+import orjson
 from loguru import logger
 
 from . import _subprocess_registry
@@ -27,8 +27,8 @@ def parse_askew_line(line: str) -> dict[str, Any] | None:
     if not line:
         return None
     try:
-        obj: dict[str, Any] = json.loads(line)
-    except json.JSONDecodeError:
+        obj: dict[str, Any] = orjson.loads(line)
+    except orjson.JSONDecodeError:
         logger.warning(f"askew_demod_from_file: could not parse line: {line!r}")
         return None
 

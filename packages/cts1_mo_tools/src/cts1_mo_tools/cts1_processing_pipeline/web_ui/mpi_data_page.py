@@ -18,6 +18,7 @@ from datetime import datetime
 from pathlib import Path  # noqa: TC003 -- tyro needs this at runtime elsewhere
 from typing import TYPE_CHECKING, Any, cast
 
+import fracturedjson
 from nicegui import run, ui
 
 from cts1_mo_tools.cts1_processing_pipeline.step_8_summarize_mpi_collections import (
@@ -283,7 +284,9 @@ def _analysis_details(analysis: dict[str, Any]) -> None:
                 row_key="_i",
             ).classes("w-full").props("dense flat")
         else:
-            ui.code(json.dumps(signals, indent=2), language="json").classes("w-full")
+            ui.code(
+                fracturedjson.dumps(signals, indent=2, line_length=60), language="json"
+            ).classes("w-full")
 
 
 def _show_analyses(collection: dict[str, Any], analyses: pl.DataFrame) -> None:
