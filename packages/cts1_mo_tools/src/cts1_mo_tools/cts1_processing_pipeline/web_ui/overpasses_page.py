@@ -1,6 +1,6 @@
 """The "Overpasses" page: recent and upcoming passes of the satellite over
-the uplink ground station (RAO by default), predicted from SatNOGS DB's latest
-TLE -- see `overpasses` for the data layer.
+the uplink ground station (RAO by default), predicted from the latest TLE in
+step 7's TLE history -- see `overpasses` for the data layer.
 
 Past passes also show how many telecommands were uplinked during them, from
 the beacons around each one -- see `uplinks.tcmds_uplinked_per_pass`.
@@ -25,7 +25,6 @@ from pathlib import Path  # noqa: TC003 -- tyro needs this at runtime elsewhere
 from typing import Any
 
 import polars as pl
-import requests
 from loguru import logger
 from nicegui import app, events, run, ui
 
@@ -161,7 +160,7 @@ class _PassTcmds:
 class _Prediction:
     """The last successful prediction this page rendered."""
 
-    tle: overpasses.SatnogsTle
+    tle: overpasses.Tle
     station: overpasses.GroundStation
     passes: list[overpasses.Overpass]
     tcmds: list[_PassTcmds]
@@ -437,13 +436,13 @@ def _tle_card(prediction: _Prediction) -> None:
     tle = prediction.tle
     now = datetime.now(UTC)
     with ui.card().classes("w-full"):
-        ui.label("TLE (from SatNOGS DB)").classes("text-lg font-bold")
+        ui.label("TLE (from the TLE History)").classes("text-lg font-bold")
         ui.label(
             f"{tle.name} -- epoch {tle.epoch:%Y-%m-%d %H:%M:%S} UTC "
-            f"({duration_str(now - tle.epoch)} old), source: {tle.source}, "
-            f"last updated in SatNOGS DB {tle.updated_at:%Y-%m-%d %H:%M:%S} UTC."
+            f"({duration_str(now - tle.epoch)} old), source: Space-Track.org "
+            "(via step 7's TLE history)."
         ).classes("text-caption text-grey")
-        ui.code(f"{tle.line1}\n{tle.line2}", language="text").classes("w-full")
+        ui.code("\n".join(tle.lines()), language="text").classes("w-full")
 
 
 def _tcmds_per_pass(
@@ -467,7 +466,7 @@ def _tcmds_per_pass(
 
 
 def _fetch_and_predict(  # noqa: PLR0913
-    parquet_path: Path,
+    data_dir: Path,
     norad_id: str,
     station: overpasses.GroundStation,
     start: datetime,
@@ -482,9 +481,9 @@ def _fetch_and_predict(  # noqa: PLR0913
     worked out over every pass first, so a hidden low pass still keeps its
     neighbours from counting its telecommands.
     """
-    tle = overpasses.fetch_satnogs_tle(norad_id)
+    tle = overpasses.load_latest_tle(data_dir, norad_id)
     passes = overpasses.compute_overpasses(tle, station, start, end)
-    tcmds = _tcmds_per_pass(parquet_path, passes)
+    tcmds = _tcmds_per_pass(data_dir / step_3_pipeline.OUTPUT_FILENAME, passes)
     shown = [
         (p, t)
         for p, t in zip(passes, tcmds, strict=True)
@@ -526,7 +525,6 @@ def _send_notification(
 
 
 def build_overpasses_page(data_dir: Path) -> None:  # noqa: C901, PLR0915
-    parquet_path = data_dir / step_3_pipeline.OUTPUT_FILENAME
     default = overpasses.RAO
     state: dict[str, _Prediction | None] = {"prediction": None}
     tables: dict[str, ui.table | None] = {"passes": None}
@@ -722,20 +720,20 @@ def build_overpasses_page(data_dir: Path) -> None:  # noqa: C901, PLR0915
         results.clear()
         with results, ui.row().classes("items-center gap-2 p-2"):
             ui.spinner(size="md")
-            ui.label("Fetching TLE from SatNOGS DB and predicting passes...")
+            ui.label("Loading TLE and predicting passes...")
         predict_button.disable()
         refresh_button.disable()
         try:
             prediction = await run.io_bound(
                 _fetch_and_predict,
-                parquet_path,
+                data_dir,
                 sat_id,
                 station,
                 start,
                 end,
                 min_max_elevation_deg=float(min_elevation.value or 0.0),
             )
-        except (requests.RequestException, LookupError, ValueError, RuntimeError) as e:
+        except (OSError, LookupError, ValueError, RuntimeError) as e:
             logger.exception("Overpass prediction failed")
             results.clear()
             error_label.text = f"Prediction failed: {e}"
