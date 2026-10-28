@@ -284,9 +284,9 @@ def _analysis_details(analysis: dict[str, Any]) -> None:
                 row_key="_i",
             ).classes("w-full").props("dense flat")
         else:
-            ui.code(fracturedjson.dumps(signals, indent=2), language="json").classes(
-                "w-full"
-            )
+            ui.code(
+                fracturedjson.dumps(signals, indent=2, line_length=60), language="json"
+            ).classes("w-full")
 
 
 def _show_analyses(collection: dict[str, Any], analyses: pl.DataFrame) -> None:
