@@ -498,6 +498,14 @@ def test_non_header_response_is_ignored() -> None:
     assert find_header_candidates(df) == []
 
 
+@pytest.mark.parametrize(
+    "action", ["analyze_mpi_data", "analyze_mpi_data_v2", "get_file_map_page"]
+)
+def test_excluded_actions_are_not_header_candidates(action: str) -> None:
+    text = f'{{"action":"{action}","file":"mpi_data/x.mpi","file_size":123}}'
+    assert find_header_candidates(_tcmd_df([_tcmd_row(text=text)])) == []
+
+
 def test_full_header_is_parsed_with_every_property() -> None:
     text = (
         '{"action":"adcs_get_latest_sd_file_blob","file":"ADCS/log_b51a.TLM",'

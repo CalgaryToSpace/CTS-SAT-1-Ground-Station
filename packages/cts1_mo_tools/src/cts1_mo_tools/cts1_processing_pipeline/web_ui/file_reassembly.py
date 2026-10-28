@@ -944,10 +944,19 @@ class BulkHeaderCandidate:
     properties: tuple[tuple[str, Any], ...]
 
 
+# Responses to these actions mention a `file`/`file_size` but describe
+# something other than a bulk downlink (MPI analysis results, file listings),
+# so they're never header candidates.
+_NON_HEADER_ACTION_PREFIXES = ("analyze_mpi_data", "get_file_map")
+
+
 def _looks_like_file_descriptor(properties: dict[str, Any]) -> bool:
     """Whether a response is plausibly a bulk-download descriptor at all,
     rather than some other command's response.
     """
+    action = _str_or_none(properties.get("action"))
+    if action is not None and action.startswith(_NON_HEADER_ACTION_PREFIXES):
+        return False
     return "file" in properties or "file_size" in properties
 
 
