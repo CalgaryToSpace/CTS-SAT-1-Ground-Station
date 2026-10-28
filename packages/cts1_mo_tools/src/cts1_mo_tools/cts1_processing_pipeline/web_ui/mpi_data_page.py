@@ -116,10 +116,25 @@ _COLLECTION_COLUMNS = tuple(
     column for _, columns in _COLLECTION_COLUMN_GROUPS for column in columns
 )
 
+# The leading column's button opens a collection's analyses -- a button
+# rather than a row click, so the cells' text can be selected and copied.
+_DETAILS_COLUMN = "_details"
+_DETAILS_CELL_SLOT = r"""
+    <q-td :props="props" auto-width>
+        <q-btn
+            flat round dense size="sm" icon="info"
+            @click="$parent.$emit('show_analyses', props.row._row_index)"
+        >
+            <q-tooltip>On-board analysis details</q-tooltip>
+        </q-btn>
+    </q-td>
+"""
+
 # The table's header: a row of group labels, each spanning its columns, then
 # the usual row of column labels.
 _COLLECTION_HEADER_SLOT = (
     '<q-tr :props="props">'
+    "<q-th></q-th>"
     + "".join(
         f'<q-th colspan="{len(columns)}" class="text-center text-weight-bold"'
         f' style="border-left: 1px solid rgba(128, 128, 128, 0.4)">{label}</q-th>'
@@ -357,7 +372,7 @@ def _collections_card(
             ).classes("text-caption text-grey mt-2")
             return
 
-        columns = [
+        columns = [{"name": _DETAILS_COLUMN, "label": "", "field": _DETAILS_COLUMN}] + [
             {
                 "name": field,
                 "label": label,
@@ -382,16 +397,15 @@ def _collections_card(
             for i, row in enumerate(collection_rows)
         ]
         table = ui.table(columns=columns, rows=rows, row_key="_row_index").classes(
-            "w-full cursor-pointer"
+            "w-full"
         )
         table.props("dense flat")
         table.add_slot("header", _COLLECTION_HEADER_SLOT)
-        # Its args are the click event, the row, and its index.
+        table.add_slot(f"body-cell-{_DETAILS_COLUMN}", _DETAILS_CELL_SLOT)
+        # Its arg is the row's `_row_index`.
         table.on(
-            "rowClick",
-            lambda e: _show_analyses(
-                collection_rows[e.args[1]["_row_index"]], analyses
-            ),
+            "show_analyses",
+            lambda e: _show_analyses(collection_rows[e.args], analyses),
         )
         ui.label(f"{collections.height:,} collection(s).").classes(
             "text-caption text-grey mt-2"
