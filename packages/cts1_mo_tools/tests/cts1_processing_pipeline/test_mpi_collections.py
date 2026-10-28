@@ -7,6 +7,7 @@ from cts1_mo_tools.cts1_processing_pipeline.web_ui.mpi_collections import (
     analyses_of,
     collections_csv_bytes,
     collections_xlsx_bytes,
+    downlinked_percent_text,
     strong_signal_counts_text,
     strong_signals_downlinked_text,
     time_sync_sources_text,
@@ -73,3 +74,27 @@ def test_time_sync_sources_text() -> None:
     assert time_sync_sources_text('["X"]') == "UNKNOWN (X)"
     assert time_sync_sources_text("[]") == ""
     assert time_sync_sources_text(None) == ""
+
+
+def test_downlinked_percent_text() -> None:
+    assert (
+        downlinked_percent_text(
+            {
+                "frames_present": 200,
+                "frames_expected": 250,
+                "analysis_valid_frame_count": 400,
+            }
+        )
+        == "50.0%"
+    )
+    assert (
+        downlinked_percent_text({"frames_present": 200, "frames_expected": 250})
+        == "80.0%"
+    )
+    assert (
+        downlinked_percent_text(
+            {"frames_present": 0, "analysis_valid_frame_count": 535}
+        )
+        == "0.0%"
+    )
+    assert downlinked_percent_text({"frames_present": 0, "frames_expected": None}) == ""

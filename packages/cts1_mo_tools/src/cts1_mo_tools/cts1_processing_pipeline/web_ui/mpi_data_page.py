@@ -100,6 +100,7 @@ _COLLECTION_COLUMN_GROUPS: tuple[tuple[str, tuple[tuple[str, str, bool], ...]], 
             ("frames_present", "Present", True),
             ("frames_expected", "Expected", True),
             ("frames_missing", "Missing", True),
+            ("_downlinked_percent", "Downlinked", True),
             ("integration_periods", "Integration Period(s)", True),
             ("time_sync_sources", "Time Sync Source(s)", True),
             ("_time_sync_age", "Time Sync Age", True),
@@ -392,6 +393,7 @@ def _collections_card(
                 "_end_position": _position_cell(row, "end"),
                 "_temperature_range": _temperature_range_cell(row),
                 "_time_sync_age": _time_sync_age_cell(row),
+                "_downlinked_percent": mpi_collections.downlinked_percent_text(row),
                 "_row_index": i,
             }
             for i, row in enumerate(collection_rows)

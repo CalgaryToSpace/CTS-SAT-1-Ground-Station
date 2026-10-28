@@ -11,6 +11,7 @@ __all__ = [
     "analyses_of",
     "collections_csv_bytes",
     "collections_xlsx_bytes",
+    "downlinked_percent_text",
     "integration_periods_text",
     "load_analyses",
     "load_collections",
@@ -123,6 +124,21 @@ def strong_signals_downlinked_text(
         status = "no" if count == 0 else "yes" if count >= expected else "partly"
         texts.append(f"{status} ({count}/{expected} frames)")
     return texts
+
+
+def downlinked_percent_text(collection: dict[str, Any]) -> str:
+    """How much of a collection (one row of `mpi_collections.parquet`) has
+    been downlinked, for display, e.g. "37.2%": its frames present, out of
+    the valid frames the satellite's analysis counted in the file -- or, with
+    no analysis, out of those expected from the frame counters.
+    """
+    present = collection.get("frames_present")
+    total = collection.get("analysis_valid_frame_count") or collection.get(
+        "frames_expected"
+    )
+    if present is None or not total:
+        return ""
+    return f"{present / total:.1%}"
 
 
 def position_text(latitude_deg: float | None, longitude_deg: float | None) -> str:
