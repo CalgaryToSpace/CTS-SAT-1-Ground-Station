@@ -129,7 +129,6 @@ __all__ = [
 ]
 
 import binascii
-import json
 import re
 import statistics
 from bisect import bisect_left, bisect_right
@@ -139,6 +138,7 @@ from datetime import UTC, datetime, timedelta
 from itertools import pairwise, product
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+import orjson
 import polars as pl
 from loguru import logger
 
@@ -333,7 +333,7 @@ def _parse_frame(frame: bytes) -> dict[str, Any]:
         "first_pixel_index": frame[16],
         "last_pixel_index": frame[17],
         "integration_period": u16(18),
-        "pixels": json.dumps(pixels, separators=(",", ":")),
+        "pixels": orjson.dumps(pixels).decode(),
     }
 
 
@@ -401,10 +401,10 @@ def _load_chunks(decoded_packets: pl.DataFrame) -> list[_Chunk]:
             _Sighting(
                 packet_id=packet_id,
                 received_at=received_at,
-                observation_ids=frozenset(json.loads(obs_ids or "[]")),
+                observation_ids=frozenset(orjson.loads(obs_ids or "[]")),
                 has_own_time=(
                     source in BASELINE_DECODERS
-                    or DEMOD_DECODER in json.loads(decoders or "[]")
+                    or DEMOD_DECODER in orjson.loads(decoders or "[]")
                 ),
             )
         )
@@ -676,7 +676,7 @@ def _find_markers(component: _Component) -> list[_Marker]:
         if not component.has_all(start, end):
             continue
         try:
-            fields = json.loads(m.group())
+            fields = orjson.loads(m.group())
         except ValueError:
             continue
         if isinstance(fields, dict):
@@ -1158,7 +1158,9 @@ def _frame_rows(
                 "times_received": min(
                     len({s.packet_id for s in chunk.sightings}) for chunk in covering
                 ),
-                "packet_ids": json.dumps(sorted({s.packet_id for s in sightings})),
+                "packet_ids": orjson.dumps(
+                    sorted({s.packet_id for s in sightings})
+                ).decode(),
                 "_frame": c.frame,
             }
         )

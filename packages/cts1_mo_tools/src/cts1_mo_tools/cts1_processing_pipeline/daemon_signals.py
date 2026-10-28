@@ -42,7 +42,6 @@ __all__ = [
     "write_status",
 ]
 
-import json
 import os
 import tempfile
 import threading
@@ -52,6 +51,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self, cast
 
+import orjson
 from loguru import logger
 
 if TYPE_CHECKING:
@@ -107,8 +107,12 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     )
     tmp_path = Path(tmp_name)
     try:
-        with os.fdopen(fd, "w") as handle:
-            handle.write(json.dumps(payload, indent=2) + "\n")
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(
+                orjson.dumps(
+                    payload, option=orjson.OPT_INDENT_2 | orjson.OPT_APPEND_NEWLINE
+                )
+            )
         os.replace(tmp_path, path)  # noqa: PTH105
     except OSError:
         tmp_path.unlink(missing_ok=True)
@@ -124,10 +128,10 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     than ignore it until it's rewritten.
     """
     try:
-        return json.loads(path.read_text())
+        return orjson.loads(path.read_bytes())
     except FileNotFoundError:
         return None
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, orjson.JSONDecodeError) as exc:
         logger.warning(f"Ignoring unreadable {path}: {exc}")
         return None
 

@@ -86,7 +86,6 @@ __all__ = [
 import hashlib
 import heapq
 import io
-import json
 import re
 from collections import defaultdict
 from dataclasses import dataclass, replace
@@ -96,6 +95,7 @@ from itertools import pairwise
 from math import ceil
 from typing import TYPE_CHECKING, Any, cast
 
+import orjson
 from PIL import Image, ImageDraw, ImageFont
 
 from cts1_mo_tools.cts1_decode_satnogs_packets import BULK_DOWNLINK_MAX_DATA
@@ -884,7 +884,7 @@ def _parse_properties(text: str) -> tuple[dict[str, Any], bool]:
     from broken JSON).
     """
     try:
-        parsed = json.loads(text)
+        parsed = orjson.loads(text)
     except ValueError:
         pass
     else:
@@ -895,7 +895,7 @@ def _parse_properties(text: str) -> tuple[dict[str, Any], bool]:
     for m in _JSON_PAIR_RE.finditer(text):
         key, raw_value = m.groups()
         try:
-            properties.setdefault(key, json.loads(raw_value))
+            properties.setdefault(key, orjson.loads(raw_value))
         except ValueError:
             continue
     if "sha256" not in properties and (m := _SHA256_PREFIX_RE.search(text)):
