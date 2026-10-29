@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import polars as pl
+import pytest
 from cts1_mo_tools.cts1_processing_pipeline.step_6_extract_mpi_frames.pipeline import (
     MPI_BUFFER_LEN,
     MPI_COLLECTION_MAX_DURATION,
@@ -299,18 +300,56 @@ def test_two_missing_timestamps_interpolate_across_three_blocks() -> None:
     _assert_times_match(result, recording.expected_frames())
 
 
-def test_frames_beyond_a_downlink_gap_are_extrapolated() -> None:
+def _gap_offsets(recording: _Recording) -> tuple[int, int]:
+    """[start, end) chunk offsets of a run of chunks too long to bridge, in
+    the middle of the third block.
+    """
+    start = _chunk_offset_containing(recording.timestamp_offsets[1] + 8_000)
+    return start, start + 10 * _PACKET_DATA_LEN
+
+
+def test_gap_too_long_to_bridge_is_joined_by_frame_counter() -> None:
     recording = _Recording()
-    # Too many chunks missing in a row to link across: the third block's
-    # data is split between two separately-reassembled pieces, each
-    # holding only one of its timestamps.
-    gap_start = recording.timestamp_offsets[1] + 8_000
-    skip = frozenset(
-        _chunk_offset_containing(gap_start) + _PACKET_DATA_LEN * k for k in range(10)
-    )
+    gap_start, gap_end = _gap_offsets(recording)
+    skip = frozenset(range(gap_start, gap_end, _PACKET_DATA_LEN))
     result, outcomes = compute_mpi_frames_with_outcomes(
         pl.DataFrame(_downlink(recording, skip_offsets=skip))
     )
+
+    # Interpolated straight across the gap, between the third block's own
+    # timestamps, which each piece holds one of.
+    third_block = result.filter(
+        pl.col("file_offset").is_between(
+            recording.timestamp_offsets[1],
+            recording.timestamp_offsets[2] - _FRAME_LEN,
+        )
+    )
+    assert set(third_block["timing_method"]) == {"interpolated"}
+    assert third_block["anchor_before_at"].n_unique() == 1
+    expected = recording.expected_frames()
+    lost = set(expected) - set(result["frame_counter"])
+    assert 0 < len(lost) <= (gap_end - gap_start) // _FRAME_LEN + 2
+    _assert_times_match(result, expected)
+    assert all(outcome.startswith("kept") for outcome in outcomes["outcome"])
+
+
+def test_frames_beyond_a_downlink_gap_are_extrapolated() -> None:
+    recording = _Recording()
+    # The two sides of the gap downlinked on different passes, so they
+    # can't be joined: the third block's data is split between two
+    # separately-reassembled pieces, each holding only one of its
+    # timestamps.
+    gap_start, gap_end = _gap_offsets(recording)
+    every_offset = frozenset(range(0, len(recording.data), _PACKET_DATA_LEN))
+    rows = _downlink(
+        recording, skip_offsets=frozenset(o for o in every_offset if o >= gap_start)
+    ) + _downlink(
+        recording,
+        at=_DOWNLINKED_AT + timedelta(hours=2),
+        observation_id=2,
+        skip_offsets=frozenset(o for o in every_offset if o < gap_end),
+    )
+    result, outcomes = compute_mpi_frames_with_outcomes(pl.DataFrame(rows))
 
     third_block = result.filter(
         pl.col("file_offset").is_between(
@@ -409,6 +448,55 @@ def test_different_recordings_at_same_offsets_stay_apart() -> None:
         own_pixels = recording.pixels_by_counter()
         for row in part.iter_rows(named=True):
             assert json.loads(row["pixels"]) == own_pixels[row["frame_counter"]]
+
+
+@pytest.mark.parametrize(
+    ("uptime_ms", "downlinked_later"),
+    [
+        # Laid out byte for byte like the first, so their frame counters
+        # line up across the gap just as one recording's would -- only
+        # being downlinked on a different pass gives it away.
+        (312_345_678, timedelta(hours=2)),
+        # Downlinked on the same pass, but a digit shorter uptime makes
+        # every JSON marker, so every frame after the header, a byte off.
+        (12_345_678, timedelta(minutes=5)),
+    ],
+)
+def test_different_recordings_either_side_of_a_gap_stay_apart(
+    uptime_ms: int, downlinked_later: timedelta
+) -> None:
+    first = _Recording(seed=1)
+    second = _Recording(
+        seed=2, recorded_at=_RECORDED_AT + timedelta(days=3), uptime_ms=uptime_ms
+    )
+    # The start of one, and a stretch of the other after a gap. The stretch
+    # holds no timestamp of its own, so joined, its frames would be
+    # extrapolated from the first's.
+    gap_start, gap_end = _gap_offsets(first)
+    stretch_end = _chunk_offset_containing(first.timestamp_offsets[2])
+    every_offset = frozenset(range(0, len(first.data), _PACKET_DATA_LEN))
+    rows = _downlink(
+        first, skip_offsets=frozenset(o for o in every_offset if o >= gap_start)
+    ) + _downlink(
+        second,
+        at=_DOWNLINKED_AT + downlinked_later,
+        observation_id=2,
+        skip_offsets=frozenset(
+            o for o in every_offset if not gap_end <= o < stretch_end
+        ),
+    )
+    result = compute_mpi_frames(pl.DataFrame(rows))
+
+    # Just the first's frames -- including those it holds of the block the
+    # gap is in, which a bad join would drop or replace.
+    third_block = result.filter(pl.col("file_offset") >= first.timestamp_offsets[1])
+    assert third_block.height > 0
+    assert set(third_block["timing_method"]) == {"extrapolated"}
+    assert (result["file_offset"] < gap_start).all()
+    _assert_times_match(result, first.expected_frames())
+    own_pixels = first.pixels_by_counter()
+    for row in result.iter_rows(named=True):
+        assert json.loads(row["pixels"]) == own_pixels[row["frame_counter"]]
 
 
 def _frames(*runs: tuple[datetime, list[int]]) -> pl.DataFrame:

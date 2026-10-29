@@ -53,6 +53,18 @@ which chunks belong together. This step does it from the content:
          `OVERLAP_LINK_MIN_BYTES` of their overlap is identical.
      A boundary with more than one candidate is left unlinked. A byte that
      two of a component's chunks disagree on is treated as never received.
+     Then components separated by a run of never-received chunks too long
+     to bridge are joined, each to the next one in its file, by frame
+     counter: when the first CRC-valid frame after the gap has exactly the
+     counter the last one before it predicts (one more per frame length of
+     data in between, allowing for a JSON timestamp every 20480 bytes),
+     with the same frame length and integration period, at most
+     `COUNTER_LINK_MAX_GAP_BYTES` on. The counter restarts at 0 on every
+     recording, so two recordings with the same settings line up at the
+     same offsets -- so a copy of each component must also have been
+     received within `SAME_PASS_MAX_SECONDS` of the other: one pass, so
+     one downlink, so one file. Components that overlap, or with more than
+     one candidate, are left apart.
   3. Anchors: the JSON timestamps found in each component. Two
      consecutive timestamps form an anchor span when the data between
      them is exactly 20480 bytes (one block), or up to `_MAX_SPAN_BLOCKS`
@@ -113,6 +125,7 @@ from __future__ import annotations
 
 __all__ = [
     "BLOCK_DURATION_TOLERANCE",
+    "COUNTER_LINK_MAX_GAP_BYTES",
     "DEFAULT_DATA_DIR",
     "MAX_BRIDGED_CHUNKS",
     "MPI_BUFFER_LEN",
@@ -120,6 +133,7 @@ __all__ = [
     "MPI_SYNC",
     "OUTPUT_FILENAME",
     "OVERLAP_LINK_MIN_BYTES",
+    "SAME_PASS_MAX_SECONDS",
     "STRONG_LINK_MIN_LEADING_BYTES",
     "assign_mpi_collections",
     "compute_mpi_frames",
@@ -181,6 +195,9 @@ MAX_BRIDGED_CHUNKS = 3
 _RECEIVED_TOGETHER_MAX_SECONDS = 10.0
 _RECEIVED_TOGETHER_SECONDS_PER_BRIDGED_CHUNK = 1.0
 _RECEIVED_TOGETHER_MIN_SECONDS = -1.0  # Allows for decoders' 1s-granularity.
+# Joining components by frame counter -- see the module docstring. A pass
+# lasts at most ~15 minutes.
+SAME_PASS_MAX_SECONDS = 15 * 60
 
 # Anchor span sanity checks -- see the module docstring.
 _MAX_SPAN_BLOCKS = 3
@@ -190,6 +207,8 @@ _MAX_RESYNC_DRIFT_MS = 2
 _BLOCK_DURATION_RANGE_MS = (1_000, 60_000)
 BLOCK_DURATION_TOLERANCE = 0.10
 _MIN_SPANS_FOR_MEDIAN = 3
+# As far as an anchor span can reach.
+COUNTER_LINK_MAX_GAP_BYTES = _MAX_SPAN_BLOCKS * MPI_BUFFER_LEN
 
 # How a kept frame was timed (`timing_method`).
 _INTERPOLATED = "interpolated"
@@ -1268,6 +1287,18 @@ def _received_frames(component: _Component, markers: list[_Marker]) -> dict[byte
     or not (with its fully-received JSON markers carved out), and the file
     offset of its last byte.
     """
+    frames: dict[bytes, int] = {}
+    for _, frame, last_offset in _iter_received_frames(component, markers):
+        frames.setdefault(frame, last_offset)
+    return frames
+
+
+def _iter_received_frames(
+    component: _Component, markers: list[_Marker]
+) -> Iterator[tuple[int, bytes, int]]:
+    """`_received_frames`, in file order, each with the file offsets of its
+    first and last bytes.
+    """
     runs: list[tuple[int, int]] = []
     cursor = component.base
     for m in markers:
@@ -1275,7 +1306,6 @@ def _received_frames(component: _Component, markers: list[_Marker]) -> dict[byte
         cursor = m.end
     runs.append((cursor, component.base + len(component.data)))
     stream = _stream(component, runs)
-    frames: dict[bytes, int] = {}
     for m in re.finditer(re.escape(MPI_SYNC), stream.data):
         start = m.start()
         frame_len = _frame_len_at(stream.data, start)
@@ -1285,8 +1315,158 @@ def _received_frames(component: _Component, markers: list[_Marker]) -> dict[byte
             continue
         frame = bytes(stream.data[start : start + frame_len])
         if _frame_crc_ok(frame):
-            frames.setdefault(frame, stream.file_offset(start + frame_len - 1))
-    return frames
+            yield (
+                stream.file_offset(start),
+                frame,
+                stream.file_offset(start + frame_len - 1),
+            )
+
+
+@dataclass(slots=True, frozen=True)
+class _EdgeFrame:
+    """A component's first or last CRC-valid frame."""
+
+    offset: int  # File offset of its first byte.
+    frame: bytes
+
+    @property
+    def counter(self) -> int:
+        return int.from_bytes(self.frame[4:6], "big")
+
+
+@dataclass(slots=True)
+class _Piece:
+    """A component, as a candidate for joining by frame counter."""
+
+    index: int  # Into the list of components.
+    component: _Component
+    first: _EdgeFrame
+    last: _EdgeFrame
+    received_ats: list[datetime]  # Sorted.
+
+    @property
+    def end(self) -> int:
+        return self.component.base + len(self.component.data)
+
+
+def _piece(index: int, component: _Component) -> _Piece | None:
+    frames = list(_iter_received_frames(component, _find_markers(component)))
+    if not frames:
+        return None
+    (first_offset, first, _), (last_offset, last, _) = frames[0], frames[-1]
+    return _Piece(
+        index=index,
+        component=component,
+        first=_EdgeFrame(first_offset, first),
+        last=_EdgeFrame(last_offset, last),
+        received_ats=sorted(
+            s.received_at
+            for chunk in component.chunks
+            for s in chunk.sightings
+            if s.received_at is not None
+        ),
+    )
+
+
+def _counters_line_up(before: _EdgeFrame, after: _EdgeFrame) -> bool:
+    """Whether frame `after` is the frame its counter says it is, counting
+    on from frame `before` in one steady MPI stream: the same frame length
+    and integration period, and exactly one frame length of data per
+    counter step between them, give or take a plausible JSON timestamp per
+    `MPI_BUFFER_LEN` of data.
+    """
+    if _frame_config(before.frame) != _frame_config(after.frame):
+        return False
+    frames_apart = (after.counter - before.counter) % 0x10000
+    data_len = frames_apart * len(before.frame)
+    marker_len = after.offset - before.offset - data_len
+    min_len, max_len = _MISSING_TIMESTAMP_LEN_RANGE
+    # However the stream lines up with the buffers, this much data crosses
+    # one of two numbers of buffer boundaries.
+    whole_buffers = data_len // MPI_BUFFER_LEN
+    return frames_apart > 0 and any(
+        min_len * markers <= marker_len <= max_len * markers
+        for markers in (whole_buffers, whole_buffers + 1)
+    )
+
+
+def _received_in_same_pass(first: _Piece, second: _Piece) -> bool:
+    """Whether a copy of each was received within `SAME_PASS_MAX_SECONDS`
+    of a copy of the other.
+    """
+    window = timedelta(seconds=SAME_PASS_MAX_SECONDS)
+    times = first.received_ats
+    for at in second.received_ats:
+        i = bisect_left(times, at - window)
+        if i < len(times) and times[i] <= at + window:
+            return True
+    return False
+
+
+def _counter_links(pieces: list[_Piece]) -> Iterator[tuple[int, int] | None]:
+    """(component, component) indexes for each piece joined to the next
+    piece in its file by frame counter, or None for each piece with more
+    than one candidate -- see the module docstring.
+    """
+    pieces = sorted(pieces, key=lambda p: p.component.base)
+    bases = [p.component.base for p in pieces]
+    for piece in pieces:
+        candidates: list[_Piece] = []
+        for other in pieces[bisect_left(bases, piece.end) :]:
+            if other.first.offset - piece.last.offset > COUNTER_LINK_MAX_GAP_BYTES:
+                break
+            if _counters_line_up(piece.last, other.first) and _received_in_same_pass(
+                piece, other
+            ):
+                candidates.append(other)
+        if not candidates:
+            continue
+        # Pieces further on that line up too are just later parts of the
+        # same file -- but not ones overlapping the nearest.
+        nearest = candidates[0]
+        if any(other.component.base < nearest.end for other in candidates[1:]):
+            yield None
+            continue
+        yield piece.index, nearest.index
+
+
+def _join_by_counters(
+    groups: list[list[int]],
+    components: list[_Component],
+    chunks: list[_Chunk],
+    tally: Counter[str],
+) -> tuple[list[list[int]], list[_Component]]:
+    """`groups` (each component's chunk indexes) and their `components`,
+    with components separated by a never-received gap joined by frame
+    counter -- see the module docstring. Tallies each link in `tally`.
+    """
+    pieces = [
+        piece
+        for i, component in enumerate(components)
+        if (piece := _piece(i, component)) is not None
+    ]
+    uf = _UnionFind(len(components))
+    for link in _counter_links(pieces):
+        if link is None:
+            tally["ambiguous_frame_counter"] += 1
+            continue
+        uf.union(*link)
+        tally["frame_counter"] += 1
+
+    joined: dict[int, list[int]] = defaultdict(list)
+    for i in range(len(components)):
+        joined[uf.find(i)].append(i)
+    new_groups: list[list[int]] = []
+    new_components: list[_Component] = []
+    for members in joined.values():
+        if len(members) == 1:
+            new_groups.append(groups[members[0]])
+            new_components.append(components[members[0]])
+            continue
+        group = [i for member in members for i in groups[member]]
+        new_groups.append(group)
+        new_components.append(_assemble([chunks[i] for i in group]))
+    return new_groups, new_components
 
 
 def _keep_best(best: dict[bytes, dict[str, Any]], rows: list[dict[str, Any]]) -> None:
@@ -1334,9 +1514,10 @@ def _compute_rows(
     if not chunks:
         return [], Counter(), Counter()
     groups, tally = _link_chunks(chunks)
+    components = [_assemble([chunks[i] for i in group]) for group in groups]
+    groups, components = _join_by_counters(groups, components, chunks, tally)
     tally["chunks"] = len(chunks)
     tally["components"] = len(groups)
-    components = [_assemble([chunks[i] for i in group]) for group in groups]
     markers = [_find_markers(component) for component in components]
 
     # Interpolate between pairs of timestamps first: the data rate they
