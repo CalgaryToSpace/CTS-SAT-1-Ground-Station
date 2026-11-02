@@ -41,6 +41,10 @@ RANGE_INPUT_PLACEHOLDER = "YYYY-MM-DD HH:MM:SS"
 
 PAGE_SIZE_OPTIONS = [50, 100, 200, 500]
 
+# Pre-selected in the packet type filter on page load (those present in the
+# file, anyway) -- the human-readable packets, without the beacon/bulk noise.
+DEFAULT_PACKET_TYPES = ("LOG_MESSAGE", "TCMD_RESPONSE")
+
 # Pinned to the left and always visible, whatever the column finder says --
 # a row is hard to make sense of without them.
 ALWAYS_VISIBLE_COLUMNS = ("received_at", "packet_type")
@@ -322,7 +326,10 @@ def build_packet_browser_page(data_dir: Path) -> None:  # noqa: C901, PLR0915
     reassembly_available = packet_browser.reassembled_tcmd_responses_available(
         parquet_path
     )
-    state = _FilterState(reassemble_tcmd_responses=reassembly_available)
+    state = _FilterState(
+        packet_types=[t for t in DEFAULT_PACKET_TYPES if t in packet_types],
+        reassemble_tcmd_responses=reassembly_available,
+    )
     # The grid currently on screen (replaced on every refresh), and the row
     # the details panel is showing -- kept across page turns/searches, since
     # it's a snapshot of that one row rather than a view into the grid.
