@@ -2,6 +2,7 @@ import io
 import json
 from datetime import UTC, datetime, timedelta
 
+import numpy as np
 import polars as pl
 import pytest
 from cts1_mo_tools.cts1_processing_pipeline.step_8_summarize_mpi_collections.pipeline import (  # noqa: E501
@@ -119,3 +120,22 @@ def test_frame_collections_in(collection_index: int, expected: list[datetime]) -
     )
     collection = collections.to_dicts()[collection_index]
     assert frame_collections_in(collection, collections, frame_collections) == expected
+
+
+def test_prepared_pixels_line_up_by_pixel_index() -> None:
+    # Frames covering different (and differently long) pixel ranges, one
+    # with none at all.
+    frames = _frames([0, 1, 2]).with_columns(
+        first_pixel_index=pl.Series([50, 49, 48]),
+        pixels=pl.Series(["[1, null]", None, "[3, 4, 5, 6]"]),
+    )
+    prepared = mpi_strip.prepare_frames(frames)
+    assert prepared is not None
+    assert prepared.first_pixel_index == 48
+    assert prepared.pixel_count == 4
+    np.testing.assert_array_equal(
+        prepared.raw_pixels,
+        [[np.nan, np.nan, 1, np.nan], [np.nan] * 4, [3, 4, 5, 6]],
+    )
+    # Bands with no column at all are all NaN.
+    assert np.isnan(prepared.band_values[-1]).all()

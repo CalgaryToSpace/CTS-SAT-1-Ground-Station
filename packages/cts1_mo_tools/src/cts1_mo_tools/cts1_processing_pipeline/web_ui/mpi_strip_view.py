@@ -1,11 +1,20 @@
-"""The MPI Data page's strip view of MPI collections: a dialog with a list of
-every collection on the left, and the selected one's frames as a long strip
--- see `mpi_strip` for the image itself -- with a readout of whatever frame,
-pixel and housekeeping value is under the mouse.
+"""The "MPI Vis" page: a list of every MPI collection on the left, and
+the selected one's frames as a long strip -- see `mpi_strip` for the image
+itself -- with a readout of whatever frame, pixel and housekeeping value is
+under the mouse.
 
 The selected collection is kept in the page's URL (`?collection=<start
 time>`, see `collection_key`), so a link to it opens it directly, and the
 browser's back/forward buttons step between the collections viewed.
+
+It's its own page, rather than part of the MPI Data page, so it doesn't
+wait on (or compete for the CPU with) that page's collection timeline --
+the slowest thing on it, especially while the pipeline's running.
+
+Each collection's frames are decoded once (`mpi_strip.prepare_frames`),
+and each strip image rendered once per value setting at 1 image pixel per
+frame: the fixed zooms just stretch it in the browser (pixelated), so
+changing the zoom never waits on the server.
 """
 
 # pyright: standard
@@ -13,17 +22,26 @@ browser's back/forward buttons step between the collections viewed.
 
 from __future__ import annotations
 
-__all__ = ["COLLECTION_QUERY_PARAM", "MpiStripDialog", "collection_key"]
+__all__ = [
+    "COLLECTION_QUERY_PARAM",
+    "MPI_VIS_PATH",
+    "build_mpi_vis_page",
+    "collection_key",
+    "vis_page_url",
+]
 
 import contextlib
 import html
 import json
 import math
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
 from nicegui import run, ui
 
-from . import mpi_strip
+from . import mpi_collections, mpi_strip
+from .layout import page_shell
 from .preview_image_route import preview_image_url
 
 if TYPE_CHECKING:
@@ -178,20 +196,21 @@ def _labels_column(strip: mpi_strip.MpiStrip) -> None:
 
 
 def _time_axis(
-    strip: mpi_strip.MpiStrip, frames: list[dict[str, Any]], *, fit: bool
+    strip: mpi_strip.MpiStrip, frames: list[dict[str, Any]], zoom: int | None
 ) -> None:
-    """Times (UTC) under the strip, every `_TICK_SPACING_PX` or so (or
-    `_FIT_TICK_COUNT` labels across, for a fit-width strip) -- each the time
+    """Times (UTC) under the strip, every `_TICK_SPACING_PX` or so at `zoom`
+    screen pixels per column (or `_FIT_TICK_COUNT` labels across, for a
+    fit-width strip, `zoom` None) -- each the time
     of the first frame received at or after its position. A label that would
     land too close to the previous one (e.g. right after a run of missing
     frames) is skipped, so labels never overlap.
     """
     column_count = len(strip.columns)
-    if fit:
+    if zoom is None:
         every = max(1, math.ceil(column_count / _FIT_TICK_COUNT))
     else:
-        every = max(1, math.ceil(_TICK_SPACING_PX / strip.zoom))
-    width = "100%" if fit else f"{strip.width}px"
+        every = max(1, math.ceil(_TICK_SPACING_PX / zoom))
+    width = "100%" if zoom is None else f"{column_count * zoom}px"
     min_gap = every * _MIN_TICK_GAP_FRACTION
     last_labelled: int | None = None
     with (
@@ -213,7 +232,7 @@ def _time_axis(
             if last_labelled is not None and i - last_labelled < min_gap:
                 continue
             last_labelled = i
-            left = f"{i / column_count * 100:.3f}%" if fit else f"{i * strip.zoom}px"
+            left = f"{i / column_count * 100:.3f}%" if zoom is None else f"{i * zoom}px"
             ui.label(_time_text(frames[c.frame_index]["collected_at"])[:8]).classes(
                 "absolute text-xs text-grey whitespace-nowrap"
             ).style(f"left: {left}; border-left: 1px solid; padding-left: 2px")
@@ -224,12 +243,13 @@ def _strip_body(
     frames: list[dict[str, Any]],
     mode: mpi_strip.IntensityMode,
     filename: str,
-    *,
-    fit: bool,
+    zoom: int | None,
 ) -> ui.element:
-    """Build the strip, its legends and readout; returns the strip's
-    horizontally-scrolling container.
+    """Build the strip, its legends and readout, at `zoom` screen pixels per
+    column -- the image stretched to that, pixelated -- or fit to the
+    width (None); returns the strip's horizontally-scrolling container.
     """
+    fit = zoom is None
     url = preview_image_url(strip.png, "image/png", filename)
     with ui.row().classes("w-full items-center gap-6"):
         suffix = " vs median" if mode == "minus_median" else ""
@@ -260,17 +280,24 @@ def _strip_body(
             .style("flex: 1 1 auto; min-width: 0") as scroller
         ):
             # Sized up front (its height is always 1:1), so the layout -- and
-            # the dialog's vertical scroll -- doesn't collapse while it loads.
-            # Fit-width stretches it horizontally only; the mouse readout
-            # still maps back to image pixels on each axis separately.
-            width = "100%" if fit else f"{strip.width}px"
+            # the page's vertical scroll -- doesn't collapse while it loads.
+            # Stretched horizontally only; the mouse readout still maps back
+            # to image pixels on each axis separately.
+            width = "100%" if fit else f"{len(strip.columns) * zoom}px"
+            # Nearest-neighbour, so each frame stays a crisp column. (A
+            # fit-width strip's rendered wide enough to only ever shrink, and
+            # shrinks smoothly, averaging columns, rather than dropping some.)
+            rendering = "auto" if fit else "pixelated"
             image = ui.interactive_image(
                 url, events=["mousemove"], cross="rgba(255, 255, 255, 0.5)"
-            ).style(f"width: {width}; height: {strip.height}px; max-width: none")
-            _time_axis(strip, frames, fit=fit)
+            ).style(
+                f"width: {width}; height: {strip.height}px; max-width: none; "
+                f"image-rendering: {rendering}"
+            )
+            _time_axis(strip, frames, zoom)
 
     # Tall enough for a full readout (frame, time, pixel, every band, timing),
-    # so the dialog's height -- and so its vertical scroll -- doesn't change
+    # so the page's height -- and so its vertical scroll -- doesn't change
     # as the readout does, nor when a re-render resets it.
     readout_lines = 4 + len(mpi_strip.BANDS)
     readout = (
@@ -348,9 +375,8 @@ def _install_wheel_handler(container: ui.element) -> None:
     in or -1 to zoom out, at the point under the cursor (as a
     `_ScrollAnchor`) -- instead of zooming the whole page.
 
-    Installed on `container`, which outlives every re-rendered strip -- but
-    not a closed dialog (its content is re-created on each open), so call
-    this on every open. Installing it twice on the same element is a no-op.
+    Installed on `container`, which outlives every re-rendered strip.
+    Installing it twice on the same element is a no-op.
     """
     container.client.run_javascript(
         f"""(() => {{
@@ -449,9 +475,13 @@ def _summary_text(collection: dict[str, Any], frames: pl.DataFrame) -> str:
 
 # The page URL's query parameter naming the collection being viewed.
 COLLECTION_QUERY_PARAM = "collection"
-# Dispatched on the dialog's URL-sync element when the browser's back/forward
-# buttons change the URL -- see `MpiStripDialog`.
+MPI_VIS_PATH = "/mpi-vis"
+# Dispatched on the page's URL-sync element when the browser's back/forward
+# buttons change the URL -- see `_MpiStripView`.
 _URL_CHANGE_EVENT = "strip_url_change"
+# The page's strip area fills the window under the header and the page's
+# title row, so the collections list and the strip scroll separately.
+_VIEW_HEIGHT = "calc(100vh - 9rem)"
 
 
 def collection_key(started_at: datetime) -> str:
@@ -461,15 +491,49 @@ def collection_key(started_at: datetime) -> str:
     return f"{started_at:%Y-%m-%dT%H:%M:%S}.{started_at.microsecond // 1000:03d}Z"
 
 
+def vis_page_url(key: str) -> str:
+    """The MPI Vis page open at the collection `key` (see `collection_key`)."""
+    return f"{MPI_VIS_PATH}?{COLLECTION_QUERY_PARAM}={quote(key, safe='')}"
+
+
 def _collection_item_caption(row: dict[str, Any]) -> str:
     present, expected = row.get("frames_present") or 0, row.get("frames_expected")
     return f"{present:,} of {expected:,} frames" if expected else f"{present:,} frames"
 
 
-class MpiStripDialog:
-    """The strip-view dialog, built once per page (call from the page's build
-    function). `show` opens it at a collection; `set_collections` (once
-    loaded) gives it the collections to list and look keys up in.
+@dataclass(frozen=True, slots=True)
+class _LoadedCollection:
+    """A collection's frames, loaded and decoded -- everything the strip
+    needs that doesn't depend on the view's settings.
+    """
+
+    prepared: mpi_strip.PreparedFrames
+    # Each frame's fields bar its pixels, for the readout and time axis.
+    frame_rows: list[dict[str, Any]]
+    summary: str
+
+
+def _load_collection(
+    data_dir: Path, row: dict[str, Any], collections: pl.DataFrame
+) -> _LoadedCollection | None:
+    """Blocking -- run it via `run.io_bound`. None when none of the
+    collection's frames have been downlinked.
+    """
+    frames = mpi_strip.load_collection_frames(data_dir, row, collections)
+    prepared = mpi_strip.prepare_frames(frames)
+    if prepared is None:
+        return None
+    return _LoadedCollection(
+        prepared=prepared,
+        frame_rows=frames.drop("pixels").to_dicts(),
+        summary=_summary_text(row, frames),
+    )
+
+
+class _MpiStripView:
+    """The page's collections list and strip view. `set_collections` (once
+    loaded) gives it the collections to list and look keys up in; `show`
+    switches it to one.
     """
 
     def __init__(self, data_dir: Path) -> None:
@@ -481,12 +545,9 @@ class MpiStripDialog:
         # Bumped per `show`, so a slow load for a collection the user has
         # since moved on from is dropped instead of displayed.
         self._load_generation = 0
-        # When the dialog is closed because the URL changed (back button),
-        # the URL is already right -- don't push another entry.
-        self._closing_from_url = False
 
-        # Listens for back/forward. Outside the dialog, so it's always in
-        # the page; registered now, before it reaches the browser.
+        # Listens for back/forward; registered now, before it reaches the
+        # browser.
         url_sync = ui.element("div").classes("hidden")
         url_sync.on(
             _URL_CHANGE_EVENT,
@@ -506,42 +567,41 @@ class MpiStripDialog:
         )
 
         with (
-            ui.dialog().props("maximized") as self._dialog,
-            ui.card().classes("w-full h-full no-wrap gap-2"),
+            ui.row()
+            .classes("w-full no-wrap gap-4 min-h-0")
+            .style(f"height: {_VIEW_HEIGHT}")
         ):
-            with ui.row().classes("w-full items-center justify-between no-wrap"):
+            with ui.column().classes(
+                "w-64 flex-none h-full overflow-y-auto gap-0 border-r pr-2"
+            ):
+                ui.label("MPI Collections").classes("text-caption text-grey")
+                self._list = ui.list().props("dense separator").classes("w-full")
+                with self._list, ui.row().classes("items-center gap-2 p-2"):
+                    ui.spinner(size="sm")
+                    ui.label("Loading...").classes("text-grey")
+            with ui.column().classes("grow min-w-0 h-full overflow-y-auto gap-2"):
                 self._title = ui.label().classes("text-lg font-bold")
-                ui.button(icon="close", on_click=self._dialog.close).props(
-                    "flat round dense"
-                )
-            with ui.row().classes("w-full grow no-wrap gap-4 min-h-0"):
-                with ui.column().classes(
-                    "w-64 flex-none h-full overflow-y-auto gap-0 border-r pr-2"
-                ):
-                    ui.label("MPI Collections").classes("text-caption text-grey")
-                    self._list = ui.list().props("dense separator").classes("w-full")
-                with ui.column().classes("grow min-w-0 h-full overflow-y-auto gap-2"):
-                    self._summary = ui.label().classes("text-caption text-grey")
-                    with ui.row().classes("items-end gap-4"):
-                        with _labelled("Time Scale"):
-                            zoom_toggle = ui.toggle(_ZOOMS, value=_DEFAULT_ZOOM)
-                        with _labelled("Value Processing"):
-                            mode_toggle = ui.toggle(_MODES, value="raw")
-                        with _labelled("Value Scale"):
-                            range_toggle = ui.toggle(_RANGES, value="typical")
-                        for toggle in (zoom_toggle, mode_toggle, range_toggle):
-                            toggle.props("dense")
-                        ui.label(
-                            "Over the strip: scroll to pan, Ctrl+scroll to zoom."
-                        ).classes("text-caption text-grey")
-                    self._body = ui.column().classes("w-full gap-2")
-        self._dialog.on("hide", self._on_hide)
+                self._summary = ui.label().classes("text-caption text-grey")
+                with ui.row().classes("items-end gap-4"):
+                    with _labelled("Time Scale"):
+                        zoom_toggle = ui.toggle(_ZOOMS, value=_DEFAULT_ZOOM)
+                    with _labelled("Value Processing"):
+                        mode_toggle = ui.toggle(_MODES, value="raw")
+                    with _labelled("Value Scale"):
+                        range_toggle = ui.toggle(_RANGES, value="typical")
+                    for toggle in (zoom_toggle, mode_toggle, range_toggle):
+                        toggle.props("dense")
+                    ui.label(
+                        "Over the strip: scroll to pan, Ctrl+scroll to zoom."
+                    ).classes("text-caption text-grey")
+                self._body = ui.column().classes("w-full gap-2")
         self._viewer = _StripViewer(
             body=self._body,
             zoom_toggle=zoom_toggle,
             mode_toggle=mode_toggle,
             range_toggle=range_toggle,
         )
+        _install_wheel_handler(self._body)
 
     def set_collections(self, collections: pl.DataFrame) -> None:
         """(Re)list `collections` (`mpi_collections.parquet`), newest first."""
@@ -553,6 +613,11 @@ class MpiStripDialog:
         self._items = {}
         self._list.clear()
         with self._list:
+            if not rows:
+                ui.label(
+                    "No MPI collections yet -- run the pipeline (step_1..step_3, "
+                    "then step_6 through step_8) first."
+                ).classes("text-caption text-grey p-2")
             for key, row in self._rows_by_key.items():
                 # NiceGUI passes the click event first; the key's bound after.
                 with (
@@ -568,26 +633,32 @@ class MpiStripDialog:
                 self._items[key] = item
         self._highlight(self._active_key)
 
+    def notify_missing(self, key: str) -> None:
+        with self._body:  # A UI context, even when called from a timer.
+            ui.notify(f"No MPI collection starting at {key}.", type="warning")
+
     def has_collection(self, key: str) -> bool:
         return key in self._rows_by_key
 
-    async def show(self, key: str, *, push_url: bool = True) -> None:
-        """Open the dialog (if it isn't already) at the collection `key` (see
-        `collection_key`), and -- unless `push_url` is False, e.g. when the
-        URL's what asked for it -- push it to the URL as a new history entry.
+    def newest_with_frames(self) -> str | None:
+        return next(
+            (k for k, r in self._rows_by_key.items() if r.get("frames_present")), None
+        )
+
+    async def show(self, key: str, *, url: str | None = "push") -> None:
+        """Switch to the collection `key` (see `collection_key`), and set the
+        URL to it: `url` "push" as a new history entry, "replace" in place
+        of the current one, or None not at all (e.g. when the URL's what
+        asked for it).
         """
         row = self._rows_by_key.get(key)
         if row is None or self._collections is None:
-            with self._dialog:  # A UI context, even when called from a timer.
-                ui.notify(f"No MPI collection starting at {key}.", type="warning")
+            self.notify_missing(key)
             return
         self._active_key = key
         self._highlight(key)
-        if push_url:
-            _push_url_collection(self._dialog, key)
-        if not self._dialog.value:
-            self._dialog.open()
-        _install_wheel_handler(self._body)
+        if url is not None:
+            _set_url_collection(self._body, key, replace=url == "replace")
 
         self._load_generation += 1
         generation = self._load_generation
@@ -601,21 +672,21 @@ class MpiStripDialog:
             ui.spinner(size="md")
             ui.label("Loading frames...").classes("text-grey")
 
-        frames = await run.io_bound(
-            mpi_strip.load_collection_frames, self._data_dir, row, self._collections
+        loaded = await run.io_bound(
+            _load_collection, self._data_dir, row, self._collections
         )
-        if frames is None or generation != self._load_generation:
-            return  # Server shutting down, or another collection's been picked.
-        if frames.is_empty():
+        if generation != self._load_generation:
+            return  # Another collection's been picked meanwhile.
+        if loaded is None:
             self._body.clear()
             with self._body:
                 ui.label("No frames of this collection have been downlinked.").classes(
                     "text-grey"
                 )
             return
-        self._summary.set_text(_summary_text(row, frames))
+        self._summary.set_text(loaded.summary)
         await self._viewer.show(
-            frames, filename=f"mpi_collection_{started_at:%Y-%m-%d_%H%M%S}Z.png"
+            loaded, filename=f"mpi_collection_{started_at:%Y-%m-%d_%H%M%S}Z.png"
         )
 
     def _highlight(self, key: str | None) -> None:
@@ -628,40 +699,39 @@ class MpiStripDialog:
             else:
                 item.props(remove="active")
 
-    def _on_hide(self) -> None:
-        self._active_key = None
-        self._highlight(None)
-        if self._closing_from_url:
-            self._closing_from_url = False
-        else:
-            _push_url_collection(self._dialog, None)
-
     async def _on_url_change(self, key: str) -> None:
         """The browser's back/forward buttons moved to a URL viewing `key`
-        (a `collection_key`), or none (`""`).
+        (a `collection_key`), or none (`""`) -- the newest collection, then.
         """
-        if key and key != self._active_key:
-            await self.show(key, push_url=False)
-        elif not key and self._dialog.value:
-            self._closing_from_url = True
-            self._dialog.close()
+        if not key:
+            newest = self.newest_with_frames()
+            if newest is not None and newest != self._active_key:
+                await self.show(newest, url="replace")
+        elif key != self._active_key:
+            await self.show(key, url=None)
 
 
-def _push_url_collection(element: ui.element, key: str | None) -> None:
-    """Push the page URL with its `COLLECTION_QUERY_PARAM` set to `key` (or
-    removed, for None) as a new history entry -- unless it's already that.
-    `element` is any element on the page, for its client.
+def _set_url_collection(element: ui.element, key: str, *, replace: bool) -> None:
+    """Set the page URL's `COLLECTION_QUERY_PARAM` to `key`, as a new history
+    entry (or, if `replace`, in place of the current one) -- unless it's
+    already that. `element` is any element on the page, for its client.
     """
+    method = "replaceState" if replace else "pushState"
     element.client.run_javascript(
         f"""(() => {{
             const url = new URL(location.href);
             const key = {json.dumps(key)};
             if (url.searchParams.get('{COLLECTION_QUERY_PARAM}') === key) return;
-            if (key === null) url.searchParams.delete('{COLLECTION_QUERY_PARAM}');
-            else url.searchParams.set('{COLLECTION_QUERY_PARAM}', key);
-            history.pushState(null, '', url);
+            url.searchParams.set('{COLLECTION_QUERY_PARAM}', key);
+            history.{method}(null, '', url);
         }})()"""
     )
+
+
+# The strip images kept per collection: one per (value processing, value
+# scale, render zoom) -- the render zoom being 1 for the fixed zooms, or the
+# collection's fit-width zoom.
+_StripKey = tuple[str, str, int]
 
 
 class _StripViewer:
@@ -682,8 +752,8 @@ class _StripViewer:
         self._zoom_toggle = zoom_toggle
         self._mode_toggle = mode_toggle
         self._range_toggle = range_toggle
-        self._frames: pl.DataFrame | None = None
-        self._frame_rows: list[dict[str, Any]] = []
+        self._loaded: _LoadedCollection | None = None
+        self._strips: dict[_StripKey, mpi_strip.MpiStrip] = {}
         self._filename = ""
         self._column_count = 0
         self._fit_zoom = 1
@@ -704,18 +774,19 @@ class _StripViewer:
 
     def clear_strip(self) -> None:
         """Drop the current collection (e.g. while the next one loads)."""
-        self._frames = None
+        self._loaded = None
+        self._strips = {}
         self._scroller = None
         self._body.clear()
 
-    async def show(self, frames: pl.DataFrame, *, filename: str) -> None:
-        """Switch to (and render) a collection's `frames`, keeping the
-        current view settings; it starts scrolled to the start.
+    async def show(self, loaded: _LoadedCollection, *, filename: str) -> None:
+        """Switch to (and render) a collection, keeping the current view
+        settings; it starts scrolled to the start.
         """
-        self._frames = frames
-        self._frame_rows = frames.drop("pixels").to_dicts()
+        self._loaded = loaded
+        self._strips = {}
         self._filename = filename
-        self._column_count = mpi_strip.column_count(frames)
+        self._column_count = len(loaded.prepared.columns)
         self._fit_zoom = max(
             1, math.ceil(_FIT_RENDER_WIDTH_PX / max(1, self._column_count))
         )
@@ -724,36 +795,42 @@ class _StripViewer:
         await self.render()
 
     async def render(self) -> None:
-        if self._frames is None:
+        if self._loaded is None:
             return
         self._rendering = True
         try:
-            await self._render(self._frames)
+            await self._render(self._loaded)
         finally:
             self._rendering = False
 
-    async def _render(self, frames: pl.DataFrame) -> None:
+    async def _render(self, loaded: _LoadedCollection) -> None:
         mode = self._mode_toggle.value
-        fit = self._zoom_toggle.value == _FIT
-        strip = await run.io_bound(
-            mpi_strip.render_strip,
-            frames,
-            zoom=self._fit_zoom if fit else self._zoom_toggle.value,
-            mode=mode,
-            intensity_range=self._range_toggle.value,
-        )
-        if strip is None or frames is not self._frames:
-            return  # Nothing to show, or switched collections meanwhile.
+        zoom = None if self._zoom_toggle.value == _FIT else self._zoom_toggle.value
+        key = (mode, self._range_toggle.value, self._fit_zoom if zoom is None else 1)
+        strip = self._strips.get(key)
+        if strip is None:
+            strip = await run.io_bound(
+                mpi_strip.render_prepared,
+                loaded.prepared,
+                zoom=key[2],
+                mode=mode,
+                intensity_range=key[1],
+            )
+            if strip is None or loaded is not self._loaded:
+                return  # Server shutting down, or switched collections meanwhile.
+            self._strips[key] = strip
         # A Ctrl+scroll zoom keeps the point under the cursor in place;
         # anything else keeps whatever's mid-view there. Read just before
         # swapping strips, so scrolling done while this one rendered isn't lost.
         anchor, self._pending_anchor = self._pending_anchor, None
         if anchor is None and self._scroller is not None:
             anchor = await _scroll_center_anchor(self._scroller)
+            if loaded is not self._loaded:
+                return
         self._body.clear()
         with self._body:
             self._scroller = _strip_body(
-                strip, self._frame_rows, mode, self._filename, fit=fit
+                strip, loaded.frame_rows, mode, self._filename, zoom
             )
         if anchor is not None:
             _scroll_to_anchor(self._scroller, anchor)
@@ -762,7 +839,7 @@ class _StripViewer:
         """Step the zoom in/out at the cursor -- `detail` as dispatched by
         `_install_wheel_handler`.
         """
-        if self._rendering or self._frames is None:
+        if self._rendering or self._loaded is None:
             return  # Don't stack up slow renders from one long gesture.
         target = _next_zoom(
             self._zoom_toggle.value,
@@ -774,3 +851,32 @@ class _StripViewer:
             return
         self._pending_anchor = (detail["fraction"], detail["viewport"])
         self._zoom_toggle.value = target  # Re-renders, via `on_value_change`.
+
+
+def build_mpi_vis_page(data_dir: Path, *, collection: str | None = None) -> None:
+    """`collection`: a `collection_key` to open at, from the URL -- else the
+    newest collection with any frames downlinked.
+    """
+    with page_shell():
+        with ui.row().classes("w-full items-center justify-between"):
+            ui.label("MPI Vis").classes("text-2xl font-bold")
+            ui.link("All collections, in detail: MPI Data", "/mpi-data").classes(
+                "text-caption"
+            )
+        view = _MpiStripView(data_dir)
+
+    async def _load() -> None:
+        collections = await run.io_bound(mpi_collections.load_collections, data_dir)
+        if collections is None:
+            return  # Server shutting down.
+        view.set_collections(collections)
+        if collection and view.has_collection(collection):
+            await view.show(collection, url=None)  # The URL already names it.
+            return
+        if collection:
+            view.notify_missing(collection)
+        newest = view.newest_with_frames()
+        if newest is not None:
+            await view.show(newest, url="replace")
+
+    ui.timer(0, _load, once=True)

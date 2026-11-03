@@ -20,8 +20,12 @@ __all__ = [
     "IntensityMode",
     "IntensityRange",
     "MpiStrip",
+    "PreparedFrames",
     "StripColumn",
+    "column_count",
     "load_collection_frames",
+    "prepare_frames",
+    "render_prepared",
     "render_strip",
 ]
 
@@ -310,6 +314,78 @@ def column_count(frames: pl.DataFrame) -> int:
     return len(_columns(frames)) if not frames.is_empty() else 0
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedFrames:
+    """A collection's frames (from `load_collection_frames`), decoded and
+    laid out for `render_prepared` -- the slow, per-collection part of
+    rendering a strip, done once however many times it's then re-rendered
+    (e.g. as the view's settings change).
+    """
+
+    columns: list[StripColumn]
+    first_pixel_index: int
+    pixel_count: int
+    # Each frame's raw pixel values, one row per frame, from
+    # `first_pixel_index` -- NaN where a frame has none.
+    raw_pixels: npt.NDArray[np.float64]
+    # Each of `BANDS`' values per frame -- NaN where a frame has none.
+    band_values: tuple[npt.NDArray[np.float64], ...]
+
+
+def _pixel_matrix(frames: pl.DataFrame) -> tuple[int, npt.NDArray[np.float64]]:
+    """`frames`' pixels as one row per frame, from the lowest pixel index any
+    frame starts at -- vectorised, rather than a Python loop over frames, as
+    a long collection has thousands.
+    """
+    # A frame with no pixels (null) as an empty list, so each frame's values
+    # in the exploded series are exactly its list's length.
+    pixels = (
+        frames["pixels"]
+        .str.json_decode(pl.List(pl.Int64))
+        .fill_null(pl.Series([[]], dtype=pl.List(pl.Int64)))
+    )
+    lengths = pixels.list.len().to_numpy().astype(np.int64)
+    firsts = frames["first_pixel_index"].to_numpy().astype(np.int64)
+    first_pixel = int(firsts.min())
+    pixel_count = max(1, int((firsts + lengths).max()) - first_pixel)
+    matrix = np.full((frames.height, pixel_count), np.nan)
+    values = (
+        pixels.explode(empty_as_null=False)
+        .cast(pl.Float64)
+        .fill_null(np.nan)
+        .to_numpy()
+    )
+    if len(values):
+        rows = np.repeat(np.arange(frames.height), lengths)
+        # Each value's position within its own frame's list.
+        offsets = np.arange(len(values)) - np.repeat(
+            np.cumsum(lengths) - lengths, lengths
+        )
+        matrix[rows, np.repeat(firsts - first_pixel, lengths) + offsets] = values
+    return first_pixel, matrix
+
+
+def prepare_frames(frames: pl.DataFrame) -> PreparedFrames | None:
+    """`frames` (from `load_collection_frames`) ready to render -- see
+    `PreparedFrames`. None when there are no frames.
+    """
+    if frames.is_empty():
+        return None
+    first_pixel, raw_pixels = _pixel_matrix(frames)
+    return PreparedFrames(
+        columns=_columns(frames),
+        first_pixel_index=first_pixel,
+        pixel_count=raw_pixels.shape[1],
+        raw_pixels=raw_pixels,
+        band_values=tuple(
+            frames[band.column].cast(pl.Float64).fill_null(np.nan).to_numpy()
+            if band.column in frames.columns
+            else np.full(frames.height, np.nan)
+            for band in BANDS
+        ),
+    )
+
+
 def render_strip(
     frames: pl.DataFrame,
     *,
@@ -317,13 +393,28 @@ def render_strip(
     mode: IntensityMode = "raw",
     intensity_range: IntensityRange = "typical",
 ) -> MpiStrip | None:
-    """`frames` (from `load_collection_frames`) as a strip image, `zoom`
-    image pixels across per frame (less, if that would make it too wide to
-    show). None when there are no frames.
+    """`frames` (from `load_collection_frames`) as a strip image -- see
+    `render_prepared`. None when there are no frames.
     """
-    if frames.is_empty():
+    prepared = prepare_frames(frames)
+    if prepared is None:
         return None
-    columns = _columns(frames)
+    return render_prepared(
+        prepared, zoom=zoom, mode=mode, intensity_range=intensity_range
+    )
+
+
+def render_prepared(
+    prepared: PreparedFrames,
+    *,
+    zoom: int = 1,
+    mode: IntensityMode = "raw",
+    intensity_range: IntensityRange = "typical",
+) -> MpiStrip:
+    """`prepared`'s frames as a strip image, `zoom` image pixels across per
+    frame (less, if that would make it too wide to show).
+    """
+    columns = prepared.columns
     zoom = max(1, min(zoom, _MAX_WIDTH // len(columns)))
     frame_columns = np.array(
         [c.frame_index if c.kind == "frame" else -1 for c in columns]
@@ -331,20 +422,10 @@ def render_strip(
     is_frame = frame_columns >= 0
     rows = frame_columns[is_frame]
 
-    pixels = frames["pixels"].str.json_decode(pl.List(pl.Int64)).to_list()
-    first_pixel = int(frames["first_pixel_index"].min())  # pyright: ignore[reportArgumentType]
-    last_pixel = max(
-        first + len(values) - 1
-        for first, values in zip(frames["first_pixel_index"], pixels, strict=True)
-    )
-    pixel_count = last_pixel - first_pixel + 1
-    by_frame = np.full((frames.height, pixel_count), np.nan)
-    for i, (first, values) in enumerate(
-        zip(frames["first_pixel_index"], pixels, strict=True)
-    ):
-        by_frame[i, first - first_pixel : first - first_pixel + len(values)] = values
+    first_pixel, pixel_count = prepared.first_pixel_index, prepared.pixel_count
+    by_frame = prepared.raw_pixels
     if mode == "minus_median":
-        by_frame -= np.nanmedian(by_frame, axis=0)
+        by_frame = by_frame - np.nanmedian(by_frame, axis=0)
     if intensity_range == "typical":
         typical = by_frame[_typical_frames(by_frame)]
         low, high = (float(v) for v in np.nanpercentile(typical, _PERCENTILE_RANGE))
@@ -361,12 +442,8 @@ def render_strip(
     image[:detector_height, is_frame] = np.repeat(detector, _PIXEL_ROW_HEIGHT, axis=0)
 
     band_ranges: list[BandRange] = []
-    for i, band in enumerate(BANDS):
+    for i, (band, values) in enumerate(zip(BANDS, prepared.band_values, strict=True)):
         top = bands_top + i * (BAND_HEIGHT + _BAND_GAP)
-        if band.column in frames.columns:
-            values = frames[band.column].cast(pl.Float64).to_numpy()
-        else:
-            values = np.full(frames.height, np.nan)
         has_values = not np.isnan(values).all()
         band_low = float(np.nanmin(values)) if has_values else None
         band_high = float(np.nanmax(values)) if has_values else None
@@ -374,7 +451,8 @@ def render_strip(
         image[top : top + BAND_HEIGHT, is_frame] = colours
         band_ranges.append(BandRange(band, top, band_low, band_high))
 
-    image = np.repeat(image, zoom, axis=1)
+    if zoom > 1:
+        image = np.repeat(image, zoom, axis=1)
     buf = io.BytesIO()
     Image.fromarray(image, "RGBA").save(buf, format="PNG")
     return MpiStrip(
