@@ -208,6 +208,65 @@ EXTENDED_FIELD_NAMES = [
     "adcs_estimated_yaw_angle_cdeg",
 ]
 
+# COMMS_beacon_extended_packet_v5plus_t (packet type 0x21, beacon v5+) has the
+# same layout as COMMS_beacon_extended_packet_t, except the 42-byte
+# friendly_message slot holds these fields instead. `reserved_v5` pads them to
+# exactly fill that slot, so end_message and the extended fields after it keep
+# their v2-v4 offsets.
+V5PLUS_FMT = (
+    "<"
+    "B"  # distinct_tcmds_pending
+    "H"  # duration_since_last_time_sync_sec (clamped to 65535)
+    "h"  # adcs_wheel_speed_x_rpm           (signed)
+    "h"  # adcs_wheel_speed_y_rpm           (signed)
+    "h"  # adcs_wheel_speed_z_rpm           (signed)
+    "H"  # adcs_pointing_error_cdeg
+    "h"  # adcs_innovation_vector_x_en4     (signed)
+    "h"  # adcs_innovation_vector_y_en4     (signed)
+    "h"  # adcs_innovation_vector_z_en4     (signed)
+    "h"  # adcs_estimated_gyro_bias_x_mdeg_per_sec (signed)
+    "h"  # adcs_estimated_gyro_bias_y_mdeg_per_sec (signed)
+    "h"  # adcs_estimated_gyro_bias_z_mdeg_per_sec (signed)
+    "B"  # gnss_power_consumed_cW
+    "H"  # adcs_total_power_consumed_cW
+    "h"  # eps_pcu_ch4_volt_in_mppt_mV      (signed)
+    "h"  # eps_pcu_ch4_curr_in_mppt_mA      (signed)
+    "h"  # eps_pcu_ch4_curr_ou_mppt_mA      (signed)
+    "3s"  # bulk_downlink_file_path_sha256_prefix
+    "7s"  # reserved_v5 (always 0)
+)
+V5PLUS_FIELDS_SIZE = struct.calcsize(V5PLUS_FMT)
+if V5PLUS_FIELDS_SIZE != FRIENDLY_MESSAGE_SIZE:
+    _msg = "v5+ fields must exactly fill the friendly_message slot"
+    raise AssertionError(_msg)
+BEACON_EXTENDED_V5PLUS_TOTAL_STRUCT_SIZE = BEACON_EXTENDED_TOTAL_STRUCT_SIZE  # 198
+
+V5PLUS_FIELD_NAMES = [
+    "distinct_tcmds_pending",
+    "duration_since_last_time_sync_sec",
+    "adcs_wheel_speed_x_rpm",
+    "adcs_wheel_speed_y_rpm",
+    "adcs_wheel_speed_z_rpm",
+    "adcs_pointing_error_cdeg",
+    "adcs_innovation_vector_x_en4",
+    "adcs_innovation_vector_y_en4",
+    "adcs_innovation_vector_z_en4",
+    "adcs_estimated_gyro_bias_x_mdeg_per_sec",
+    "adcs_estimated_gyro_bias_y_mdeg_per_sec",
+    "adcs_estimated_gyro_bias_z_mdeg_per_sec",
+    "gnss_power_consumed_cW",
+    "adcs_total_power_consumed_cW",
+    "eps_pcu_ch4_volt_in_mppt_mV",
+    "eps_pcu_ch4_curr_in_mppt_mA",
+    "eps_pcu_ch4_curr_ou_mppt_mA",
+    "bulk_downlink_file_path_sha256_prefix",
+    "reserved_v5",
+]
+
+# v5+ end_message values: " X5" on live beacons, " S5" on beacons replayed
+# from the satellite's onboard ring buffer (history, possibly hours old).
+STORED_BEACON_END_VERSION_PREFIX = "S"
+
 # COMMS_tcmd_response_packet_t layout (after the CSP header):
 #   uint8_t  packet_type        1
 #   uint64_t ts_sent            8
@@ -356,9 +415,14 @@ PACKET_TYPE_MAP = {
     0x04: "TCMD_RESPONSE",
     0x10: "BULK_FILE_DOWNLINK",
     0x20: "BEACON_EXTENDED",
+    0x21: "BEACON_EXTENDED_V5PLUS",
     0x30: "GNSS_BESTXYZB_SAMPLE",
 }
 PACKET_TYPE_MAP_INV = {v: k for k, v in PACKET_TYPE_MAP.items()}
+# Packet types carrying the extended beacon fields (ADCS, per-channel EPS, ...).
+BEACON_EXTENDED_PACKET_TYPES = ("BEACON_EXTENDED", "BEACON_EXTENDED_V5PLUS")
+# Every packet type carrying the common beacon fields (uptime, EPS, OBC, ...).
+BEACON_PACKET_TYPES = ("BEACON_BASIC", *BEACON_EXTENDED_PACKET_TYPES)
 # Every value `packet_type` can take: "UNKNOWN" is `decode_raw_packet_safe`'s
 # fallback for a type byte it doesn't recognize. Sorted, so sorting by the
 # column orders it the same as the plain strings it replaces.
@@ -941,27 +1005,123 @@ def decode_beacon_extended_packet(
 
     Layout: the same fixed part + friendly_message + end_message as
     BEACON_BASIC, followed by additional beacon v2 fields (EPS per-channel
-    solar data, and ADCS data). The ADCS state/status bitfield
-    (``adcs_current_state_1``) is surfaced as raw hex; its internals are not
-    decoded yet.
+    solar data, and ADCS data).
+    """
+    data, fm_raw, end_version_number = _decode_beacon_extended_common(
+        payload, packet_type_name="BEACON_EXTENDED"
+    )
+    friendly = fm_raw.split(b"\x00")[0].decode("utf-8", errors="replace")
+    return {
+        **data,
+        "friendly_message": friendly,
+        "end_version_number": end_version_number,
+    }
+
+
+def decode_beacon_extended_v5plus_packet(
+    payload: bytes, _full_payload: bytes | None = None
+) -> dict[str, Any]:
+    """Decode a COMMS_beacon_extended_packet_v5plus_t payload (CSP header
+    already stripped).
+
+    Same layout as BEACON_EXTENDED, except the friendly_message slot carries
+    the v5+ fields (`V5PLUS_FMT`) instead.
+
+    `is_stored_beacon` is True for beacons replayed from the satellite's
+    onboard ring buffer (end_message " S5"), whose contents may be hours older
+    than when they were received. Use their onboard timestamp
+    (`unix_epoch_time_ms`), not `received_at`, to place them in time.
+    """
+    data, v5_raw, end_version_number = _decode_beacon_extended_common(
+        payload, packet_type_name="BEACON_EXTENDED_V5PLUS"
+    )
+    v5: dict[str, Any] = dict(
+        zip(V5PLUS_FIELD_NAMES, struct.unpack(V5PLUS_FMT, v5_raw), strict=True)
+    )
+    sha_prefix: bytes = v5["bulk_downlink_file_path_sha256_prefix"]
+
+    return {
+        **data,
+        # OBC
+        "distinct_tcmds_pending": v5["distinct_tcmds_pending"],
+        "duration_since_last_time_sync_sec": v5["duration_since_last_time_sync_sec"],
+        # Bulk downlink: first 3 bytes of SHA256(file path) of the file being
+        # downlinked, or None when not downlinking (all zeros).
+        "bulk_downlink_file_path_sha256_prefix": (
+            sha_prefix.hex() if any(sha_prefix) else None
+        ),
+        # Power
+        "gnss_power_consumed_W": round(v5["gnss_power_consumed_cW"] / 100.0, 2),
+        "adcs_total_power_consumed_W": round(
+            v5["adcs_total_power_consumed_cW"] / 100.0, 2
+        ),
+        # EPS per-channel PCU, 5th conditioning chain (continues ch0..ch3)
+        "eps_pcu_ch4_volt_in_mppt_V": round(
+            v5["eps_pcu_ch4_volt_in_mppt_mV"] / 1000.0, 3
+        ),
+        "eps_pcu_ch4_curr_in_mppt_A": round(
+            v5["eps_pcu_ch4_curr_in_mppt_mA"] / 1000.0, 3
+        ),
+        "eps_pcu_ch4_curr_ou_mppt_A": round(
+            v5["eps_pcu_ch4_curr_ou_mppt_mA"] / 1000.0, 3
+        ),
+        # ADCS
+        "adcs_wheel_speed_x_rpm": v5["adcs_wheel_speed_x_rpm"],
+        "adcs_wheel_speed_y_rpm": v5["adcs_wheel_speed_y_rpm"],
+        "adcs_wheel_speed_z_rpm": v5["adcs_wheel_speed_z_rpm"],
+        "adcs_pointing_error_deg": round(v5["adcs_pointing_error_cdeg"] * 0.01, 2),
+        "adcs_innovation_vector_x": round(
+            v5["adcs_innovation_vector_x_en4"] * 0.0001, 4
+        ),
+        "adcs_innovation_vector_y": round(
+            v5["adcs_innovation_vector_y_en4"] * 0.0001, 4
+        ),
+        "adcs_innovation_vector_z": round(
+            v5["adcs_innovation_vector_z_en4"] * 0.0001, 4
+        ),
+        "adcs_estimated_gyro_bias_x_deg_per_sec": round(
+            v5["adcs_estimated_gyro_bias_x_mdeg_per_sec"] * 0.001, 3
+        ),
+        "adcs_estimated_gyro_bias_y_deg_per_sec": round(
+            v5["adcs_estimated_gyro_bias_y_mdeg_per_sec"] * 0.001, 3
+        ),
+        "adcs_estimated_gyro_bias_z_deg_per_sec": round(
+            v5["adcs_estimated_gyro_bias_z_mdeg_per_sec"] * 0.001, 3
+        ),
+        # Version
+        "end_version_number": end_version_number,
+        "is_stored_beacon": end_version_number.strip().startswith(
+            STORED_BEACON_END_VERSION_PREFIX
+        ),
+    }
+
+
+def _decode_beacon_extended_common(
+    payload: bytes, *, packet_type_name: str
+) -> tuple[dict[str, Any], bytes, str]:
+    """Decode the parts BEACON_EXTENDED and BEACON_EXTENDED_V5PLUS share.
+
+    Returns `(fields, friendly_message_slot, end_version_number)`: every
+    decoded field outside the friendly_message slot, that slot's raw 42 bytes
+    (a friendly message on v2-v4, the v5+ fields on v5+), and the
+    end_message (e.g. " X2").
     """
     if len(payload) < BEACON_EXTENDED_TOTAL_STRUCT_SIZE:
         msg = (
-            f"Too short for BEACON_EXTENDED: {len(payload)} bytes "
+            f"Too short for {packet_type_name}: {len(payload)} bytes "
             f"(need {BEACON_EXTENDED_TOTAL_STRUCT_SIZE})"
         )
         raise ValueError(msg)
 
     vals = struct.unpack_from(FIXED_FMT, payload, 0)
 
-    if vals[0] != PACKET_TYPE_MAP_INV["BEACON_EXTENDED"]:
-        msg = f"Unexpected packet_type byte for BEACON_EXTENDED: {vals[0]:#04x}"
+    if vals[0] != PACKET_TYPE_MAP_INV[packet_type_name]:
+        msg = f"Unexpected packet_type byte for {packet_type_name}: {vals[0]:#04x}"
         raise ValueError(msg)
 
     rf: dict[str, Any] = dict(zip(BEACON_FIELD_NAMES, vals, strict=True))
 
     fm_raw = payload[BEACON_FIXED_SIZE : BEACON_FIXED_SIZE + FRIENDLY_MESSAGE_SIZE]
-    friendly = fm_raw.split(b"\x00")[0].decode("utf-8", errors="replace")
 
     end_offset = BEACON_FIXED_SIZE + FRIENDLY_MESSAGE_SIZE
     end_raw = payload[end_offset : end_offset + END_MESSAGE_SIZE]
@@ -1132,12 +1292,9 @@ def decode_beacon_extended_packet(
         "adcs_estimated_yaw_angle_deg": round(
             ef["adcs_estimated_yaw_angle_cdeg"] * 0.01, 2
         ),
-        # Friendly
-        "friendly_message": friendly,
-        "end_version_number": end_version_number,
     }
 
-    return data  # noqa: RET504
+    return data, fm_raw, end_version_number
 
 
 def decode_log_message_packet(
@@ -1539,6 +1696,7 @@ _PACKET_DECODERS = {
     0x04: decode_tcmd_response_packet,
     0x10: decode_bulk_file_downlink_packet,
     0x20: decode_beacon_extended_packet,
+    0x21: decode_beacon_extended_v5plus_packet,
     0x30: decode_gnss_bestxyzb_sample_packet,
 }
 
@@ -1551,6 +1709,7 @@ _PACKET_MIN_PAYLOAD_SIZES = {
     0x04: TCMD_RESPONSE_HEADER_SIZE,
     0x10: BULK_DOWNLINK_HEADER_SIZE,
     0x20: BEACON_EXTENDED_TOTAL_STRUCT_SIZE,
+    0x21: BEACON_EXTENDED_V5PLUS_TOTAL_STRUCT_SIZE,
     0x30: GNSS_DOWNLINK_HEADER_SIZE + NOVATEL_HEADER_SIZE + BESTXYZ_BODY_SIZE,
 }
 

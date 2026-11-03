@@ -1,3 +1,4 @@
+import hashlib
 import json
 import math
 import struct
@@ -12,6 +13,7 @@ from cts1_mo_tools.cts1_decode_satnogs_packets import (
     ADCS_ERROR_BITS,
     ADCS_FLAG_BITS,
     BEACON_EXTENDED_TOTAL_STRUCT_SIZE,
+    BEACON_EXTENDED_V5PLUS_TOTAL_STRUCT_SIZE,
     BEACON_FIXED_SIZE,
     BEACON_TOTAL_STRUCT_SIZE,
     BESTXYZ_BODY_FMT,
@@ -30,11 +32,14 @@ from cts1_mo_tools.cts1_decode_satnogs_packets import (
     PACKET_TYPE_MAP_INV,
     TCMD_RESPONSE_HEADER_FMT,
     TCMD_RESPONSE_HEADER_SIZE,
+    V5PLUS_FIELDS_SIZE,
+    V5PLUS_FMT,
     convert_obc_adc_battery_voltage_to_percent,
     crc32c,
     decode_adcs_current_state_1,
     decode_beacon_basic_packet,
     decode_beacon_extended_packet,
+    decode_beacon_extended_v5plus_packet,
     decode_bulk_file_downlink_packet,
     decode_gnss_bestxyzb_sample_packet,
     decode_log_message_packet,
@@ -229,6 +234,63 @@ def _make_extended_payload(  # noqa: PLR0913
         adcs_estimated_yaw_angle_cdeg,
     )
     return basic + extended
+
+
+def _make_v5plus_payload(  # noqa: PLR0913
+    *,
+    packet_type: int = 0x21,
+    end_version_number: bytes = b" X5\x00",
+    distinct_tcmds_pending: int = 3,
+    duration_since_last_time_sync_sec: int = 1234,
+    adcs_wheel_speed_x_rpm: int = 0,
+    adcs_wheel_speed_y_rpm: int = -1500,
+    adcs_wheel_speed_z_rpm: int = 0,
+    adcs_pointing_error_cdeg: int = 250,
+    adcs_innovation_vector_x_en4: int = 12,
+    adcs_innovation_vector_y_en4: int = -34,
+    adcs_innovation_vector_z_en4: int = 0,
+    adcs_estimated_gyro_bias_x_mdeg_per_sec: int = 5,
+    adcs_estimated_gyro_bias_y_mdeg_per_sec: int = -7,
+    adcs_estimated_gyro_bias_z_mdeg_per_sec: int = 0,
+    gnss_power_consumed_cW: int = 0,  # noqa: N803
+    adcs_total_power_consumed_cW: int = 120,  # noqa: N803
+    eps_pcu_ch4_volt_in_mppt_mV: int = 5000,  # noqa: N803
+    eps_pcu_ch4_curr_in_mppt_mA: int = 100,  # noqa: N803
+    eps_pcu_ch4_curr_ou_mppt_mA: int = 90,  # noqa: N803
+    bulk_downlink_file_path_sha256_prefix: bytes = b"\x00\x00\x00",
+    reserved_v5: bytes = b"\x00" * 7,
+    **extended_kwargs: Any,
+) -> bytes:
+    """Build a valid BEACON_EXTENDED_V5PLUS payload (no CSP header)."""
+    v5_fields = struct.pack(
+        V5PLUS_FMT,
+        distinct_tcmds_pending,
+        duration_since_last_time_sync_sec,
+        adcs_wheel_speed_x_rpm,
+        adcs_wheel_speed_y_rpm,
+        adcs_wheel_speed_z_rpm,
+        adcs_pointing_error_cdeg,
+        adcs_innovation_vector_x_en4,
+        adcs_innovation_vector_y_en4,
+        adcs_innovation_vector_z_en4,
+        adcs_estimated_gyro_bias_x_mdeg_per_sec,
+        adcs_estimated_gyro_bias_y_mdeg_per_sec,
+        adcs_estimated_gyro_bias_z_mdeg_per_sec,
+        gnss_power_consumed_cW,
+        adcs_total_power_consumed_cW,
+        eps_pcu_ch4_volt_in_mppt_mV,
+        eps_pcu_ch4_curr_in_mppt_mA,
+        eps_pcu_ch4_curr_ou_mppt_mA,
+        bulk_downlink_file_path_sha256_prefix,
+        reserved_v5,
+    )
+    # The v5+ fields sit exactly where v2-v4 put the friendly message.
+    return _make_extended_payload(
+        packet_type=packet_type,
+        friendly_message=v5_fields,
+        end_version_number=end_version_number,
+        **extended_kwargs,
+    )
 
 
 def _make_tcmd_payload(  # noqa: PLR0913
@@ -738,6 +800,164 @@ class TestDecodeBeaconExtended:
 
 
 # ---------------------------------------------------------------------------
+# Tests for decode_beacon_extended_v5plus_packet
+# ---------------------------------------------------------------------------
+
+
+class TestDecodeBeaconExtendedV5Plus:
+    def _valid(self, **kwargs: Any) -> dict[str, Any]:
+        return decode_beacon_extended_v5plus_packet(_make_v5plus_payload(**kwargs))
+
+    def test_packet_type_label(self) -> None:
+        assert self._valid()["packet_type"] == "BEACON_EXTENDED_V5PLUS"
+
+    def test_v5_fields_fill_friendly_message_slot(self) -> None:
+        # Matches the firmware's _Static_assert that the v5+ fields exactly
+        # replace the 42-byte friendly message.
+        assert V5PLUS_FIELDS_SIZE == FRIENDLY_MESSAGE_SIZE
+
+    def test_total_struct_size_is_198(self) -> None:
+        assert BEACON_EXTENDED_V5PLUS_TOTAL_STRUCT_SIZE == 198
+        assert len(_make_v5plus_payload()) == 198
+
+    def test_end_message_offset_is_126(self) -> None:
+        # The firmware asserts end_message stays at its v2-v4 offset of 126.
+        payload = _make_v5plus_payload(end_version_number=b" X5\x00")
+        assert payload[126:130] == b" X5\x00"
+
+    def test_no_friendly_message(self) -> None:
+        assert "friendly_message" not in self._valid()
+
+    def test_shared_and_extended_fields_still_decoded(self) -> None:
+        result = self._valid(
+            uptime_ms=90_000,
+            eps_pcu_ch3_volt_in_mppt_mV=5250,
+            adcs_estimated_yaw_angle_cdeg=18000,
+        )
+        assert result["satellite_name"] == "CTS1"
+        assert result["uptime_sec"] == 90.0
+        assert result["eps_pcu_ch3_volt_in_mppt_V"] == 5.25
+        assert result["adcs_estimated_yaw_angle_deg"] == 180.0
+
+    def test_obc_fields(self) -> None:
+        result = self._valid(
+            distinct_tcmds_pending=7, duration_since_last_time_sync_sec=65535
+        )
+        assert result["distinct_tcmds_pending"] == 7
+        assert result["duration_since_last_time_sync_sec"] == 65535
+
+    def test_adcs_wheel_speeds(self) -> None:
+        result = self._valid(
+            adcs_wheel_speed_x_rpm=100,
+            adcs_wheel_speed_y_rpm=-2000,
+            adcs_wheel_speed_z_rpm=0,
+        )
+        assert result["adcs_wheel_speed_x_rpm"] == 100
+        assert result["adcs_wheel_speed_y_rpm"] == -2000
+        assert result["adcs_wheel_speed_z_rpm"] == 0
+
+    def test_adcs_pointing_error_conversion(self) -> None:
+        assert (
+            self._valid(adcs_pointing_error_cdeg=18000)["adcs_pointing_error_deg"]
+            == 180.0
+        )
+
+    def test_adcs_innovation_vector_conversion(self) -> None:
+        result = self._valid(
+            adcs_innovation_vector_x_en4=12345,
+            adcs_innovation_vector_y_en4=-1,
+            adcs_innovation_vector_z_en4=0,
+        )
+        assert result["adcs_innovation_vector_x"] == 1.2345
+        assert result["adcs_innovation_vector_y"] == -0.0001
+        assert result["adcs_innovation_vector_z"] == 0.0
+
+    def test_adcs_gyro_bias_conversion(self) -> None:
+        result = self._valid(
+            adcs_estimated_gyro_bias_x_mdeg_per_sec=1500,
+            adcs_estimated_gyro_bias_y_mdeg_per_sec=-25,
+            adcs_estimated_gyro_bias_z_mdeg_per_sec=0,
+        )
+        assert result["adcs_estimated_gyro_bias_x_deg_per_sec"] == 1.5
+        assert result["adcs_estimated_gyro_bias_y_deg_per_sec"] == -0.025
+        assert result["adcs_estimated_gyro_bias_z_deg_per_sec"] == 0.0
+
+    def test_power_conversion(self) -> None:
+        result = self._valid(
+            gnss_power_consumed_cW=255, adcs_total_power_consumed_cW=1234
+        )
+        assert result["gnss_power_consumed_W"] == 2.55
+        assert result["adcs_total_power_consumed_W"] == 12.34
+
+    def test_eps_pcu_ch4_conversion(self) -> None:
+        result = self._valid(
+            eps_pcu_ch4_volt_in_mppt_mV=5250,
+            eps_pcu_ch4_curr_in_mppt_mA=1200,
+            eps_pcu_ch4_curr_ou_mppt_mA=-800,
+        )
+        assert result["eps_pcu_ch4_volt_in_mppt_V"] == 5.25
+        assert result["eps_pcu_ch4_curr_in_mppt_A"] == 1.2
+        assert result["eps_pcu_ch4_curr_ou_mppt_A"] == -0.8
+
+    def test_bulk_downlink_sha256_prefix(self) -> None:
+        path = "mpi/data_2026.bin"
+        prefix = hashlib.sha256(path.encode()).digest()[:3]
+        result = self._valid(bulk_downlink_file_path_sha256_prefix=prefix)
+        assert result["bulk_downlink_file_path_sha256_prefix"] == prefix.hex()
+
+    def test_bulk_downlink_sha256_prefix_none_when_idle(self) -> None:
+        result = self._valid(bulk_downlink_file_path_sha256_prefix=b"\x00" * 3)
+        assert result["bulk_downlink_file_path_sha256_prefix"] is None
+
+    def test_reserved_not_exposed(self) -> None:
+        assert "reserved_v5" not in self._valid()
+
+    @pytest.mark.parametrize(
+        ("end_version_number", "expected_str", "expected_stored"),
+        [
+            (b" X5\x00", " X5", False),
+            (b" S5\x00", " S5", True),
+        ],
+    )
+    def test_live_vs_stored_beacon(
+        self,
+        end_version_number: bytes,
+        expected_str: str,
+        expected_stored: bool,  # noqa: FBT001
+    ) -> None:
+        result = self._valid(end_version_number=end_version_number)
+        assert result["end_version_number"] == expected_str
+        assert result["is_stored_beacon"] is expected_stored
+
+    def test_too_short_raises(self) -> None:
+        short = b"\x21" * (BEACON_EXTENDED_V5PLUS_TOTAL_STRUCT_SIZE - 1)
+        with pytest.raises(ValueError, match="Too short for BEACON_EXTENDED_V5PLUS"):
+            decode_beacon_extended_v5plus_packet(short, short)
+
+    def test_wrong_packet_type_raises(self) -> None:
+        payload = _make_v5plus_payload(packet_type=0x20)
+        with pytest.raises(ValueError, match="Unexpected packet_type"):
+            decode_beacon_extended_v5plus_packet(payload, payload)
+
+    def test_v2_decoder_rejects_v5_packet(self) -> None:
+        payload = _make_v5plus_payload()
+        with pytest.raises(ValueError, match="Unexpected packet_type"):
+            decode_beacon_extended_packet(payload, payload)
+
+    def test_dispatch_via_decode_packet_safe(self) -> None:
+        hex_str = (DUMMY_CSP + _make_v5plus_payload(adcs_wheel_speed_y_rpm=-42)).hex()
+        result = decode_packet_safe(hex_str)
+        assert result is not None
+        assert result["packet_type"] == "BEACON_EXTENDED_V5PLUS"
+        assert result["adcs_wheel_speed_y_rpm"] == -42
+
+    def test_truncated_packet_is_too_short(self) -> None:
+        raw = DUMMY_CSP + _make_v5plus_payload()
+        assert not is_packet_too_short(raw)
+        assert is_packet_too_short(raw[:-1])
+
+
+# ---------------------------------------------------------------------------
 # Tests for decode_log_message_packet
 # ---------------------------------------------------------------------------
 
@@ -964,6 +1184,7 @@ class TestPacketTypeMaps:
             "TCMD_RESPONSE",
             "BULK_FILE_DOWNLINK",
             "BEACON_EXTENDED",
+            "BEACON_EXTENDED_V5PLUS",
             "GNSS_BESTXYZB_SAMPLE",
         ):
             assert name in PACKET_TYPE_MAP_INV

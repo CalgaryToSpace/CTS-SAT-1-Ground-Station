@@ -55,10 +55,18 @@ def connect_duckdb(
     memory_limit: str = DEFAULT_DUCKDB_MEMORY_LIMIT,
     threads: int = DEFAULT_DUCKDB_THREADS,
 ) -> duckdb.DuckDBPyConnection:
-    """Open a DuckDB connection with `memory_limit`/`threads` capped up front."""
+    """Open a DuckDB connection with `memory_limit`/`threads` capped up front.
+
+    The session time zone is pinned to UTC (rather than the host's), so
+    TIMESTAMPTZ values exported to polars (`.pl()`) come back in UTC. With a
+    local zone (e.g. America/Edmonton), exported values were seen off by an
+    hour after a DST change, since DuckDB and polars each resolve the zone's
+    offsets themselves.
+    """
     con = duckdb.connect(database)
     con.execute("SET memory_limit = ?", [memory_limit])
     con.execute("SET threads = ?", [threads])
+    con.execute("SET TimeZone = 'UTC'")
     return con
 
 

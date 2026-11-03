@@ -91,6 +91,20 @@ _BORING_PATTERN = r"^\s*gnss_bestxyzb_ring_blob_v\d+"
 _BORING_EXCEPT_PATTERN = r"(?i)fail|err"
 _BORING_EXCEPT_IGNORED_PATTERN = r"\bfetch_fails=\d+"
 
+# extended_beacon_blob v5+'s routine success line, e.g.
+# "extended_beacon_blob_v5 success, store=OK, cursor=r0/146, stored=146,
+# store_fails=0, history_sent=0/0". Boring only in exactly this shape, with
+# the beacon stored OK and every history beacon sent (`history_sent=N/N`,
+# checked separately: Rust regex has no backreferences). Anything else --
+# a failed/skipped store, a partial history send, "duplicate rerun(s)
+# cancelled" -- stays Interesting. `store_fails` is a cumulative counter, so
+# it isn't held against the line.
+_EXT_BEACON_STATUS_PATTERN = (
+    r"^\s*extended_beacon_blob_v\d+ success, store=OK, cursor=r\d+/\d+"
+    r"(?: \(wrapped\))?, stored=\d+, store_fails=\d+, "
+    r"history_sent=(?<sent>\d+)/(?<attempted>\d+)(?: \(mpi_active\))?\s*$"
+)
+
 # Unique per row of `_source`'s table (across both halves of the reassembled
 # view), so `load_page` can fetch exactly the rows its key-only sort picked.
 # Internal only: never shown in the grid or exported.
@@ -255,10 +269,14 @@ def _boringness_expr() -> pl.Expr:
     boring = message.str.contains(_BORING_PATTERN) & ~message.str.replace_all(
         _BORING_EXCEPT_IGNORED_PATTERN, ""
     ).str.contains(_BORING_EXCEPT_PATTERN)
+    history_sent = message.str.extract_groups(_EXT_BEACON_STATUS_PATTERN)
+    ext_beacon_status_boring = (
+        history_sent.struct.field("sent") == history_sent.struct.field("attempted")
+    ).fill_null(value=False)
     return (
         pl.when(very_boring)
         .then(pl.lit(VERY_BORING))
-        .when(boring)
+        .when(boring | ext_beacon_status_boring)
         .then(pl.lit(BORING))
         .otherwise(pl.lit(INTERESTING))
         .alias("boringness")

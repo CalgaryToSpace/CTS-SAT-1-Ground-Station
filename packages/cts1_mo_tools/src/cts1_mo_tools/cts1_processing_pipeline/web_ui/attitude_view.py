@@ -587,7 +587,7 @@ class AttitudePlayer:
         # Nothing in the window: still show the newest extended beacon ever,
         # the same way the summary cards ignore the chart window.
         fallback = beacon_data.latest_beacons(
-            self._path, n=1, packet_types=("BEACON_EXTENDED",)
+            self._path, n=1, packet_types=beacon_data.BEACON_EXTENDED_PACKET_TYPES
         ).to_dicts()
         return fallback, True
 
@@ -601,7 +601,7 @@ class AttitudePlayer:
 
         self._frames = frames
         self._showing_fallback = showing_fallback
-        self._times = [f["received_at"] for f in self._frames]
+        self._times = [f[beacon_data.BEACON_TIME_COLUMN] for f in self._frames]
 
         last = max(len(self._frames) - 1, 0)
         self._slider.props(f"max={max(last, 1)}")
@@ -738,12 +738,12 @@ class AttitudePlayer:
             return
 
         row = self._frames[self._index]
-        received_at = row["received_at"]
-        caption = f"From extended beacon at {self._format_time(received_at)}"
+        beacon_time = row[beacon_data.BEACON_TIME_COLUMN]
+        caption = f"From extended beacon at {self._format_time(beacon_time)}"
         if self._showing_fallback:
             caption += " -- none in the playback window, showing the latest"
         elif self._index > 0:
-            gap = received_at - self._times[self._index - 1]
+            gap = beacon_time - self._times[self._index - 1]
             caption += f" -- {duration_str(gap)} after the previous frame"
         self._view.update(row, caption)
         self._position.set_text(f"Frame {self._index + 1} of {len(self._frames)}")

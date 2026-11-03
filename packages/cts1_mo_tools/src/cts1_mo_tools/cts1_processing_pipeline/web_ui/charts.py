@@ -24,6 +24,8 @@ from typing import TYPE_CHECKING, Any
 
 import polars as pl
 
+from .data import BEACON_TIME_COLUMN
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
@@ -42,7 +44,9 @@ _SERIES_COLORS = [
 
 @dataclass(frozen=True, slots=True)
 class ChartSpec:
-    """One chart: one or more columns plotted against `received_at`."""
+    """One chart: one or more columns plotted against the beacon's own
+    onboard-clock time (`BEACON_TIME_COLUMN`).
+    """
 
     title: str
     columns: list[str]
@@ -57,9 +61,11 @@ class ChartSpec:
     valid_min: float | None = None
     valid_max: float | None = None
 
-    def series_label(self, column: str, index: int) -> str:
+    def series_label(self, column: str) -> str:
+        # Look up by position in `columns`, not in whichever subset of them a
+        # given frame has: e.g. v2-v4 beacons lack the v5+ `ch4` columns.
         if self.labels:
-            return self.labels[index]
+            return self.labels[self.columns.index(column)]
         return column
 
 
@@ -71,7 +77,9 @@ _CHANNEL_OFF_COLOR = "#E0E0E0"
 _CHANNEL_ALERT_COLOR = "#DC2626"
 
 
-# -- Beacon telemetry (BEACON_BASIC / BEACON_EXTENDED rows only) -------------
+# -- Beacon telemetry (BEACON_BASIC / BEACON_EXTENDED / _V5PLUS rows only) ---
+# Fields only some beacon types carry are simply null (and so not plotted) on
+# the others.
 
 BEACON_CHART_GROUPS: list[tuple[str, list[ChartSpec]]] = [
     (
@@ -86,12 +94,28 @@ BEACON_CHART_GROUPS: list[tuple[str, list[ChartSpec]]] = [
             ),
             ChartSpec(
                 "Telecommand Queue",
-                ["total_tcmd_queued_count", "pending_queued_tcmd_count"],
+                [
+                    "total_tcmd_queued_count",
+                    "pending_queued_tcmd_count",
+                    "distinct_tcmds_pending",
+                ],
                 unit="",
-                labels=["total queued", "pending"],
-                right_axis_columns=["pending_queued_tcmd_count"],
+                labels=["total queued", "pending", "distinct pending"],
+                right_axis_columns=[
+                    "pending_queued_tcmd_count",
+                    "distinct_tcmds_pending",
+                ],
             ),
             ChartSpec("Time Sync Source", ["last_time_sync_source"], categorical=True),
+            ChartSpec(
+                "Time Since Last Time Sync",
+                ["duration_since_last_time_sync_sec"],
+                unit="s",
+            ),
+            ChartSpec("Packet Type", ["packet_type"], categorical=True),
+            ChartSpec(
+                "Stored (Replayed) Beacon", ["is_stored_beacon"], categorical=True
+            ),
         ],
     ),
     (
@@ -105,6 +129,11 @@ BEACON_CHART_GROUPS: list[tuple[str, list[ChartSpec]]] = [
             ),
             ChartSpec("Reboot Reason", ["reboot_reason"], categorical=True),
             ChartSpec("Filesystem Mounted", ["is_fs_mounted"], categorical=True),
+            ChartSpec(
+                "Bulk Downlink File (SHA256 of Path, First 3 Bytes)",
+                ["bulk_downlink_file_path_sha256_prefix"],
+                categorical=True,
+            ),
         ],
     ),
     (
@@ -163,6 +192,12 @@ BEACON_CHART_GROUPS: list[tuple[str, list[ChartSpec]]] = [
                 unit="W",
                 labels=["net battery", "distributed"],
             ),
+            ChartSpec(
+                "Subsystem Power Consumed",
+                ["adcs_total_power_consumed_W", "gnss_power_consumed_W"],
+                unit="W",
+                labels=["ADCS (total)", "GNSS"],
+            ),
         ],
     ),
     (
@@ -175,9 +210,10 @@ BEACON_CHART_GROUPS: list[tuple[str, list[ChartSpec]]] = [
                     "eps_pcu_ch1_volt_in_mppt_V",
                     "eps_pcu_ch2_volt_in_mppt_V",
                     "eps_pcu_ch3_volt_in_mppt_V",
+                    "eps_pcu_ch4_volt_in_mppt_V",
                 ],
                 unit="V",
-                labels=["ch0", "ch1", "ch2", "ch3"],
+                labels=["ch0", "ch1", "ch2", "ch3", "ch4"],
             ),
             ChartSpec(
                 "MPPT Input Current",
@@ -186,9 +222,10 @@ BEACON_CHART_GROUPS: list[tuple[str, list[ChartSpec]]] = [
                     "eps_pcu_ch1_curr_in_mppt_A",
                     "eps_pcu_ch2_curr_in_mppt_A",
                     "eps_pcu_ch3_curr_in_mppt_A",
+                    "eps_pcu_ch4_curr_in_mppt_A",
                 ],
                 unit="A",
-                labels=["ch0", "ch1", "ch2", "ch3"],
+                labels=["ch0", "ch1", "ch2", "ch3", "ch4"],
             ),
             ChartSpec(
                 "MPPT Output Current",
@@ -197,9 +234,10 @@ BEACON_CHART_GROUPS: list[tuple[str, list[ChartSpec]]] = [
                     "eps_pcu_ch1_curr_ou_mppt_A",
                     "eps_pcu_ch2_curr_ou_mppt_A",
                     "eps_pcu_ch3_curr_ou_mppt_A",
+                    "eps_pcu_ch4_curr_ou_mppt_A",
                 ],
                 unit="A",
-                labels=["ch0", "ch1", "ch2", "ch3"],
+                labels=["ch0", "ch1", "ch2", "ch3", "ch4"],
             ),
         ],
     ),
@@ -279,6 +317,26 @@ BEACON_CHART_GROUPS: list[tuple[str, list[ChartSpec]]] = [
                 ["adcs_angular_rate_norm_deg_per_sec"],
                 unit="deg/s",
             ),
+            ChartSpec("Pointing Error", ["adcs_pointing_error_deg"], unit="deg"),
+            ChartSpec(
+                "Estimation Innovation Vector",
+                [
+                    "adcs_innovation_vector_x",
+                    "adcs_innovation_vector_y",
+                    "adcs_innovation_vector_z",
+                ],
+                labels=["x", "y", "z"],
+            ),
+            ChartSpec(
+                "Estimated Gyro Bias",
+                [
+                    "adcs_estimated_gyro_bias_x_deg_per_sec",
+                    "adcs_estimated_gyro_bias_y_deg_per_sec",
+                    "adcs_estimated_gyro_bias_z_deg_per_sec",
+                ],
+                unit="deg/s",
+                labels=["x", "y", "z"],
+            ),
             ChartSpec(
                 "Attitude Estimation Mode",
                 ["adcs_attitude_estimation_mode"],
@@ -295,8 +353,18 @@ BEACON_CHART_GROUPS: list[tuple[str, list[ChartSpec]]] = [
         ],
     ),
     (
-        "ADCS Sensors",
+        "ADCS Sensors & Actuators",
         [
+            ChartSpec(
+                "Reaction Wheel Speeds",
+                [
+                    "adcs_wheel_speed_x_rpm",
+                    "adcs_wheel_speed_y_rpm",
+                    "adcs_wheel_speed_z_rpm",
+                ],
+                unit="RPM",
+                labels=["x", "y", "z"],
+            ),
             ChartSpec(
                 "Magnetic Field",
                 [
@@ -334,29 +402,29 @@ def _numeric_series(
     valid_min: float | None = None,
     valid_max: float | None = None,
 ) -> list[list[Any]]:
-    sub = df.select("received_at", column).drop_nulls()
+    sub = df.select(BEACON_TIME_COLUMN, column).drop_nulls()
     if valid_min is not None:
         sub = sub.filter(pl.col(column) >= valid_min)
     if valid_max is not None:
         sub = sub.filter(pl.col(column) <= valid_max)
     return [
         [ts.isoformat(), value]
-        for ts, value in zip(sub["received_at"], sub[column], strict=True)
+        for ts, value in zip(sub[BEACON_TIME_COLUMN], sub[column], strict=True)
     ]
 
 
 def _categorical_series(df: pl.DataFrame, column: str) -> list[list[Any]]:
-    sub = df.select("received_at", column).drop_nulls()
+    sub = df.select(BEACON_TIME_COLUMN, column).drop_nulls()
     return [
         [ts.isoformat(), str(value)]
-        for ts, value in zip(sub["received_at"], sub[column], strict=True)
+        for ts, value in zip(sub[BEACON_TIME_COLUMN], sub[column], strict=True)
     ]
 
 
 def chart_option(spec: ChartSpec, df: pl.DataFrame) -> dict[str, Any] | None:
     """Build an ECharts `option` dict for `spec` from `df`, or None if empty.
 
-    `df` must contain `received_at` plus every column in `spec.columns`.
+    `df` must contain `BEACON_TIME_COLUMN` plus every column in `spec.columns`.
     """
     available = [c for c in spec.columns if c in df.columns]
     if not available:
@@ -406,7 +474,7 @@ def chart_option(spec: ChartSpec, df: pl.DataFrame) -> dict[str, Any] | None:
             any_data = True
         series.append(
             {
-                "name": spec.series_label(column, i),
+                "name": spec.series_label(column),
                 "yAxisIndex": 1 if column in spec.right_axis_columns else 0,
                 "type": "line",
                 "showSymbol": True,
@@ -426,7 +494,7 @@ def chart_option(spec: ChartSpec, df: pl.DataFrame) -> dict[str, Any] | None:
     has_right_axis = any(c in spec.right_axis_columns for c in available)
     if has_right_axis:
         # With two axes, name each by its series so it's clear which is which.
-        labels = [spec.series_label(c, i) for i, c in enumerate(available)]
+        labels = [spec.series_label(c) for c in available]
         left_labels = [
             label
             for label, c in zip(labels, available, strict=True)
@@ -517,7 +585,7 @@ def channel_states_option(
     """ECharts `option` showing which channels/flags were on over time, or
     None if `states` has no rows (or no channels).
 
-    `states` is `received_at` plus one bool column per channel (see
+    `states` is `BEACON_TIME_COLUMN` plus one bool column per channel (see
     `data.eps_channel_states` / `data.adcs_channel_states` /
     `data.adcs_error_states`). Each channel is a row on a category y-axis
     (first column at the top), with a mark per beacon: green where the
@@ -525,19 +593,19 @@ def channel_states_option(
     at all. `alert=True` is for error flags: red "set" marks instead of
     green "on" ones.
     """
-    channels = [c for c in states.columns if c != "received_at"]
+    channels = [c for c in states.columns if c != BEACON_TIME_COLUMN]
     if states.is_empty() or not channels:
         return None
 
     long = states.unpivot(
-        index="received_at", on=channels, variable_name="channel", value_name="on"
+        index=BEACON_TIME_COLUMN, on=channels, variable_name="channel", value_name="on"
     )
 
     def _points(*, on: bool) -> list[list[Any]]:
         sub = long.filter(pl.col("on") == on)
         return [
             [ts.isoformat(), channel]
-            for ts, channel in zip(sub["received_at"], sub["channel"], strict=True)
+            for ts, channel in zip(sub[BEACON_TIME_COLUMN], sub["channel"], strict=True)
         ]
 
     return {

@@ -205,7 +205,11 @@ def _finished_uplinks_since(path: Path, since: datetime) -> pl.DataFrame:
         .filter(
             pl.col("packet_type").is_in(BEACON_PACKET_TYPES)
             & pl.col("csp_crc_valid")
-            & (pl.col("received_at") >= since)
+            # The beacon's own clock, not `received_at`: stored (replayed)
+            # beacons arrive hours after they were recorded.
+            & pl.col("unix_epoch_time_ms").is_between(
+                int(since.timestamp() * 1000), MAX_VALID_EPOCH_MS
+            )
         )
         .select(
             "utc_time",
@@ -221,8 +225,8 @@ def _finished_uplinks_since(path: Path, since: datetime) -> pl.DataFrame:
 def latest_finished_uplink(
     path: Path = DEFAULT_PARQUET_PATH, *, window: timedelta = timedelta(hours=24)
 ) -> FinishedUplink | None:
-    """The newest row of `detect_finished_uplinks` over beacons received in
-    the last `window`, or None if no pass finished in that time.
+    """The newest row of `detect_finished_uplinks` over beacons timestamped
+    (onboard clock) in the last `window`, or None if no pass finished in that time.
     """
     now = round_down_datetime(datetime.now(UTC), timedelta(minutes=5))
     uplinks = _finished_uplinks_since(path, now - window)

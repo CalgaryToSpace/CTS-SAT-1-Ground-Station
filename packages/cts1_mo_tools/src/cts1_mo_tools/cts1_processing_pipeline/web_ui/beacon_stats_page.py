@@ -1,6 +1,9 @@
 """The "Beacon Data" page: recent beacon(s) at a glance, plus line/scatter
-charts for every field in the basic and extended beacon packets, grouped by
-subsystem.
+charts for every field in the basic and extended (v2-v4 and v5+) beacon
+packets, grouped by subsystem.
+
+Beacons are placed in time by their own onboard clock (`utc_time`), not by
+when they were received -- see `data.BEACON_TIME_COLUMN`.
 """
 
 # pyright: standard
@@ -21,7 +24,7 @@ from nicegui import run, ui
 from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
     pipeline as step_3_pipeline,
 )
-from cts1_mo_tools.time_str import age_str
+from cts1_mo_tools.time_str import age_str, duration_str
 
 from . import data as beacon_data
 from . import uplinks
@@ -86,14 +89,25 @@ class _LiveData:
     latest_extended: pl.DataFrame
     local_max_pending: tuple[int, datetime] | None
     latest_uplink: uplinks.FinishedUplink | None
+    # From the latest beacon, or filled forward from a recent earlier one.
+    friendly_message: tuple[str, datetime] | None
 
 
 def _load_live_data(path: Path) -> _LiveData:
     """Blocking -- run it via `run.io_bound`."""
+    latest = beacon_data.latest_beacons(path, n=1)
+    friendly_message = (
+        None
+        if latest.is_empty()
+        else beacon_data.latest_friendly_message(
+            path, at=latest[beacon_data.BEACON_TIME_COLUMN][0]
+        )
+    )
     return _LiveData(
-        latest=beacon_data.latest_beacons(path, n=1),
+        latest=latest,
+        friendly_message=friendly_message,
         latest_extended=beacon_data.latest_beacons(
-            path, n=1, packet_types=("BEACON_EXTENDED",)
+            path, n=1, packet_types=beacon_data.BEACON_EXTENDED_PACKET_TYPES
         ),
         local_max_pending=beacon_data.latest_local_max_pending_tcmd_count(path),
         latest_uplink=uplinks.latest_finished_uplink(path, window=timedelta(hours=24)),
@@ -102,13 +116,27 @@ def _load_live_data(path: Path) -> _LiveData:
 
 def _local_max_pending_str(local_max: tuple[int, datetime] | None) -> str:
     """`pending_queued_tcmd_count` at its most recent local max -- see
-    `beacon_data.latest_local_max_pending_tcmd_count` -- with when that
-    beacon was received.
+    `beacon_data.latest_local_max_pending_tcmd_count` -- with that beacon's
+    onboard-clock time.
     """
     if local_max is None:
         return "?"
-    count, received_at = local_max
-    return f"{count} (at {received_at:%Y-%m-%d %H:%M:%S} UTC, {age_str(received_at)})"
+    count, beacon_time = local_max
+    return f"{count} (at {beacon_time:%Y-%m-%d %H:%M:%S} UTC, {age_str(beacon_time)})"
+
+
+def _beacon_time_caption(row: dict[str, Any]) -> str:
+    """When `row`'s beacon was recorded (onboard clock), and separately when
+    it was received -- they differ a lot for stored (replayed) beacons.
+    """
+    beacon_time = row[beacon_data.BEACON_TIME_COLUMN]
+    caption = f"{beacon_time:%Y-%m-%d %H:%M:%S} UTC ({age_str(beacon_time)})"
+    received_at = row.get("received_at")
+    if received_at is not None:
+        caption += f" -- received {received_at:%Y-%m-%d %H:%M:%S} UTC"
+    if row.get("is_stored_beacon"):
+        caption += " -- stored (replayed) beacon"
+    return caption
 
 
 def _latest_uplink_stats(
@@ -149,7 +177,7 @@ def _channel_chips(title: str, states: pl.DataFrame) -> None:
         if states.is_empty():
             ui.label("No reading yet.").classes("text-caption text-grey")
             return
-        row = states.drop("received_at").row(-1, named=True)
+        row = states.drop(beacon_data.BEACON_TIME_COLUMN).row(-1, named=True)
         with ui.row().classes("gap-1 flex-wrap"):
             for name, on in row.items():
                 ui.chip(
@@ -173,10 +201,30 @@ def _power_channels_card(latest: pl.DataFrame, latest_extended: pl.DataFrame) ->
             )
 
 
+def _friendly_message_label(
+    row: dict[str, Any], friendly_message: tuple[str, datetime] | None
+) -> None:
+    """The friendly message for `row`'s beacon -- its own, or filled forward
+    from the latest earlier beacon carrying one (see
+    `beacon_data.latest_friendly_message`), saying so when it is.
+    """
+    if friendly_message is None:
+        return
+    message, message_time = friendly_message
+    label = ui.label(message).classes("text-sm italic")
+    lag = row[beacon_data.BEACON_TIME_COLUMN] - message_time
+    if lag > timedelta(0):
+        label.tooltip(
+            f"From an earlier beacon ({message_time:%Y-%m-%d %H:%M:%S} UTC, "
+            f"{duration_str(lag)} before this one)"
+        )
+
+
 def _latest_beacon_card(
     latest: pl.DataFrame,
     local_max_pending: tuple[int, datetime] | None,
     latest_uplink: uplinks.FinishedUplink | None,
+    friendly_message: tuple[str, datetime] | None,
 ) -> None:
     with ui.card().classes("w-full"):
         if latest.is_empty():
@@ -189,11 +237,8 @@ def _latest_beacon_card(
                 ui.label(f"Latest beacon -- {row['packet_type']}").classes(
                     "text-xl font-bold"
                 )
-                received_at = row["received_at"]
-                ui.label(
-                    f"{received_at:%Y-%m-%d %H:%M:%S} UTC ({age_str(received_at)})"
-                ).classes("text-caption text-grey")
-            ui.label(row.get("friendly_message") or "").classes("text-sm italic")
+                ui.label(_beacon_time_caption(row)).classes("text-caption text-grey")
+            _friendly_message_label(row, friendly_message)
 
         stats = [
             ("Satellite", row.get("satellite_name")),
@@ -222,10 +267,11 @@ def _latest_beacon_card(
 
 def _latest_extended_beacon_card(latest: pl.DataFrame) -> None:
     """The extended-only fields (ADCS, extended EPS/OBC telemetry) only
-    show up on `BEACON_EXTENDED` packets, which are interleaved with more
-    frequent `BEACON_BASIC` ones -- so this looks up the latest *extended*
-    beacon specifically, rather than reusing whatever `_latest_beacon_card`
-    found.
+    show up on extended beacon packets (`BEACON_EXTENDED`, and
+    `BEACON_EXTENDED_V5PLUS`, which adds a few more), which are interleaved
+    with more frequent `BEACON_BASIC` ones -- so this looks up the latest
+    *extended* beacon specifically, rather than reusing whatever
+    `_latest_beacon_card` found.
     """
     with ui.card().classes("w-full"):
         ui.label("Latest Extended Beacon").classes("text-lg font-bold")
@@ -236,10 +282,9 @@ def _latest_extended_beacon_card(latest: pl.DataFrame) -> None:
             return
 
         row = latest.to_dicts()[0]
-        received_at = row["received_at"]
-        ui.label(
-            f"{received_at:%Y-%m-%d %H:%M:%S} UTC ({age_str(received_at)})"
-        ).classes("text-caption text-grey")
+        ui.label(f"{row['packet_type']} -- {_beacon_time_caption(row)}").classes(
+            "text-caption text-grey"
+        )
 
         stats = [
             ("ADC Battery Voltage", f"{row.get('obc_adc_battery_voltage_V', '?')} V"),
@@ -274,12 +319,37 @@ def _latest_extended_beacon_card(latest: pl.DataFrame) -> None:
                 f"{row.get('eps_total_avg_power_distributed_W', '?')} W",
             ),
             ("MPI Last Temp", f"{row.get('mpi_last_temperature_C', '?')} °C"),
+            *(
+                _v5plus_stats(row)
+                if row["packet_type"] == "BEACON_EXTENDED_V5PLUS"
+                else []
+            ),
         ]
         with ui.row().classes("w-full gap-8 flex-wrap mt-2"):
             for label, value in stats:
                 with ui.column().classes("gap-0"):
                     ui.label(label).classes("text-caption text-grey text-uppercase")
                     ui.label(str(value)).classes("text-base font-medium")
+
+
+def _v5plus_stats(row: dict[str, Any]) -> list[tuple[str, Any]]:
+    """The fields only `BEACON_EXTENDED_V5PLUS` packets carry."""
+    return [
+        (
+            "Wheel Speeds (x, y, z)",
+            f"{row.get('adcs_wheel_speed_x_rpm', '?')}, "
+            f"{row.get('adcs_wheel_speed_y_rpm', '?')}, "
+            f"{row.get('adcs_wheel_speed_z_rpm', '?')} RPM",
+        ),
+        ("Pointing Error", f"{row.get('adcs_pointing_error_deg', '?')} deg"),
+        ("ADCS Power", f"{row.get('adcs_total_power_consumed_W', '?')} W"),
+        ("GNSS Power", f"{row.get('gnss_power_consumed_W', '?')} W"),
+        ("Distinct Pending TCMDs", row.get("distinct_tcmds_pending", "?")),
+        (
+            "Time Since Time Sync",
+            _format_uptime(row.get("duration_since_last_time_sync_sec")),
+        ),
+    ]
 
 
 def _open_fullscreen_chart(option: dict[str, Any]) -> None:
@@ -437,7 +507,12 @@ def build_beacon_stats_page(data_dir: Path, hours: float) -> None:
                 "pipeline (step_1, step_2, step_3) first."
             ).classes("text-lg text-warning")
             return
-        _latest_beacon_card(live.latest, live.local_max_pending, live.latest_uplink)
+        _latest_beacon_card(
+            live.latest,
+            live.local_max_pending,
+            live.latest_uplink,
+            live.friendly_message,
+        )
         _latest_extended_beacon_card(live.latest_extended)
         _power_channels_card(live.latest, live.latest_extended)
 
