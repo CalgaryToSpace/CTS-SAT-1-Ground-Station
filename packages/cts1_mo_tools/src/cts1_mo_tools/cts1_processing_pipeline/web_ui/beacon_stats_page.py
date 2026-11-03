@@ -34,6 +34,8 @@ from .charts import (
     channel_states_option,
     chart_option,
     packet_counts_histogram_option,
+    receive_delay_option,
+    receive_delay_vs_time_since_sync_option,
 )
 from .layout import page_shell
 
@@ -51,6 +53,10 @@ CHART_MOUNT_TIMEOUT_SEC = 15.0
 
 # Bucket width for the "SatNOGS Stats" packet-count histogram.
 PACKET_COUNT_WINDOW = timedelta(hours=6)
+
+# Bucket width for the "SatNOGS Stats" receive-delay median chart: about one
+# pass per bucket (passes are ~10 min, hours apart).
+RECEIVE_DELAY_WINDOW = timedelta(hours=1)
 
 # label -> hours
 WINDOW_CHOICES: dict[str, float] = {
@@ -126,17 +132,9 @@ def _local_max_pending_str(local_max: tuple[int, datetime] | None) -> str:
 
 
 def _beacon_time_caption(row: dict[str, Any]) -> str:
-    """When `row`'s beacon was recorded (onboard clock), and separately when
-    it was received -- they differ a lot for stored (replayed) beacons.
-    """
+    """When `row`'s beacon was recorded (onboard clock)."""
     beacon_time = row[beacon_data.BEACON_TIME_COLUMN]
-    caption = f"{beacon_time:%Y-%m-%d %H:%M:%S} UTC ({age_str(beacon_time)})"
-    received_at = row.get("received_at")
-    if received_at is not None:
-        caption += f" -- received {received_at:%Y-%m-%d %H:%M:%S} UTC"
-    if row.get("is_stored_beacon"):
-        caption += " -- stored (replayed) beacon"
-    return caption
+    return f"{beacon_time:%Y-%m-%d %H:%M:%S} UTC ({age_str(beacon_time)})"
 
 
 def _latest_uplink_stats(
@@ -475,7 +473,22 @@ def _chart_groups(path: Path, *, since: datetime | None) -> None:
     histogram = packet_counts_histogram_option(
         packet_counts, title="Packets Received per 6h Window, by Packet Type"
     )
-    _render_chart_group("SatNOGS Stats", [histogram] if histogram else [])
+    receive_delay = receive_delay_option(
+        beacon_data.beacon_receive_delay_medians(beacons, every=RECEIVE_DELAY_WINDOW),
+        title="Satellite Clock Correction (received_at - utc_time), 1h Median",
+    )
+    receive_delay_vs_sync = receive_delay_vs_time_since_sync_option(
+        beacon_data.v5plus_receive_delay_vs_time_since_sync(beacons),
+        title="Satellite Clock Correction vs. Time Since Sync (v5+ Beacons)",
+    )
+    _render_chart_group(
+        "SatNOGS Stats",
+        [
+            option
+            for option in (histogram, receive_delay, receive_delay_vs_sync)
+            if option is not None
+        ],
+    )
 
 
 def _chart_options(specs: list[ChartSpec], df: pl.DataFrame) -> list[dict[str, Any]]:

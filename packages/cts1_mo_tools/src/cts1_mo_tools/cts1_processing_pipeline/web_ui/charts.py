@@ -17,12 +17,16 @@ __all__ = [
     "chart_option",
     "collection_timeline_option",
     "packet_counts_histogram_option",
+    "receive_delay_option",
+    "receive_delay_vs_time_since_sync_option",
 ]
 
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import polars as pl
+
+from cts1_mo_tools.cts1_decode_satnogs_packets import TIME_SYNC_SOURCE_MAP
 
 from .data import BEACON_TIME_COLUMN
 
@@ -575,6 +579,157 @@ def packet_counts_histogram_option(
         "xAxis": {"type": "time"},
         "yAxis": {"type": "value", "name": "packets", "minInterval": 1},
         "dataZoom": [{"type": "inside"}],
+        "series": series,
+    }
+
+
+# Each time sync source keeps its colour whichever ones are in the window.
+_TIME_SYNC_SOURCE_ORDER = [*TIME_SYNC_SOURCE_MAP.values(), "UNKNOWN"]
+
+
+def receive_delay_option(medians: pl.DataFrame, *, title: str) -> dict[str, Any] | None:
+    """ECharts scatter `option` of the median `received_at - utc_time` per
+    window -- the correction to `+=` onto the satellite's clock -- one
+    coloured series per time sync source, or None if there are none.
+
+    `medians` is `data.beacon_receive_delay_medians`'s output. Each point's
+    tooltip also shows its source and how many beacons its median is over
+    (`value[2]`). A dashed line marks zero (clocks agree).
+    """
+    if medians.is_empty():
+        return None
+    present = set(medians["time_sync_source"].to_list())
+    # Known sources in firmware order, then any the decoder didn't recognise
+    # (e.g. "UNKNOWN(7)"), so each source's colour is stable.
+    sources = [s for s in _TIME_SYNC_SOURCE_ORDER if s in present] + sorted(
+        present - set(_TIME_SYNC_SOURCE_ORDER)
+    )
+    unrecognised_seen = 0
+    series: list[dict[str, Any]] = []
+    for source in sources:
+        sub = medians.filter(pl.col("time_sync_source") == source)
+        if source in _TIME_SYNC_SOURCE_ORDER:
+            color_index = _TIME_SYNC_SOURCE_ORDER.index(source)
+        else:
+            color_index = len(_TIME_SYNC_SOURCE_ORDER) + unrecognised_seen
+            unrecognised_seen += 1
+        series.append(
+            {
+                "name": source,
+                "type": "scatter",
+                "symbolSize": 8,
+                "data": [
+                    [ts.isoformat(), round(median, 3), count]
+                    for ts, median, count in sub.select(
+                        "window_start", "median_delay_sec", "beacon_count"
+                    ).iter_rows()
+                ],
+                "color": _SERIES_COLORS[color_index % len(_SERIES_COLORS)],
+            }
+        )
+    series[0]["markLine"] = {
+        "silent": True,
+        "symbol": "none",
+        "lineStyle": {"type": "dashed", "color": "#999"},
+        "label": {"show": False},
+        "data": [{"yAxis": 0}],
+    }
+    return {
+        "animation": False,
+        "title": {"text": title, "textStyle": {"fontSize": 14}},
+        "grid": {"left": 60, "right": 20, "top": 64, "bottom": 30},
+        "tooltip": {
+            "trigger": "item",
+            ":formatter": (
+                "p => new Date(p.value[0]).toISOString().replace('T', ' ')"
+                ".replace('Z', ' UTC') + '<br>sync source: ' + p.seriesName"
+                " + '<br>median ' + p.value[1].toFixed(1)"
+                " + ' s over ' + p.value[2] + ' beacon(s)'"
+            ),
+        },
+        "legend": {"show": True, "top": 26, "type": "scroll"},
+        "xAxis": {"type": "time"},
+        "yAxis": {"type": "value", "name": "s", "scale": True},
+        "dataZoom": [{"type": "inside"}],
+        "series": series,
+    }
+
+
+def receive_delay_vs_time_since_sync_option(
+    points: pl.DataFrame, *, title: str
+) -> dict[str, Any] | None:
+    """ECharts scatter `option` of each beacon's `received_at - utc_time` (the
+    correction to `+=` onto the satellite's clock) against hours since its
+    last time sync, one series per (time sync source, oscillator MHz), or
+    None if there are no points -- a series' slope is that clock's drift.
+
+    `points` is `data.v5plus_receive_delay_vs_time_since_sync`'s output.
+    Each point is `[hours since sync, correction, utc_time, seconds since
+    sync]`; the last two are only for the tooltip.
+    """
+    if points.is_empty():
+        return None
+    keys = (
+        points.select("time_sync_source", "oscillator_mhz")
+        .unique()
+        .sort("time_sync_source", "oscillator_mhz", nulls_last=True)
+    )
+    series: list[dict[str, Any]] = []
+    for i, (source, mhz) in enumerate(keys.iter_rows()):
+        sub = points.filter(
+            (pl.col("time_sync_source") == source)
+            & (
+                pl.col("oscillator_mhz").is_null()
+                if mhz is None
+                else pl.col("oscillator_mhz") == mhz
+            )
+        )
+        series.append(
+            {
+                "name": f"{source} @ {'?' if mhz is None else mhz} MHz",
+                "type": "scatter",
+                "symbolSize": 6,
+                "data": [
+                    [round(sec / 3600, 4), round(delay, 3), ts.isoformat(), sec]
+                    for ts, sec, delay in sub.select(
+                        BEACON_TIME_COLUMN, "time_since_sync_sec", "delay_sec"
+                    ).iter_rows()
+                ],
+                "color": _SERIES_COLORS[i % len(_SERIES_COLORS)],
+                "large": True,
+                "largeThreshold": 2000,
+            }
+        )
+    series[0]["markLine"] = {
+        "silent": True,
+        "symbol": "none",
+        "lineStyle": {"type": "dashed", "color": "#999"},
+        "label": {"show": False},
+        "data": [{"yAxis": 0}],
+    }
+    return {
+        "animation": False,
+        "title": {"text": title, "textStyle": {"fontSize": 14}},
+        "grid": {"left": 60, "right": 30, "top": 64, "bottom": 40},
+        "tooltip": {
+            "trigger": "item",
+            ":formatter": (
+                "p => p.seriesName + '<br>' + new Date(p.value[2]).toISOString()"
+                ".replace('T', ' ').replace('Z', ' UTC') + '<br>'"
+                " + p.value[3] + ' s since sync<br>correction '"
+                " + p.value[1].toFixed(1) + ' s'"
+            ),
+        },
+        "legend": {"show": True, "top": 26, "type": "scroll"},
+        "xAxis": {
+            "type": "value",
+            "name": "h since sync",
+            "nameLocation": "middle",
+            "nameGap": 25,
+            "min": 0,
+        },
+        "yAxis": {"type": "value", "name": "s", "scale": True},
+        "dataZoom": [{"type": "inside", "xAxisIndex": 0}],
         "series": series,
     }
 

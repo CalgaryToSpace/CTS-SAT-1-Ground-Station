@@ -9,16 +9,20 @@ import polars as pl
 from cts1_mo_tools.cts1_processing_pipeline.web_ui.charts import (
     BEACON_CHART_GROUPS,
     chart_option,
+    receive_delay_option,
+    receive_delay_vs_time_since_sync_option,
 )
 from cts1_mo_tools.cts1_processing_pipeline.web_ui.data import (
     ATTITUDE_COLUMNS,
     ATTITUDE_MODE_COLUMNS,
     BEACON_TIME_COLUMN,
+    beacon_receive_delay_medians,
     latest_beacons,
     latest_friendly_message,
     latest_local_max_pending_tcmd_count,
     load_attitude_window,
     load_beacon_window,
+    v5plus_receive_delay_vs_time_since_sync,
 )
 
 _NOW = datetime.now(UTC).replace(microsecond=0)
@@ -356,3 +360,148 @@ def test_friendly_message_not_filled_forward_past_30_minutes(tmp_path: Path) -> 
     at = basic_time + timedelta(minutes=29)
     assert latest_friendly_message(path, at=at) == ("hello", basic_time)
     assert latest_friendly_message(path, at=basic_time + timedelta(minutes=31)) is None
+
+
+def test_receive_delay_medians_per_window_and_sync_source(tmp_path: Path) -> None:
+    hour = (_NOW - timedelta(hours=3)).replace(minute=0, second=0)
+
+    def _synced(row: dict[str, object], source: str | None) -> dict[str, object]:
+        return {**row, "last_time_sync_source": source}
+
+    path = _write(
+        tmp_path,
+        [
+            # First hour, GNSS: delays 2s, 4s, 600s (an outlier) -> median 4s.
+            *(
+                _synced(
+                    _beacon(
+                        f"gnss-{i}",
+                        beacon_time=hour + timedelta(minutes=i),
+                        received_at=hour + timedelta(minutes=i, seconds=delay),
+                    ),
+                    "GNSS_UART",
+                )
+                for i, delay in enumerate((2, 4, 600))
+            ),
+            # Same hour, after a switch to the EPS RTC: its own median.
+            _synced(
+                _beacon(
+                    "rtc",
+                    beacon_time=hour + timedelta(minutes=40),
+                    received_at=hour + timedelta(minutes=40, seconds=-9),
+                ),
+                "EPS_RTC",
+            ),
+            # Second hour, no source: received 1s *before* its onboard time.
+            _synced(
+                _beacon(
+                    "unknown",
+                    beacon_time=hour + timedelta(hours=1, minutes=5),
+                    received_at=hour + timedelta(hours=1, minutes=5, seconds=-1),
+                ),
+                None,
+            ),
+            # Stored: recorded in the first hour, received much later -- ignored.
+            _synced(
+                _beacon(
+                    "stored",
+                    beacon_time=hour + timedelta(minutes=30),
+                    received_at=_NOW,
+                    is_stored_beacon=True,
+                ),
+                "GNSS_UART",
+            ),
+        ],
+    )
+    beacons = load_beacon_window(path, since=_NOW - timedelta(hours=24))
+    medians = beacon_receive_delay_medians(beacons, every=timedelta(hours=1))
+    assert medians.rows() == [
+        (hour, "EPS_RTC", -9.0, 1),
+        (hour, "GNSS_UART", 4.0, 3),
+        (hour + timedelta(hours=1), "UNKNOWN", -1.0, 1),
+    ]
+
+    option = receive_delay_option(medians, title="delay")
+    assert option is not None
+    # Firmware order (GNSS_UART before EPS_RTC), one series per source.
+    assert [(s["name"], s["data"]) for s in option["series"]] == [
+        ("GNSS_UART", [[hour.isoformat(), 4.0, 3]]),
+        ("EPS_RTC", [[hour.isoformat(), -9.0, 1]]),
+        ("UNKNOWN", [[(hour + timedelta(hours=1)).isoformat(), -1.0, 1]]),
+    ]
+
+
+def test_receive_delay_option_none_without_live_beacons() -> None:
+    medians = beacon_receive_delay_medians(pl.DataFrame(), every=timedelta(hours=1))
+    assert receive_delay_option(medians, title="delay") is None
+
+
+def test_v5plus_receive_delay_vs_time_since_sync(tmp_path: Path) -> None:
+    t = _NOW - timedelta(hours=2)
+
+    def _row(  # noqa: PLR0913
+        name: str,
+        *,
+        minutes: int,
+        delay: int,
+        since_sync: int | None,
+        mhz: int | None = 25,
+        packet_type: str = "BEACON_EXTENDED_V5PLUS",
+        is_stored_beacon: bool | None = False,
+    ) -> dict[str, object]:
+        return {
+            **_beacon(
+                name,
+                beacon_time=t + timedelta(minutes=minutes),
+                received_at=t + timedelta(minutes=minutes, seconds=delay),
+                packet_type=packet_type,
+                is_stored_beacon=is_stored_beacon,
+            ),
+            "last_time_sync_source": "EPS_RTC",
+            "obc_active_oscillator_MHz": mhz,
+            "duration_since_last_time_sync_sec": since_sync,
+        }
+
+    path = _write(
+        tmp_path,
+        [
+            _row("a", minutes=0, delay=-5, since_sync=3600),
+            _row("b", minutes=1, delay=-6, since_sync=3660, mhz=None),
+            # Left out: at the clamp, stored, and not v5+.
+            _row("clamped", minutes=2, delay=-60, since_sync=65535),
+            _row("stored", minutes=3, delay=999, since_sync=100, is_stored_beacon=True),
+            _row(
+                "v4",
+                minutes=4,
+                delay=1,
+                since_sync=None,
+                packet_type="BEACON_EXTENDED",
+                is_stored_beacon=None,
+            ),
+        ],
+    )
+    beacons = load_beacon_window(path, since=_NOW - timedelta(hours=24))
+    points = v5plus_receive_delay_vs_time_since_sync(beacons)
+    assert points.drop(BEACON_TIME_COLUMN).rows() == [
+        ("EPS_RTC", 25, 3600, -5.0),
+        ("EPS_RTC", None, 3660, -6.0),
+    ]
+
+    option = receive_delay_vs_time_since_sync_option(points, title="drift")
+    assert option is not None
+    assert [(s["name"], s["data"]) for s in option["series"]] == [
+        ("EPS_RTC @ 25 MHz", [[1.0, -5.0, t.isoformat(), 3600]]),
+        (
+            "EPS_RTC @ ? MHz",
+            [
+                [
+                    round(3660 / 3600, 4),
+                    -6.0,
+                    (t + timedelta(minutes=1)).isoformat(),
+                    3660,
+                ]
+            ],
+        ),
+    ]
+    empty = v5plus_receive_delay_vs_time_since_sync(pl.DataFrame())
+    assert receive_delay_vs_time_since_sync_option(empty, title="drift") is None
