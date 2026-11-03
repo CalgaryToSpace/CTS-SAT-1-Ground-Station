@@ -126,17 +126,9 @@ def _local_max_pending_str(local_max: tuple[int, datetime] | None) -> str:
 
 
 def _beacon_time_caption(row: dict[str, Any]) -> str:
-    """When `row`'s beacon was recorded (onboard clock), and separately when
-    it was received -- they differ a lot for stored (replayed) beacons.
-    """
+    """When `row`'s beacon was recorded (onboard clock)."""
     beacon_time = row[beacon_data.BEACON_TIME_COLUMN]
-    caption = f"{beacon_time:%Y-%m-%d %H:%M:%S} UTC ({age_str(beacon_time)})"
-    received_at = row.get("received_at")
-    if received_at is not None:
-        caption += f" -- received {received_at:%Y-%m-%d %H:%M:%S} UTC"
-    if row.get("is_stored_beacon"):
-        caption += " -- stored (replayed) beacon"
-    return caption
+    return f"{beacon_time:%Y-%m-%d %H:%M:%S} UTC ({age_str(beacon_time)})"
 
 
 def _latest_uplink_stats(
