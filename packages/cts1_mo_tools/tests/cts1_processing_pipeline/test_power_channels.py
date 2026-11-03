@@ -18,9 +18,7 @@ _BASE = datetime(2026, 1, 1, tzinfo=UTC)
 def _beacons(bitfields: list[str | None], adcs_lists: list[str | None]) -> pl.DataFrame:
     return pl.DataFrame(
         {
-            "received_at": [
-                _BASE + timedelta(minutes=i) for i in range(len(bitfields))
-            ],
+            "utc_time": [_BASE + timedelta(minutes=i) for i in range(len(bitfields))],
             "eps_enabled_channels_bitfield": bitfields,
             "adcs_powered_list": adcs_lists,
         }
@@ -52,7 +50,7 @@ def test_eps_channel_states_hides_unused_channels_unless_on() -> None:
 def test_eps_channel_states_skips_rows_without_bitfield() -> None:
     states = eps_channel_states(_beacons([None, "0x00000001"], [None, None]))
     assert states.height == 1
-    assert states["received_at"][0] == _BASE + timedelta(minutes=1)
+    assert states["utc_time"][0] == _BASE + timedelta(minutes=1)
 
 
 def test_adcs_channel_states_extended_rows_only() -> None:
@@ -67,7 +65,7 @@ def test_adcs_channel_states_extended_rows_only() -> None:
     assert first["CUBEWHEEL1"]
     assert first["GPS_RECEIVER"]
     assert not first["CUBEWHEEL2"]
-    assert not any(v for k, v in second.items() if k != "received_at")
+    assert not any(v for k, v in second.items() if k != "utc_time")
 
 
 def test_channel_states_option_splits_on_and_off() -> None:
@@ -75,7 +73,7 @@ def test_channel_states_option_splits_on_and_off() -> None:
     option = channel_states_option(states, title="EPS")
     assert option is not None
     on, off = option["series"]
-    channels = [c for c in states.columns if c != "received_at"]
+    channels = [c for c in states.columns if c != "utc_time"]
     assert option["yAxis"]["data"] == channels[::-1]
     assert on["data"] == [[_BASE.isoformat(), "VBATT_STACK"]]
     assert len(off["data"]) == 2 * len(channels) - 1
@@ -94,13 +92,13 @@ def test_adcs_power_control_channels_are_decoded_names() -> None:
 
 def test_adcs_channel_states_in_telecommand_order() -> None:
     states = adcs_channel_states(_beacons(["0x00000001"], ['["GPS_LNA_POWER"]']))
-    assert states.columns == ["received_at", *ADCS_POWER_CONTROL_CHANNELS]
+    assert states.columns == ["utc_time", *ADCS_POWER_CONTROL_CHANNELS]
 
 
 def test_adcs_error_states_keeps_only_seen_in_bit_order() -> None:
     beacons = pl.DataFrame(
         {
-            "received_at": [_BASE, _BASE + timedelta(minutes=1), _BASE],
+            "utc_time": [_BASE, _BASE + timedelta(minutes=1), _BASE],
             "adcs_errors": [
                 '["COARSE_SUN_SENSOR_ERROR","CAM1_SENSOR_BUSY_ERROR"]',
                 "[]",
@@ -112,7 +110,7 @@ def test_adcs_error_states_keeps_only_seen_in_bit_order() -> None:
     states = adcs_error_states(beacons)
     # Bits 34, 35, 45: the overcurrent flag sorts in among the errors.
     assert states.columns == [
-        "received_at",
+        "utc_time",
         "CAM1_3V3_OVERCURRENT",
         "CAM1_SENSOR_BUSY_ERROR",
         "COARSE_SUN_SENSOR_ERROR",

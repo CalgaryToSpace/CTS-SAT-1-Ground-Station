@@ -1,11 +1,17 @@
 """Loading + shaping `everything_decoded.parquet` for the web UI.
 
 Pure data layer: no NiceGUI/rendering concerns live here, just polars. Every
-loader here scans the parquet file lazily and pushes its `packet_type`/
-`received_at` filters down into that scan, so a query only materializes the
-(small) slice of rows it actually needs instead of the whole file -- the
-default 24h chart window is typically a few hundred rows out of a file that
-only grows over the mission's lifetime.
+loader here scans the parquet file lazily and pushes its `packet_type`/time
+filters down into that scan, so a query only materializes the (small) slice
+of rows it actually needs instead of the whole file -- the default 24h chart
+window is typically a few hundred rows out of a file that only grows over
+the mission's lifetime.
+
+Beacon loaders place each beacon in time by its own onboard clock
+(`BEACON_TIME_COLUMN`), not by `received_at`: `received_at` is only a best
+guess (some decoders only know the observation, not the frame), and v5+
+stored beacons are replayed from the satellite's history, hours after they
+were recorded.
 """
 
 from __future__ import annotations
@@ -16,6 +22,7 @@ __all__ = [
     "ATTITUDE_MODE_COLUMNS",
     "BEACON_EXTENDED_PACKET_TYPES",
     "BEACON_PACKET_TYPES",
+    "BEACON_TIME_COLUMN",
     "DEFAULT_PARQUET_PATH",
     "DEFAULT_REASSEMBLED_TCMD_PATH",
     "adcs_channel_states",
@@ -32,7 +39,7 @@ __all__ = [
     "round_down_datetime",
 ]
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import polars as pl
@@ -44,6 +51,7 @@ from cts1_mo_tools.cts1_decode_satnogs_packets import (
     BEACON_EXTENDED_PACKET_TYPES,
     BEACON_PACKET_TYPES,
     EPS_CHANNEL_MAP,
+    MAX_VALID_EPOCH_MS,
     PACKET_TYPE_ENUM,
 )
 from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
@@ -100,6 +108,16 @@ ADCS_POWER_CONTROL_CHANNELS = (
 # Cached loader results expire after this long, so new data shows up.
 _CACHE_TTL_SECONDS = 30
 
+# The beacon's own onboard-clock timestamp, as a UTC datetime. Beacon loaders
+# replace the decoder's ISO-string `utc_time` column with this, so every
+# beacon chart/card/state table is keyed on it.
+BEACON_TIME_COLUMN = "utc_time"
+_BEACON_TIME_DTYPE = pl.Datetime("us", "UTC")
+
+# Beacons claiming to be from further in the future than this are clock
+# glitches (or bit errors); they'd otherwise pin "latest beacon" forever.
+_MAX_BEACON_CLOCK_AHEAD = timedelta(hours=1)
+
 
 def round_down_datetime(dt: datetime, step: timedelta) -> datetime:
     """Round `dt` down to a multiple of `step` (counted from midnight), e.g.
@@ -116,25 +134,61 @@ def _scan(path: Path) -> pl.LazyFrame | None:
     return pl.scan_parquet(path)
 
 
-def newest_rows(lf: pl.LazyFrame, n: int) -> pl.DataFrame:
-    """`lf`'s `n` most recently received rows, newest first -- the same
-    result as `lf.sort("received_at", descending=True).head(n)`.
+def newest_rows(
+    lf: pl.LazyFrame, n: int, *, column: str = "received_at"
+) -> pl.DataFrame:
+    """`lf`'s `n` newest rows by `column`, newest first -- the same result
+    as `lf.sort(column, descending=True).head(n)`.
 
     That one-liner materializes every column of every row before sorting
     (gigabytes, once the whole mission's history is in the file), so this
-    finds the `n`th-newest `received_at` from that one column first, then
+    finds the `n`th-newest `column` value from that one column first, then
     fetches only rows at/after it. That filter is pushed into the scan, which
     skips older row groups outright and only decodes the wide columns for
     the rows that match.
     """
-    cutoff = lf.select(pl.col("received_at").top_k(n).min()).collect().item()
+    cutoff = lf.select(pl.col(column).top_k(n).min()).collect().item()
     if cutoff is None:
         return lf.head(0).collect()
     return (
-        lf.filter(pl.col("received_at") >= cutoff)
-        .sort("received_at", descending=True)
+        lf.filter(pl.col(column) >= cutoff)
+        .sort(column, descending=True)
         .head(n)
         .collect()
+    )
+
+
+def _scan_beacons(
+    path: Path,
+    *,
+    packet_types: tuple[str, ...] = BEACON_PACKET_TYPES,
+    since: datetime | None = None,
+) -> pl.LazyFrame | None:
+    """Lazily scan `packet_types` beacons with a valid onboard-clock time
+    at/after `since`, with `BEACON_TIME_COLUMN` set to that time (a UTC
+    datetime). Every beacon counts -- live or replayed from storage, with or
+    without a valid CRC -- as long as its clock is set and plausible.
+
+    Filters are on the raw `unix_epoch_time_ms` (the same value the
+    decoder's `utc_time` string is made from), so they push down into the
+    parquet scan.
+    """
+    lf = _scan(path)
+    if lf is None:
+        return None
+    epoch_ms = pl.col("unix_epoch_time_ms")
+    max_ms = min(
+        MAX_VALID_EPOCH_MS,
+        int((datetime.now(UTC) + _MAX_BEACON_CLOCK_AHEAD).timestamp() * 1000),
+    )
+    min_ms = 1 if since is None else int(since.timestamp() * 1000)
+    return lf.filter(
+        pl.col("packet_type").is_in(packet_types) & epoch_ms.is_between(min_ms, max_ms)
+    ).with_columns(
+        pl.from_epoch(epoch_ms, time_unit="ms")
+        .dt.replace_time_zone("UTC")
+        .cast(_BEACON_TIME_DTYPE)
+        .alias(BEACON_TIME_COLUMN)
     )
 
 
@@ -177,47 +231,77 @@ def load_packet_counts_per_window(
     )
 
 
+def _dedupe_by_beacon_time(lf: pl.LazyFrame) -> pl.LazyFrame:
+    """One row per distinct `BEACON_TIME_COLUMN`, sorted by it.
+
+    The same beacon can be received more than once: live (" X5") and again
+    later replayed from storage (" S5"), or by several ground stations. Of
+    the copies, keep a CRC-valid one, then a live one, then the earliest
+    received -- so each beacon is plotted once.
+    """
+    schema = lf.collect_schema()
+    preference = [
+        (expr, descending)
+        for column, expr, descending in (
+            # CRC-valid first.
+            ("csp_crc_valid", pl.col("csp_crc_valid").fill_null(value=False), True),
+            # Live first (null = not a v5+ beacon, so not stored either).
+            (
+                "is_stored_beacon",
+                pl.col("is_stored_beacon").fill_null(value=False),
+                False,
+            ),
+            # Earliest received first.
+            ("received_at", pl.col("received_at"), False),
+        )
+        if column in schema
+    ]
+    if preference:
+        lf = lf.sort(
+            [expr for expr, _ in preference],
+            descending=[descending for _, descending in preference],
+            nulls_last=True,
+        )
+    return lf.unique(BEACON_TIME_COLUMN, keep="first", maintain_order=True).sort(
+        BEACON_TIME_COLUMN
+    )
+
+
 @cached(TTLCache(maxsize=3, ttl=_CACHE_TTL_SECONDS))
 def load_beacon_window(
     path: Path = DEFAULT_PARQUET_PATH, *, since: datetime | None = None
 ) -> pl.DataFrame:
-    """Beacon packets (BASIC or EXTENDED) received at/after `since`, oldest first.
+    """Beacon packets (any beacon type, live or stored) whose onboard clock
+    (`BEACON_TIME_COLUMN`) is at/after `since`, oldest first, one row per
+    onboard time (see `_dedupe_by_beacon_time`).
 
     Both the packet-type and time filters are applied on the lazy frame
     before `.collect()`, so only beacon rows in the requested window are ever
     materialized.
     """
-    lf = _scan(path)
+    lf = _scan_beacons(path, since=since)
     if lf is None:
         return pl.DataFrame()
-    lf = lf.filter(pl.col("packet_type").is_in(BEACON_PACKET_TYPES))
-    if since is not None:
-        lf = lf.filter(pl.col("received_at") >= since)
-    return lf.sort("received_at").collect()
+    return _dedupe_by_beacon_time(lf).collect()
 
 
 @cached(TTLCache(maxsize=3, ttl=_CACHE_TTL_SECONDS))
 def load_attitude_window(
     path: Path = DEFAULT_PARQUET_PATH, *, since: datetime | None = None
 ) -> pl.DataFrame:
-    """`received_at` + `ATTITUDE_COLUMNS` + `ATTITUDE_MODE_COLUMNS` for every
-    extended beacon received at/after `since` that carries any
-    `ATTITUDE_COLUMNS` value, oldest first -- the frames
+    """`BEACON_TIME_COLUMN` + `ATTITUDE_COLUMNS` + `ATTITUDE_MODE_COLUMNS` for
+    every extended beacon timestamped at/after `since` that carries any
+    `ATTITUDE_COLUMNS` value, oldest first and one per onboard time -- the frames
     the attitude playback steps through. Only those columns are
     materialized, so a multi-day window stays small.
     """
-    lf = _scan(path)
+    lf = _scan_beacons(path, packet_types=BEACON_EXTENDED_PACKET_TYPES, since=since)
     if lf is None:
         return pl.DataFrame()
-    lf = lf.filter(
-        pl.col("packet_type").is_in(BEACON_EXTENDED_PACKET_TYPES)
-        & pl.any_horizontal(pl.col(c).is_not_null() for c in ATTITUDE_COLUMNS)
-    )
-    if since is not None:
-        lf = lf.filter(pl.col("received_at") >= since)
+    lf = lf.filter(pl.any_horizontal(pl.col(c).is_not_null() for c in ATTITUDE_COLUMNS))
     return (
-        lf.select("received_at", *ATTITUDE_COLUMNS, *ATTITUDE_MODE_COLUMNS)
-        .sort("received_at")
+        _dedupe_by_beacon_time(lf)
+        .select(BEACON_TIME_COLUMN, *ATTITUDE_COLUMNS, *ATTITUDE_MODE_COLUMNS)
         .collect()
     )
 
@@ -295,28 +379,29 @@ def latest_beacons(
     *,
     packet_types: tuple[str, ...] = BEACON_PACKET_TYPES,
 ) -> pl.DataFrame:
-    """The `n` most recently received beacon packets, newest first.
+    """The `n` newest beacon packets by onboard clock (`BEACON_TIME_COLUMN`),
+    newest first.
 
     Ignores any time window -- this is "whatever the most recent beacon(s)
     are", even if that's older than the chart window -- so the UI can still
     show *something* when nothing has come down in the last 24h.
 
-    `packet_types` narrows which beacon type(s) count -- e.g. pass just
-    `("BEACON_EXTENDED",)` to get the latest beacon carrying the
+    `packet_types` narrows which beacon type(s) count -- e.g. pass
+    `BEACON_EXTENDED_PACKET_TYPES` to get the latest beacon carrying the
     extended-only fields (ADCS, extended EPS/OBC telemetry), skipping over
     any more-recent `BEACON_BASIC` rows in between.
     """
-    lf = _scan(path)
+    lf = _scan_beacons(path, packet_types=packet_types)
     if lf is None:
         return pl.DataFrame()
-    return newest_rows(lf.filter(pl.col("packet_type").is_in(packet_types)), n)
+    return newest_rows(lf, n, column=BEACON_TIME_COLUMN)
 
 
 def latest_local_max_pending_tcmd_count(
     path: Path = DEFAULT_PARQUET_PATH,
 ) -> tuple[int, datetime] | None:
     """The most recent local maximum of `pending_queued_tcmd_count`, and the
-    `received_at` of the beacon that reported it.
+    onboard-clock time (`BEACON_TIME_COLUMN`) of the beacon that reported it.
 
     Walks backwards from the newest beacon for as long as the pending count
     keeps rising (or holds steady), and stops at the first beacon whose
@@ -331,16 +416,13 @@ def latest_local_max_pending_tcmd_count(
     Only the two needed columns are materialized. Returns None if no beacon
     has reported a pending count yet.
     """
-    lf = _scan(path)
+    lf = _scan_beacons(path)
     if lf is None:
         return None
     df = (
-        lf.filter(
-            pl.col("packet_type").is_in(BEACON_PACKET_TYPES)
-            & pl.col("pending_queued_tcmd_count").is_not_null()
-        )
-        .select("received_at", "pending_queued_tcmd_count")
-        .sort("received_at", descending=True)
+        lf.filter(pl.col("pending_queued_tcmd_count").is_not_null())
+        .select(BEACON_TIME_COLUMN, "pending_queued_tcmd_count")
+        .sort(BEACON_TIME_COLUMN, descending=True)
         .collect()
     )
     if df.is_empty():
@@ -354,7 +436,7 @@ def latest_local_max_pending_tcmd_count(
         (count.shift(-1) < count).fill_null(value=True).arg_true().first()
     ).item()
     row = df.row(peak_idx, named=True)
-    return int(row["pending_queued_tcmd_count"]), row["received_at"]
+    return int(row["pending_queued_tcmd_count"]), row[BEACON_TIME_COLUMN]
 
 
 def _drop_never_on(states: pl.DataFrame, columns: Sequence[str]) -> pl.DataFrame:
@@ -365,17 +447,17 @@ def _drop_never_on(states: pl.DataFrame, columns: Sequence[str]) -> pl.DataFrame
 def _json_list_states(
     beacons: pl.DataFrame, column: str, names: Sequence[str]
 ) -> pl.DataFrame:
-    """`received_at` plus one bool column per `names` entry, in that order,
+    """`BEACON_TIME_COLUMN` plus one bool column per `names` entry, in that order,
     True where `column`'s JSON list of names (e.g. `adcs_powered_list`)
     includes it. Rows where `column` is null are dropped.
     """
     if column not in beacons.columns:
         return pl.DataFrame()
     return (
-        beacons.select("received_at", column)
+        beacons.select(BEACON_TIME_COLUMN, column)
         .drop_nulls()
         .select(
-            "received_at",
+            BEACON_TIME_COLUMN,
             *(
                 pl.col(column)
                 .cast(pl.String)
@@ -388,7 +470,7 @@ def _json_list_states(
 
 
 def eps_channel_states(beacons: pl.DataFrame) -> pl.DataFrame:
-    """`received_at` plus one bool column per EPS power channel (named as in
+    """`BEACON_TIME_COLUMN` plus one bool column per EPS power channel (named as in
     `EPS_CHANNEL_MAP`, in bit order), True where the channel is enabled.
 
     Decoded from `eps_enabled_channels_bitfield` rather than the
@@ -407,9 +489,9 @@ def eps_channel_states(beacons: pl.DataFrame) -> pl.DataFrame:
         .str.to_integer(base=16, strict=False)
         .cast(pl.UInt32)
     )
-    states = beacons.select("received_at", bits.alias(column)).drop_nulls()
+    states = beacons.select(BEACON_TIME_COLUMN, bits.alias(column)).drop_nulls()
     states = states.select(
-        "received_at",
+        BEACON_TIME_COLUMN,
         *(
             ((pl.col(column) & (1 << bit_num)) != 0).alias(name)
             for bit_num, name in EPS_CHANNEL_MAP.items()
@@ -421,7 +503,7 @@ def eps_channel_states(beacons: pl.DataFrame) -> pl.DataFrame:
 
 
 def adcs_channel_states(beacons: pl.DataFrame) -> pl.DataFrame:
-    """`received_at` plus one bool column per `ADCS_POWER_CONTROL_CHANNELS`
+    """`BEACON_TIME_COLUMN` plus one bool column per `ADCS_POWER_CONTROL_CHANNELS`
     entry, in that order, True where the component is on.
 
     Decoded from `adcs_powered_list`, which only `BEACON_EXTENDED` packets
@@ -431,7 +513,7 @@ def adcs_channel_states(beacons: pl.DataFrame) -> pl.DataFrame:
 
 
 def adcs_error_states(beacons: pl.DataFrame) -> pl.DataFrame:
-    """`received_at` plus one bool column per ADCS error (`adcs_errors`) or
+    """`BEACON_TIME_COLUMN` plus one bool column per ADCS error (`adcs_errors`) or
     overcurrent detection (`adcs_flags`), True where it's set -- one row per
     extended beacon in `beacons`. Columns are in bit order, so each camera's
     errors and overcurrents sit together.
@@ -450,7 +532,7 @@ def adcs_error_states(beacons: pl.DataFrame) -> pl.DataFrame:
     if not {"adcs_errors", "adcs_flags"} <= set(beacons.columns):
         return pl.DataFrame()
     states = beacons.filter(pl.col("adcs_errors").is_not_null()).select(
-        "received_at",
+        BEACON_TIME_COLUMN,
         *(
             pl.col(column)
             .cast(pl.String)
