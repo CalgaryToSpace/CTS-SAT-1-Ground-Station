@@ -303,6 +303,13 @@ def _typical_frames(by_frame: npt.NDArray[np.float64]) -> npt.NDArray[np.bool_]:
     return deviations <= _TYPICAL_FRAME_MADS * np.median(deviations)
 
 
+def column_count(frames: pl.DataFrame) -> int:
+    """How many columns (frames, missing frames and separators) `frames`'
+    strip has -- its width at zoom 1.
+    """
+    return len(_columns(frames)) if not frames.is_empty() else 0
+
+
 def render_strip(
     frames: pl.DataFrame,
     *,
