@@ -44,7 +44,10 @@ from cachetools import TTLCache, cached
 from loguru import logger
 
 from cts1_mo_tools import satnogs_data
-from cts1_mo_tools.cts1_decode_satnogs_packets import MAX_VALID_EPOCH_MS
+from cts1_mo_tools.cts1_decode_satnogs_packets import (
+    BEACON_PACKET_TYPES,
+    MAX_VALID_EPOCH_MS,
+)
 from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
     pipeline as step_3_pipeline,
 )
@@ -118,7 +121,7 @@ def launched_at() -> datetime:
 def _beacons(decoded: pl.LazyFrame) -> pl.LazyFrame:
     launched_at_ms = int(launched_at().timestamp() * 1000)
     return decoded.filter(
-        pl.col("packet_type").is_in(("BEACON_BASIC", "BEACON_EXTENDED"))
+        pl.col("packet_type").is_in(BEACON_PACKET_TYPES)
         & pl.col("csp_crc_valid")
         & pl.col("unix_epoch_time_ms").is_between(launched_at_ms, MAX_VALID_EPOCH_MS)
     ).select(

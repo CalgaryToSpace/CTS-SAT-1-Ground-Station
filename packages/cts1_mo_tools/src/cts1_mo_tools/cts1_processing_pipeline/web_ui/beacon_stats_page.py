@@ -93,7 +93,7 @@ def _load_live_data(path: Path) -> _LiveData:
     return _LiveData(
         latest=beacon_data.latest_beacons(path, n=1),
         latest_extended=beacon_data.latest_beacons(
-            path, n=1, packet_types=("BEACON_EXTENDED",)
+            path, n=1, packet_types=beacon_data.BEACON_EXTENDED_PACKET_TYPES
         ),
         local_max_pending=beacon_data.latest_local_max_pending_tcmd_count(path),
         latest_uplink=uplinks.latest_finished_uplink(path, window=timedelta(hours=24)),

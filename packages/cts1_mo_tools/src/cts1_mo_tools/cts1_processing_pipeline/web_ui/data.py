@@ -14,6 +14,7 @@ __all__ = [
     "ADCS_POWER_CONTROL_CHANNELS",
     "ATTITUDE_COLUMNS",
     "ATTITUDE_MODE_COLUMNS",
+    "BEACON_EXTENDED_PACKET_TYPES",
     "BEACON_PACKET_TYPES",
     "DEFAULT_PARQUET_PATH",
     "DEFAULT_REASSEMBLED_TCMD_PATH",
@@ -40,6 +41,8 @@ from cachetools import TTLCache, cached
 from cts1_mo_tools.cts1_decode_satnogs_packets import (
     ADCS_ERROR_BITS,
     ADCS_FLAG_BITS,
+    BEACON_EXTENDED_PACKET_TYPES,
+    BEACON_PACKET_TYPES,
     EPS_CHANNEL_MAP,
     PACKET_TYPE_ENUM,
 )
@@ -61,9 +64,7 @@ DEFAULT_REASSEMBLED_TCMD_PATH = (
     step_5_pipeline.DEFAULT_DATA_DIR / step_5_pipeline.OUTPUT_FILENAME
 )
 
-BEACON_PACKET_TYPES = ("BEACON_BASIC", "BEACON_EXTENDED")
-
-# The ADCS attitude estimate + body rates, only on `BEACON_EXTENDED` packets.
+# The ADCS attitude estimate + body rates, only on extended beacon packets.
 ATTITUDE_COLUMNS = (
     "adcs_estimated_roll_angle_deg",
     "adcs_estimated_pitch_angle_deg",
@@ -209,7 +210,7 @@ def load_attitude_window(
     if lf is None:
         return pl.DataFrame()
     lf = lf.filter(
-        (pl.col("packet_type") == "BEACON_EXTENDED")
+        pl.col("packet_type").is_in(BEACON_EXTENDED_PACKET_TYPES)
         & pl.any_horizontal(pl.col(c).is_not_null() for c in ATTITUDE_COLUMNS)
     )
     if since is not None:

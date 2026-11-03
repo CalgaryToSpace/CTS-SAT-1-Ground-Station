@@ -1,7 +1,7 @@
 """Step 4: detect satellite events (reboots, uplinks) from beacon counters.
 
-Every beacon (`BEACON_BASIC` and `BEACON_EXTENDED` both carry the same
-fixed timing fields, so both are considered together, sorted by the
+Every beacon (`BEACON_BASIC`, `BEACON_EXTENDED`, and `BEACON_EXTENDED_V5PLUS`
+all carry the same fixed timing fields, so both are considered together, sorted by the
 satellite's own onboard clock) carries a handful of counters that only ever
 count up while the satellite keeps running, and reset to (near) zero the
 instant something happens:
@@ -75,6 +75,7 @@ import polars as pl
 from loguru import logger
 
 from cts1_mo_tools.cts1_decode_satnogs_packets import (
+    BEACON_PACKET_TYPES,
     MAX_VALID_EPOCH_MS,
     PACKET_TYPE_ENUM,
 )
@@ -87,8 +88,6 @@ if TYPE_CHECKING:
 
 DEFAULT_DATA_DIR = step_3_pipeline.DEFAULT_DATA_DIR
 OUTPUT_FILENAME = "satellite_events_from_beacons.parquet"
-
-BEACON_PACKET_TYPES = ("BEACON_BASIC", "BEACON_EXTENDED")
 
 
 class _EventSpec(NamedTuple):

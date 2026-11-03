@@ -587,7 +587,7 @@ class AttitudePlayer:
         # Nothing in the window: still show the newest extended beacon ever,
         # the same way the summary cards ignore the chart window.
         fallback = beacon_data.latest_beacons(
-            self._path, n=1, packet_types=("BEACON_EXTENDED",)
+            self._path, n=1, packet_types=beacon_data.BEACON_EXTENDED_PACKET_TYPES
         ).to_dicts()
         return fallback, True
 
