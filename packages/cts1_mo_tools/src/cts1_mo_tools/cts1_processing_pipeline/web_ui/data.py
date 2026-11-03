@@ -27,6 +27,7 @@ __all__ = [
     "DEFAULT_REASSEMBLED_TCMD_PATH",
     "adcs_channel_states",
     "adcs_error_states",
+    "beacon_receive_delay_medians",
     "eps_channel_states",
     "latest_beacons",
     "latest_friendly_message",
@@ -38,6 +39,7 @@ __all__ = [
     "load_reassembled_tcmd_responses",
     "newest_rows",
     "round_down_datetime",
+    "v5plus_receive_delay_vs_time_since_sync",
 ]
 
 from datetime import UTC, datetime, timedelta
@@ -580,3 +582,129 @@ def adcs_error_states(beacons: pl.DataFrame) -> pl.DataFrame:
         ),
     )
     return _drop_never_on(states, [name for _, _, name in by_bit])
+
+
+# `duration_since_last_time_sync_sec` saturates here (a u16 on the satellite):
+# a beacon reporting it was synced at least this long ago, not exactly.
+_TIME_SINCE_SYNC_CLAMP_SEC = 65535
+
+
+def _live_receive_delays(beacons: pl.DataFrame) -> pl.DataFrame:
+    """The live beacons in `beacons` with a `received_at`, plus `delay_sec`
+    (`received_at - BEACON_TIME_COLUMN`, seconds) and `time_sync_source`
+    (`last_time_sync_source`, `"UNKNOWN"` where missing).
+
+    Stored beacons are left out: they're replayed hours after they were
+    recorded, so their delay says nothing about the clock.
+    """
+    if beacons.is_empty() or "received_at" not in beacons.columns:
+        return pl.DataFrame()
+    live = beacons.filter(pl.col("received_at").is_not_null())
+    if "is_stored_beacon" in live.columns:
+        live = live.filter(~pl.col("is_stored_beacon").fill_null(value=False))
+    source = (
+        pl.col("last_time_sync_source").cast(pl.String)
+        if "last_time_sync_source" in live.columns
+        else pl.lit(None, dtype=pl.String)
+    )
+    return live.with_columns(
+        time_sync_source=source.fill_null("UNKNOWN"),
+        delay_sec=(
+            pl.col("received_at") - pl.col(BEACON_TIME_COLUMN)
+        ).dt.total_microseconds()
+        / 1e6,
+    )
+
+
+def beacon_receive_delay_medians(
+    beacons: pl.DataFrame, *, every: timedelta
+) -> pl.DataFrame:
+    """Median of `received_at - BEACON_TIME_COLUMN` (seconds) per `every`-wide
+    window of onboard-clock time and per `last_time_sync_source`, over the
+    live beacons in `beacons` (see `_live_receive_delays`).
+
+    That's the correction to `+=` onto the satellite's clock to match the
+    ground's (plus downlink/decode latency, which pushes it slightly
+    positive): negative means the satellite clock is ahead.
+
+    One row per non-empty (window, source) pair (`window_start`,
+    `time_sync_source`, `median_delay_sec`, `beacon_count`), oldest first; a
+    window where the source changed has a row per source. Beacons without a
+    source are `"UNKNOWN"`. A median, since `received_at` is only a best
+    guess for some decoders (see the module docstring), which shows up as
+    outliers of several minutes.
+    """
+    live = _live_receive_delays(beacons)
+    if live.is_empty():
+        return pl.DataFrame(
+            schema={
+                "window_start": _BEACON_TIME_DTYPE,
+                "time_sync_source": pl.String,
+                "median_delay_sec": pl.Float64,
+                "beacon_count": pl.UInt32,
+            }
+        )
+    return (
+        live.select(BEACON_TIME_COLUMN, "time_sync_source", "delay_sec")
+        .sort(BEACON_TIME_COLUMN)
+        .group_by_dynamic(BEACON_TIME_COLUMN, every=every, group_by="time_sync_source")
+        .agg(
+            median_delay_sec=pl.col("delay_sec").median(),
+            beacon_count=pl.len(),
+        )
+        .rename({BEACON_TIME_COLUMN: "window_start"})
+        .select(
+            "window_start",
+            "time_sync_source",
+            "median_delay_sec",
+            pl.col("beacon_count").cast(pl.UInt32),
+        )
+        .sort("window_start", "time_sync_source")
+    )
+
+
+def v5plus_receive_delay_vs_time_since_sync(beacons: pl.DataFrame) -> pl.DataFrame:
+    """Each live v5+ beacon in `beacons` (see `_live_receive_delays`) with
+    its `received_at - BEACON_TIME_COLUMN` (`delay_sec`, the correction to
+    `+=` onto the satellite's clock) against how long since that clock was
+    last synced (`time_since_sync_sec`), keyed by `time_sync_source` and
+    `obc_active_oscillator_MHz` (`oscillator_mhz`) -- i.e. how fast each
+    clock source drifts.
+
+    Only v5+ beacons report the time since sync. Ones at its clamp
+    (`_TIME_SINCE_SYNC_CLAMP_SEC`) are left out, since their true x is
+    unknown. One row per beacon (`BEACON_TIME_COLUMN`, `time_sync_source`,
+    `oscillator_mhz`, `time_since_sync_sec`, `delay_sec`), oldest first.
+    """
+    schema = pl.Schema(
+        {
+            BEACON_TIME_COLUMN: _BEACON_TIME_DTYPE,
+            "time_sync_source": pl.String(),
+            "oscillator_mhz": pl.Int64(),
+            "time_since_sync_sec": pl.Int64(),
+            "delay_sec": pl.Float64(),
+        }
+    )
+    live = _live_receive_delays(beacons)
+    if live.is_empty() or "duration_since_last_time_sync_sec" not in live.columns:
+        return pl.DataFrame(schema=schema)
+    oscillator = (
+        pl.col("obc_active_oscillator_MHz")
+        if "obc_active_oscillator_MHz" in live.columns
+        else pl.lit(None)
+    )
+    return (
+        live.filter(
+            (pl.col("packet_type") == "BEACON_EXTENDED_V5PLUS")
+            & (pl.col("duration_since_last_time_sync_sec") < _TIME_SINCE_SYNC_CLAMP_SEC)
+        )
+        .select(
+            BEACON_TIME_COLUMN,
+            "time_sync_source",
+            oscillator_mhz=oscillator,
+            time_since_sync_sec=pl.col("duration_since_last_time_sync_sec"),
+            delay_sec="delay_sec",
+        )
+        .cast(schema)
+        .sort(BEACON_TIME_COLUMN)
+    )
