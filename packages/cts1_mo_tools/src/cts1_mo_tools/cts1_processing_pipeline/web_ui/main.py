@@ -170,9 +170,9 @@ def _build_pages(args: Args) -> None:  # noqa: C901
         build_satellite_events_page(args.data_dir)
 
     @ui.page("/mpi-data", title=_page_title("/mpi-data"))
-    def mpi_data_page() -> None:
+    def mpi_data_page(collection: str | None = None) -> None:
         _nav()
-        build_mpi_data_page(args.data_dir)
+        build_mpi_data_page(args.data_dir, collection=collection)
 
     @ui.page("/file-reassembler", title=_page_title("/file-reassembler"))
     def file_reassembler_page() -> None:
