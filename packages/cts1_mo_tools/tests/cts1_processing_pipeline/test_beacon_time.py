@@ -15,6 +15,7 @@ from cts1_mo_tools.cts1_processing_pipeline.web_ui.data import (
     ATTITUDE_MODE_COLUMNS,
     BEACON_TIME_COLUMN,
     latest_beacons,
+    latest_friendly_message,
     latest_local_max_pending_tcmd_count,
     load_attitude_window,
     load_beacon_window,
@@ -278,3 +279,80 @@ def test_dedupe_prefers_earliest_received_among_equals(tmp_path: Path) -> None:
     )
     df = load_beacon_window(path, since=_NOW - timedelta(hours=2))
     assert df["name"].to_list() == ["earlier"]
+
+
+def _with_message(row: dict[str, object], message: str | None) -> dict[str, object]:
+    return {**row, "friendly_message": message}
+
+
+def test_friendly_message_from_the_beacon_itself(tmp_path: Path) -> None:
+    t = _NOW - timedelta(hours=1)
+    path = _write(
+        tmp_path,
+        [
+            _with_message(
+                _beacon("old", beacon_time=t - timedelta(minutes=5), received_at=_NOW),
+                "older",
+            ),
+            _with_message(
+                _beacon(
+                    "b", beacon_time=t, received_at=_NOW, packet_type="BEACON_BASIC"
+                ),
+                "hello",
+            ),
+        ],
+    )
+    assert latest_friendly_message(path, at=t) == ("hello", t)
+
+
+def test_friendly_message_filled_forward_up_to_30_minutes(tmp_path: Path) -> None:
+    t = _NOW - timedelta(hours=1)
+    basic_time = t - timedelta(minutes=20)
+    path = _write(
+        tmp_path,
+        [
+            _with_message(
+                _beacon(
+                    "basic",
+                    beacon_time=basic_time,
+                    received_at=_NOW,
+                    packet_type="BEACON_BASIC",
+                ),
+                "hello",
+            ),
+            # The displayed v5 beacon: no friendly message.
+            _with_message(_beacon("v5", beacon_time=t, received_at=_NOW), None),
+            # Newer than the displayed beacon: not "filled forward" onto it.
+            _with_message(
+                _beacon(
+                    "newer",
+                    beacon_time=t + timedelta(minutes=1),
+                    received_at=_NOW,
+                    packet_type="BEACON_BASIC",
+                ),
+                "from the future",
+            ),
+        ],
+    )
+    assert latest_friendly_message(path, at=t) == ("hello", basic_time)
+
+
+def test_friendly_message_not_filled_forward_past_30_minutes(tmp_path: Path) -> None:
+    basic_time = _NOW - timedelta(hours=1)
+    path = _write(
+        tmp_path,
+        [
+            _with_message(
+                _beacon(
+                    "basic",
+                    beacon_time=basic_time,
+                    received_at=_NOW,
+                    packet_type="BEACON_BASIC",
+                ),
+                "hello",
+            ),
+        ],
+    )
+    at = basic_time + timedelta(minutes=29)
+    assert latest_friendly_message(path, at=at) == ("hello", basic_time)
+    assert latest_friendly_message(path, at=basic_time + timedelta(minutes=31)) is None

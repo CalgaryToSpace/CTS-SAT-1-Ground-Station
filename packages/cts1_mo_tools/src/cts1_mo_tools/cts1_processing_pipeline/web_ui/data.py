@@ -29,6 +29,7 @@ __all__ = [
     "adcs_error_states",
     "eps_channel_states",
     "latest_beacons",
+    "latest_friendly_message",
     "latest_local_max_pending_tcmd_count",
     "load_attitude_window",
     "load_beacon_window",
@@ -113,6 +114,10 @@ _CACHE_TTL_SECONDS = 30
 # beacon chart/card/state table is keyed on it.
 BEACON_TIME_COLUMN = "utc_time"
 _BEACON_TIME_DTYPE = pl.Datetime("us", "UTC")
+
+# How long a beacon's friendly message is filled forward onto later beacons
+# that don't carry one (v5+ extended beacons replace it with data fields).
+FRIENDLY_MESSAGE_FILL_FORWARD = timedelta(minutes=30)
 
 # Beacons claiming to be from further in the future than this are clock
 # glitches (or bit errors); they'd otherwise pin "latest beacon" forever.
@@ -395,6 +400,38 @@ def latest_beacons(
     if lf is None:
         return pl.DataFrame()
     return newest_rows(lf, n, column=BEACON_TIME_COLUMN)
+
+
+@cached(TTLCache(maxsize=3, ttl=_CACHE_TTL_SECONDS))
+def latest_friendly_message(
+    path: Path = DEFAULT_PARQUET_PATH,
+    *,
+    at: datetime,
+    max_age: timedelta = FRIENDLY_MESSAGE_FILL_FORWARD,
+) -> tuple[str, datetime] | None:
+    """The friendly message of the newest beacon carrying one (basic, or
+    v2-v4 extended) timestamped (onboard clock) within `max_age` at/before
+    `at`, and that beacon's onboard time -- i.e. the message filled forward
+    onto a beacon at `at`. None if there's no such beacon.
+
+    Pass the displayed beacon's own time as `at`: if that beacon carries a
+    friendly message, it's the one returned.
+    """
+    lf = _scan_beacons(path, since=at - max_age)
+    if lf is None or "friendly_message" not in lf.collect_schema():
+        return None
+    df = newest_rows(
+        lf.filter(
+            pl.col("friendly_message").is_not_null()
+            & (pl.col(BEACON_TIME_COLUMN) <= at)
+        ).select(BEACON_TIME_COLUMN, "friendly_message"),
+        1,
+        column=BEACON_TIME_COLUMN,
+    )
+    if df.is_empty():
+        return None
+    row = df.row(0, named=True)
+    return row["friendly_message"], row[BEACON_TIME_COLUMN]
 
 
 def latest_local_max_pending_tcmd_count(

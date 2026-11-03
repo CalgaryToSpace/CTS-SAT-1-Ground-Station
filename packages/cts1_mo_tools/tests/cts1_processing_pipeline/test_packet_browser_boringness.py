@@ -43,6 +43,42 @@ _CASES = [
     ("gnss_bestxyzb_ring_blob_v1 FAILED", INTERESTING),
     ("gnss_bestxyzb_ring_blob_v1 err=-2", INTERESTING),
     ("something gnss_bestxyzb_ring_blob_v1", INTERESTING),
+    (
+        "extended_beacon_blob_v5 success, store=OK, cursor=r0/146, stored=146, "
+        "store_fails=0, history_sent=0/0",
+        BORING,
+    ),
+    (
+        "extended_beacon_blob_v5 success, store=OK, cursor=r19/3 (wrapped), "
+        "stored=3600, store_fails=2, history_sent=5/5 (mpi_active)",
+        BORING,
+    ),
+    (
+        "extended_beacon_blob_v5 success, store=OK, cursor=r0/146, stored=146, "
+        "store_fails=0, history_sent=3/5",
+        INTERESTING,
+    ),
+    (
+        "extended_beacon_blob_v5 success, store=LFS_NOT_MOUNTED, cursor=r0/0, "
+        "stored=0, store_fails=1, history_sent=0/0",
+        INTERESTING,
+    ),
+    (
+        "extended_beacon_blob_v5 success, store=LFS_WRITE_FAILED, cursor=r0/3, "
+        "stored=3, store_fails=1, history_sent=0/0",
+        INTERESTING,
+    ),
+    (
+        "extended_beacon_blob_v5 success, store=OK, cursor=r0/146, stored=146, "
+        "store_fails=0, history_sent=0/0, 1 duplicate rerun(s) cancelled",
+        INTERESTING,
+    ),
+    (
+        "extended_beacon_blob_v5 error: peripheral comms error count: 2 "
+        "(PERIPHERAL_COMMS_FAILURES), store=OK, cursor=r0/146, stored=146, "
+        "store_fails=0, history_sent=0/0",
+        INTERESTING,
+    ),
     ("hello", INTERESTING),
     (None, INTERESTING),
 ]

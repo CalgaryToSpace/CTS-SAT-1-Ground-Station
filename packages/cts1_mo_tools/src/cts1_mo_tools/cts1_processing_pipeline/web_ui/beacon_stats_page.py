@@ -24,7 +24,7 @@ from nicegui import run, ui
 from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
     pipeline as step_3_pipeline,
 )
-from cts1_mo_tools.time_str import age_str
+from cts1_mo_tools.time_str import age_str, duration_str
 
 from . import data as beacon_data
 from . import uplinks
@@ -89,12 +89,23 @@ class _LiveData:
     latest_extended: pl.DataFrame
     local_max_pending: tuple[int, datetime] | None
     latest_uplink: uplinks.FinishedUplink | None
+    # From the latest beacon, or filled forward from a recent earlier one.
+    friendly_message: tuple[str, datetime] | None
 
 
 def _load_live_data(path: Path) -> _LiveData:
     """Blocking -- run it via `run.io_bound`."""
+    latest = beacon_data.latest_beacons(path, n=1)
+    friendly_message = (
+        None
+        if latest.is_empty()
+        else beacon_data.latest_friendly_message(
+            path, at=latest[beacon_data.BEACON_TIME_COLUMN][0]
+        )
+    )
     return _LiveData(
-        latest=beacon_data.latest_beacons(path, n=1),
+        latest=latest,
+        friendly_message=friendly_message,
         latest_extended=beacon_data.latest_beacons(
             path, n=1, packet_types=beacon_data.BEACON_EXTENDED_PACKET_TYPES
         ),
@@ -190,10 +201,30 @@ def _power_channels_card(latest: pl.DataFrame, latest_extended: pl.DataFrame) ->
             )
 
 
+def _friendly_message_label(
+    row: dict[str, Any], friendly_message: tuple[str, datetime] | None
+) -> None:
+    """The friendly message for `row`'s beacon -- its own, or filled forward
+    from the latest earlier beacon carrying one (see
+    `beacon_data.latest_friendly_message`), saying so when it is.
+    """
+    if friendly_message is None:
+        return
+    message, message_time = friendly_message
+    label = ui.label(message).classes("text-sm italic")
+    lag = row[beacon_data.BEACON_TIME_COLUMN] - message_time
+    if lag > timedelta(0):
+        label.tooltip(
+            f"From an earlier beacon ({message_time:%Y-%m-%d %H:%M:%S} UTC, "
+            f"{duration_str(lag)} before this one)"
+        )
+
+
 def _latest_beacon_card(
     latest: pl.DataFrame,
     local_max_pending: tuple[int, datetime] | None,
     latest_uplink: uplinks.FinishedUplink | None,
+    friendly_message: tuple[str, datetime] | None,
 ) -> None:
     with ui.card().classes("w-full"):
         if latest.is_empty():
@@ -207,7 +238,7 @@ def _latest_beacon_card(
                     "text-xl font-bold"
                 )
                 ui.label(_beacon_time_caption(row)).classes("text-caption text-grey")
-            ui.label(row.get("friendly_message") or "").classes("text-sm italic")
+            _friendly_message_label(row, friendly_message)
 
         stats = [
             ("Satellite", row.get("satellite_name")),
@@ -317,10 +348,6 @@ def _v5plus_stats(row: dict[str, Any]) -> list[tuple[str, Any]]:
         (
             "Time Since Time Sync",
             _format_uptime(row.get("duration_since_last_time_sync_sec")),
-        ),
-        (
-            "Bulk Downlink File (SHA256 prefix)",
-            row.get("bulk_downlink_file_path_sha256_prefix") or "None",
         ),
     ]
 
@@ -480,7 +507,12 @@ def build_beacon_stats_page(data_dir: Path, hours: float) -> None:
                 "pipeline (step_1, step_2, step_3) first."
             ).classes("text-lg text-warning")
             return
-        _latest_beacon_card(live.latest, live.local_max_pending, live.latest_uplink)
+        _latest_beacon_card(
+            live.latest,
+            live.local_max_pending,
+            live.latest_uplink,
+            live.friendly_message,
+        )
         _latest_extended_beacon_card(live.latest_extended)
         _power_channels_card(live.latest, live.latest_extended)
 
