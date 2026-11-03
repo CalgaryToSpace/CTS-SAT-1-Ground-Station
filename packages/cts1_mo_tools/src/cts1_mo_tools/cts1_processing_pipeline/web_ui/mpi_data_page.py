@@ -29,7 +29,7 @@ from cts1_mo_tools.time_str import duration_str
 from . import collection_timeline, mpi_collections
 from .charts import collection_timeline_option
 from .layout import page_shell
-from .mpi_strip_view import MpiStripDialog, collection_key
+from .mpi_strip_view import collection_key, vis_page_url
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -67,7 +67,7 @@ def _collection_timeline_card(timeline: pl.DataFrame | None) -> None:
 # above the columns', so it's clear which come from the satellite's on-board
 # analysis of the file and which from the frames actually downlinked.
 _COLLECTION_COLUMN_GROUPS: tuple[tuple[str, tuple[tuple[str, str, bool], ...]], ...] = (
-    ("", (("_strip", "Strip", False),)),
+    ("", (("_strip", "Vis", False),)),
     (
         "Collection",
         (
@@ -151,13 +151,13 @@ _COLLECTION_HEADER_SLOT = (
     "</q-tr>"
 )
 
-# A button opening the collection's frames as a strip (see `mpi_strip_view`),
-# for a collection with any frames downlinked.
+# A link to the collection's frames as a strip, on the MPI Vis page (see
+# `mpi_strip_view`), for a collection with any frames downlinked.
 _STRIP_CELL_SLOT = (
     '<q-td :props="props">'
     '<q-btn v-if="props.row.frames_present" flat round dense icon="view_week" '
-    "@click=\"$parent.$emit('strip', props.row._row_index)\">"
-    "<q-tooltip>View its frames as a strip</q-tooltip></q-btn>"
+    'type="a" :href="props.row._strip_href">'
+    "<q-tooltip>View its frames in MPI Vis</q-tooltip></q-btn>"
     "</q-td>"
 )
 
@@ -367,7 +367,6 @@ def _export_buttons(collections: pl.DataFrame) -> None:
 
 
 def _collections_card(
-    strip_dialog: MpiStripDialog,
     collections: pl.DataFrame | None,
     analyses: pl.DataFrame | None,
 ) -> None:
@@ -411,6 +410,9 @@ def _collections_card(
                 "_temperature_range": _temperature_range_cell(row),
                 "_time_sync_age": _time_sync_age_cell(row),
                 "_downlinked_percent": mpi_collections.downlinked_percent_text(row),
+                "_strip_href": vis_page_url(
+                    collection_key(row["collection_started_at"])
+                ),
                 "_row_index": i,
             }
             for i, row in enumerate(collection_rows)
@@ -422,13 +424,7 @@ def _collections_card(
         table.add_slot("header", _COLLECTION_HEADER_SLOT)
         table.add_slot(f"body-cell-{_DETAILS_COLUMN}", _DETAILS_CELL_SLOT)
         table.add_slot("body-cell-_strip", _STRIP_CELL_SLOT)
-        # Both events' arg is the row's `_row_index`.
-        table.on(
-            "strip",
-            lambda e: strip_dialog.show(
-                collection_key(collection_rows[e.args]["collection_started_at"])
-            ),
-        )
+        # The event's arg is the row's `_row_index`.
         table.on(
             "show_analyses",
             lambda e: _show_analyses(collection_rows[e.args], analyses),
@@ -452,13 +448,7 @@ def _load_collections_data(data_dir: Path) -> _CollectionsData:
     )
 
 
-def build_mpi_data_page(data_dir: Path, *, collection: str | None = None) -> None:
-    """`collection`: a `collection_key` to open the strip view at, once the
-    collections have loaded -- from the URL, see `mpi_strip_view`.
-    """
-    strip_dialog = MpiStripDialog(data_dir)
-    # Only on first load: a later Refresh shouldn't reopen a closed dialog.
-    initial_collection = collection
+def build_mpi_data_page(data_dir: Path) -> None:
 
     # The timeline and the collections table load and render independently,
     # so the (small, quick) table doesn't wait on the (big) timeline.
@@ -469,7 +459,6 @@ def build_mpi_data_page(data_dir: Path, *, collection: str | None = None) -> Non
     @ui.refreshable
     def collections_content(collections_data: _CollectionsData | None) -> None:
         _collections_card(
-            strip_dialog,
             collections_data and collections_data.collections,
             collections_data and collections_data.analyses,
         )
@@ -486,16 +475,10 @@ def build_mpi_data_page(data_dir: Path, *, collection: str | None = None) -> Non
             timeline_content.refresh(timeline)
 
     async def _reload_collections() -> None:
-        nonlocal initial_collection
         collections_data = await run.io_bound(_load_collections_data, data_dir)
         if collections_data is None:
             return
         collections_content.refresh(collections_data)
-        strip_dialog.set_collections(collections_data.collections)
-        if initial_collection:
-            key, initial_collection = initial_collection, None
-            # The URL already names it -- don't push it again.
-            await strip_dialog.show(key, push_url=False)
 
     async def _reload() -> None:
         await asyncio.gather(_reload_timeline(), _reload_collections())

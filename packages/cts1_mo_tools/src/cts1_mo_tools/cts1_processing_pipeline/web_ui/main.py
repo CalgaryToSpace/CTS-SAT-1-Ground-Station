@@ -4,7 +4,7 @@ A NiceGUI dashboard over `everything_decoded.parquet` (step 3's output):
 recent beacon(s) at a glance, plus line/scatter charts for every field in
 the basic and extended beacon packets, grouped by subsystem -- see
 `beacon_stats_page`, `packet_browser_page`, `satellite_events_page`,
-`mpi_data_page`, `file_reassembler_page`, `overpasses_page`,
+`mpi_data_page`, `mpi_strip_view`, `file_reassembler_page`, `overpasses_page`,
 `pipeline_status_page`, and `export_page` for the individual pages.
 
 Usage (uv):
@@ -26,6 +26,7 @@ from pathlib import Path
 
 import tyro
 import uvicorn.config
+from fastapi.responses import RedirectResponse
 from nicegui import app, ui
 
 from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate import (
@@ -37,6 +38,7 @@ from .export_page import build_export_page
 from .export_raw import register_raw_export_route
 from .file_reassembler_page import build_file_reassembler_page
 from .mpi_data_page import build_mpi_data_page
+from .mpi_strip_view import MPI_VIS_PATH, build_mpi_vis_page, vis_page_url
 from .overpasses_page import build_overpasses_page
 from .packet_browser_page import build_packet_browser_page
 from .pipeline_status_page import build_pipeline_status_page
@@ -99,6 +101,7 @@ NAV_LINKS = (
     ("Browse Packets", "/browse-packets"),
     ("Satellite Events", "/satellite-events"),
     ("MPI Data", "/mpi-data"),
+    ("MPI Vis", MPI_VIS_PATH),
     ("File Reassembler", "/file-reassembler"),
     ("Overpasses", "/overpasses"),
     ("Pipeline Status", "/pipeline-status"),
@@ -170,9 +173,18 @@ def _build_pages(args: Args) -> None:  # noqa: C901
         build_satellite_events_page(args.data_dir)
 
     @ui.page("/mpi-data", title=_page_title("/mpi-data"))
-    def mpi_data_page(collection: str | None = None) -> None:
+    def mpi_data_page(collection: str | None = None) -> RedirectResponse | None:
+        if collection:
+            # The strip view used to open over this page, at this URL.
+            return RedirectResponse(vis_page_url(collection))
         _nav()
-        build_mpi_data_page(args.data_dir, collection=collection)
+        build_mpi_data_page(args.data_dir)
+        return None
+
+    @ui.page(MPI_VIS_PATH, title=_page_title(MPI_VIS_PATH))
+    def mpi_vis_page(collection: str | None = None) -> None:
+        _nav()
+        build_mpi_vis_page(args.data_dir, collection=collection)
 
     @ui.page("/file-reassembler", title=_page_title("/file-reassembler"))
     def file_reassembler_page() -> None:
