@@ -139,3 +139,35 @@ def test_prepared_pixels_line_up_by_pixel_index() -> None:
     )
     # Bands with no column at all are all NaN.
     assert np.isnan(prepared.band_values[-1]).all()
+
+
+def test_tiles_split_the_strip_and_fit_together() -> None:
+    frames = _frames(list(range(10)))
+    whole = mpi_strip.render_strip(frames, zoom=2)
+    assert whole is not None
+    prepared = mpi_strip.prepare_frames(frames)
+    assert prepared is not None
+    tiled = mpi_strip.render_prepared(prepared, zoom=2, tile_width=8)
+    assert tiled.tile_widths == (8, 8, 4)
+    images = [Image.open(io.BytesIO(png)) for png in tiled.tiles]
+    assert [image.size[0] for image in images] == [8, 8, 4]
+    joined = np.concatenate([np.asarray(image) for image in images], axis=1)
+    np.testing.assert_array_equal(joined, np.asarray(Image.open(io.BytesIO(whole.png))))
+
+
+def test_max_width_averages_columns_and_maps_back() -> None:
+    # 10 frames, then a gap of 2 missing frames, then 3 more: 15 columns.
+    prepared = mpi_strip.prepare_frames(_frames([*range(10), 12, 13, 14]))
+    assert prepared is not None
+    strip = mpi_strip.render_prepared(prepared, zoom=4, max_width=5)
+    assert (strip.width, strip.zoom, strip.bin_columns) == (5, 1, 3)
+    full = np.asarray(
+        Image.open(io.BytesIO(mpi_strip.render_prepared(prepared).png)), dtype=float
+    )
+    shrunk = np.asarray(Image.open(io.BytesIO(strip.png)), dtype=float)
+    # Opaque frames average plainly.
+    np.testing.assert_allclose(shrunk[:, 0], full[:, 0:3].mean(axis=1), atol=0.5)
+    # Image pixel 3 covers columns 9..11; just past its middle is column 10.
+    column = strip.column_at(3.5)
+    assert column is not None
+    assert (column.kind, column.frame_counter) == ("missing", 10)

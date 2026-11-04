@@ -14,6 +14,7 @@ __all__ = [
     "BANDS",
     "BAND_HEIGHT",
     "INTENSITY_GRADIENT_CSS",
+    "TILE_WIDTH",
     "VALUE_GRADIENT_CSS",
     "Band",
     "BandRange",
@@ -30,6 +31,7 @@ __all__ = [
 ]
 
 import io
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -97,6 +99,12 @@ _BAND_GAP = 4
 _SEPARATOR_COLUMNS = 8
 # Browsers struggle with images much wider than this.
 _MAX_WIDTH = 32_767
+# A strip's split into images (tiles) at most this wide: a GPU-composited
+# browser (e.g. Chrome) can't upload an image wider than its maximum texture
+# size (often 16,384 px) to the GPU, so it falls back to decoding and
+# resampling it in software on every repaint -- unusably slow for a long
+# collection. Well under that, so a tile stays cheap to draw.
+TILE_WIDTH = 4096
 
 _MISSING_RGBA = (128, 128, 128, 80)
 _NO_VALUE_RGBA = (128, 128, 128, 40)
@@ -214,10 +222,16 @@ class BandRange:
 
 @dataclass(frozen=True, slots=True)
 class MpiStrip:
-    png: bytes
-    width: int  # In image pixels, `zoom` per column.
+    # The image, left to right, as PNGs at most `TILE_WIDTH` wide (when
+    # tiled -- see `render_prepared`).
+    tiles: tuple[bytes, ...]
+    tile_widths: tuple[int, ...]  # In image pixels.
+    width: int  # In image pixels: `zoom` per column, or 1 per `bin_columns`.
     height: int
     zoom: int
+    # How many columns each image pixel across averages -- more than 1 when
+    # the strip's been shrunk to a maximum width.
+    bin_columns: int
     columns: list[StripColumn]
     first_pixel_index: int
     pixel_count: int
@@ -230,11 +244,17 @@ class MpiStrip:
     intensity_high: float
 
     @property
+    def png(self) -> bytes:
+        """The whole image -- only when it's in one tile."""
+        (png,) = self.tiles
+        return png
+
+    @property
     def detector_height(self) -> int:
         return self.pixel_count * _PIXEL_ROW_HEIGHT
 
     def column_at(self, image_x: float) -> StripColumn | None:
-        i = int(image_x // self.zoom)
+        i = int(image_x * self.bin_columns // self.zoom)
         return self.columns[i] if 0 <= i < len(self.columns) else None
 
     def pixel_index_at(self, image_y: float) -> int | None:
@@ -404,15 +424,45 @@ def render_strip(
     )
 
 
-def render_prepared(
+def _shrunk(image: npt.NDArray[np.uint8], bin_columns: int) -> npt.NDArray[np.uint8]:
+    """`image` with each run of `bin_columns` columns (the last maybe fewer)
+    averaged into one -- as a browser does, scaling an image down smoothly.
+    Colour's averaged weighted by opacity, so a frame next to a transparent
+    gap keeps its colour, just fainter.
+    """
+    width = int(image.shape[1])
+    starts = np.arange(0, width, bin_columns, dtype=np.intp)
+    counts = np.diff(np.append(starts, width)).astype(np.float64)
+    rgba = image.astype(np.float64)
+    alpha = rgba[..., 3:]
+    alpha_sum = np.add.reduceat(alpha, starts, axis=1)
+    rgb = np.add.reduceat(rgba[..., :3] * alpha, starts, axis=1) / np.maximum(
+        alpha_sum, 1
+    )
+    out = np.concatenate([rgb, alpha_sum / counts[None, :, None]], axis=2)
+    return out.round().astype(np.uint8)
+
+
+def _png(image: npt.NDArray[np.uint8]) -> bytes:
+    buf = io.BytesIO()
+    Image.fromarray(np.ascontiguousarray(image), "RGBA").save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def render_prepared(  # noqa: PLR0913
     prepared: PreparedFrames,
     *,
     zoom: int = 1,
     mode: IntensityMode = "raw",
     intensity_range: IntensityRange = "typical",
+    max_width: int | None = None,
+    tile_width: int | None = None,
 ) -> MpiStrip:
     """`prepared`'s frames as a strip image, `zoom` image pixels across per
-    frame (less, if that would make it too wide to show).
+    frame (less, if that would make it too wide to show) -- or, when that's
+    wider than `max_width`, shrunk to it (or just under), each image pixel
+    across averaging the colours of `bin_columns` columns. Split into tiles
+    at most `tile_width` wide, if given; one image if not.
     """
     columns = prepared.columns
     zoom = max(1, min(zoom, _MAX_WIDTH // len(columns)))
@@ -451,15 +501,25 @@ def render_prepared(
         image[top : top + BAND_HEIGHT, is_frame] = colours
         band_ranges.append(BandRange(band, top, band_low, band_high))
 
-    if zoom > 1:
+    bin_columns = 1
+    if max_width is not None and len(columns) > max_width:
+        zoom = 1
+        bin_columns = math.ceil(len(columns) / max_width)
+        image = _shrunk(image, bin_columns)
+    elif zoom > 1:
         image = np.repeat(image, zoom, axis=1)
-    buf = io.BytesIO()
-    Image.fromarray(image, "RGBA").save(buf, format="PNG")
+    width = image.shape[1]
+    step = tile_width or width
+    tiles = tuple(
+        _png(image[:, start : start + step]) for start in range(0, width, step)
+    )
     return MpiStrip(
-        png=buf.getvalue(),
-        width=image.shape[1],
+        tiles=tiles,
+        tile_widths=tuple(min(step, width - start) for start in range(0, width, step)),
+        width=width,
         height=height,
         zoom=zoom,
+        bin_columns=bin_columns,
         columns=columns,
         first_pixel_index=first_pixel,
         pixel_count=pixel_count,
