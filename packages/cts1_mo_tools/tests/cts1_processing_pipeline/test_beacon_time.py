@@ -192,7 +192,7 @@ def test_v5_fields_charted() -> None:
     option = chart_option(specs["Reaction Wheel Speeds"], df)
     assert option is not None
     assert option["series"][0]["data"][0] == [
-        (_NOW - timedelta(minutes=1)).isoformat(),
+        _ms(_NOW - timedelta(minutes=1)),
         100,
     ]
 
@@ -425,9 +425,9 @@ def test_receive_delay_medians_per_window_and_sync_source(tmp_path: Path) -> Non
     assert option is not None
     # Firmware order (GNSS_UART before EPS_RTC), one series per source.
     assert [(s["name"], s["data"]) for s in option["series"]] == [
-        ("GNSS_UART", [[hour.isoformat(), 4.0, 3]]),
-        ("EPS_RTC", [[hour.isoformat(), -9.0, 1]]),
-        ("UNKNOWN", [[(hour + timedelta(hours=1)).isoformat(), -1.0, 1]]),
+        ("GNSS_UART", [[_ms(hour), 4.0, 3]]),
+        ("EPS_RTC", [[_ms(hour), -9.0, 1]]),
+        ("UNKNOWN", [[_ms(hour + timedelta(hours=1)), -1.0, 1]]),
     ]
 
 
@@ -490,14 +490,14 @@ def test_v5plus_receive_delay_vs_time_since_sync(tmp_path: Path) -> None:
     option = receive_delay_vs_time_since_sync_option(points, title="drift")
     assert option is not None
     assert [(s["name"], s["data"]) for s in option["series"]] == [
-        ("EPS_RTC @ 25 MHz", [[1.0, -5.0, t.isoformat(), 3600]]),
+        ("EPS_RTC @ 25 MHz", [[1.0, -5.0, _ms(t), 3600]]),
         (
             "EPS_RTC @ ? MHz",
             [
                 [
                     round(3660 / 3600, 4),
                     -6.0,
-                    (t + timedelta(minutes=1)).isoformat(),
+                    _ms(t + timedelta(minutes=1)),
                     3660,
                 ]
             ],

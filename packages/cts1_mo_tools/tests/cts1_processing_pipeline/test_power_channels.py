@@ -75,7 +75,7 @@ def test_channel_states_option_splits_on_and_off() -> None:
     on, off = option["series"]
     channels = [c for c in states.columns if c != "utc_time"]
     assert option["yAxis"]["data"] == channels[::-1]
-    assert on["data"] == [[_BASE.isoformat(), "VBATT_STACK"]]
+    assert on["data"] == [[int(_BASE.timestamp() * 1000), "VBATT_STACK"]]
     assert len(off["data"]) == 2 * len(channels) - 1
 
 
