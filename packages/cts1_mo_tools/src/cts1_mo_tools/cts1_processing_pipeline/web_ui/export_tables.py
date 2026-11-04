@@ -61,6 +61,9 @@ from cts1_mo_tools.cts1_processing_pipeline.step_7_fetch_tle_history import (
 from cts1_mo_tools.cts1_processing_pipeline.step_8_summarize_mpi_collections import (
     pipeline as step_8_pipeline,
 )
+from cts1_mo_tools.cts1_processing_pipeline.step_9_clean_mpi_frames import (
+    pipeline as step_9_pipeline,
+)
 
 from . import pipeline_status
 
@@ -259,6 +262,21 @@ TABLE_SPECS: tuple[TableSpec, ...] = (
         filename=step_8_pipeline.ANALYSES_OUTPUT_FILENAME,
         time_column="analysis_started_at",
         has_packet_type=False,
+    ),
+    TableSpec(
+        key="mpi_frames_cleaned",
+        step="Step 9 -- Clean MPI Frames",
+        description=(
+            "mpi_frames, plus each frame's pixels after each of simple_sat_ops' "
+            "MPI cleaning steps (JSON arrays): pixels_clean_step_1 (the "
+            "instrument's background subtraction undone), pixels_clean_step_2 "
+            "(also detrended across the strip) and pixels_clean_step_3 (also "
+            "a local, sliding background subtracted -- fully cleaned)."
+        ),
+        filename=step_9_pipeline.OUTPUT_FILENAME,
+        time_column="collected_at",
+        has_packet_type=False,
+        lineage_columns=("packet_ids",),
     ),
 )
 

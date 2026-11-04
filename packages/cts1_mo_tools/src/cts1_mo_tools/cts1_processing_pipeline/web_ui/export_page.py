@@ -54,6 +54,8 @@ flowchart LR
     reassembled_tcmd_responses --> step8
     step8 --> mpi_collections[("mpi_collections")]
     step8 --> mpi_analyses[("mpi_analyses")]
+    mpi_frames --> step9["Step 9\\nClean MPI Frames"]
+    step9 --> mpi_frames_cleaned[("mpi_frames_cleaned")]
     %% Invisible links holding step 7 (which only step 8 reads) at the far
     %% left with step 0 -- the layout otherwise pulls it right, next to step 8.
     huggingface ~~~ step0

@@ -19,6 +19,7 @@ Usage (uv):
     uv run cts1_processing_pipeline step_6
     uv run cts1_processing_pipeline step_7
     uv run cts1_processing_pipeline step_8
+    uv run cts1_processing_pipeline step_9
     uv run cts1_processing_pipeline parquet_steps
     uv run cts1_processing_pipeline daemon
     uv run cts1_processing_pipeline daemon --start "3 days" --interval 5
@@ -61,6 +62,7 @@ from .step_7_fetch_tle_history import pipeline as step_7_fetch_tle_history
 from .step_8_summarize_mpi_collections import (
     pipeline as step_8_summarize_mpi_collections,
 )
+from .step_9_clean_mpi_frames import pipeline as step_9_clean_mpi_frames
 
 DEFAULT_DATA_DIR = step_0_list_observations.DEFAULT_DATA_DIR
 
@@ -169,8 +171,14 @@ class Step8Args:
 
 
 @dataclass(frozen=True, slots=True)
+class Step9Args:
+    """Step 9: clean mpi_frames' pixels as simple_sat_ops' MPI viewer does
+    (each cleaning step's result a column) into mpi_frames_cleaned."""
+
+
+@dataclass(frozen=True, slots=True)
 class ParquetStepsArgs:
-    """Run every parquet-in-parquet-out step (2-6 and 8) once, in order --
+    """Run every parquet-in-parquet-out step (2-6, 8 and 9) once, in order --
     e.g. to regenerate their outputs after changing one of them. Unlike the
     daemon, this doesn't list, download or fetch anything (steps 0, 1 and
     7): step 8 uses whatever tle_history is already in --data-dir."""
@@ -178,8 +186,8 @@ class ParquetStepsArgs:
 
 @dataclass(frozen=True, slots=True)
 class DaemonArgs:
-    """Daemon: run steps 0-8 continuously -- an initial backfill of
-    `--start`, then a full steps 0-8 rerun every `--interval` minutes."""
+    """Daemon: run steps 0-9 continuously -- an initial backfill of
+    `--start`, then a full steps 0-9 rerun every `--interval` minutes."""
 
     norad_id: Annotated[str, tyro.conf.Positional] = "69015"
     """NORAD catalog ID of the satellite (default: 69015, CTS-SAT-1)."""
@@ -231,6 +239,7 @@ Command = (
     | Annotated[Step6Args, tyro.conf.subcommand(name="step_6", prefix_name=False)]
     | Annotated[Step7Args, tyro.conf.subcommand(name="step_7", prefix_name=False)]
     | Annotated[Step8Args, tyro.conf.subcommand(name="step_8", prefix_name=False)]
+    | Annotated[Step9Args, tyro.conf.subcommand(name="step_9", prefix_name=False)]
     | Annotated[
         ParquetStepsArgs,
         tyro.conf.subcommand(name="parquet_steps", prefix_name=False),
@@ -243,7 +252,15 @@ Command = (
 # ones), by their args type, with their step number -- in the order
 # `parquet_steps` runs them.
 _DATA_DIR_ONLY_STEPS: dict[
-    type[Step2Args | Step3Args | Step4Args | Step5Args | Step6Args | Step8Args],
+    type[
+        Step2Args
+        | Step3Args
+        | Step4Args
+        | Step5Args
+        | Step6Args
+        | Step8Args
+        | Step9Args
+    ],
     tuple[int, Callable[..., None]],
 ] = {
     Step2Args: (2, step_2_deduplicate_packets.run),
@@ -252,6 +269,7 @@ _DATA_DIR_ONLY_STEPS: dict[
     Step5Args: (5, step_5_reassemble_tcmd_responses.run),
     Step6Args: (6, step_6_extract_mpi_frames.run),
     Step8Args: (8, step_8_summarize_mpi_collections.run),
+    Step9Args: (9, step_9_clean_mpi_frames.run),
 }
 
 
@@ -329,7 +347,15 @@ def main() -> None:
             )
         elif isinstance(
             args.command,
-            (Step2Args, Step3Args, Step4Args, Step5Args, Step6Args, Step8Args),
+            (
+                Step2Args,
+                Step3Args,
+                Step4Args,
+                Step5Args,
+                Step6Args,
+                Step8Args,
+                Step9Args,
+            ),
         ):
             _, run = _DATA_DIR_ONLY_STEPS[type(args.command)]
             run(data_dir=args.data_dir)

@@ -1,4 +1,4 @@
-"""Daemon: run steps 0-8 continuously.
+"""Daemon: run steps 0-9 continuously.
 
 Runs steps 0 through 6 once as a backfill of `start` (a duration like "24
 hours" or an ISO 8601 date/datetime -- same syntax as step 0/1's own
@@ -58,6 +58,7 @@ from .step_5_reassemble_tcmd_responses import pipeline as step_5_pipeline
 from .step_6_extract_mpi_frames import pipeline as step_6_pipeline
 from .step_7_fetch_tle_history import pipeline as step_7_pipeline
 from .step_8_summarize_mpi_collections import pipeline as step_8_pipeline
+from .step_9_clean_mpi_frames import pipeline as step_9_pipeline
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -77,6 +78,7 @@ STEP_NAMES = {
     6: "extract MPI frames",
     7: "fetch TLE history",
     8: "summarize MPI collections",
+    9: "clean MPI frames",
 }
 LAST_STEP = max(STEP_NAMES)
 
@@ -99,7 +101,7 @@ def run_all_steps(  # noqa: PLR0913
     reporter: StatusReporter,
     run_label: str,
 ) -> None:
-    """Run steps 0-8 once, publishing which step is in flight as it goes.
+    """Run steps 0-9 once, publishing which step is in flight as it goes.
 
     `start` bounds both step 0's listing and step 1's decoding -- see the
     module docstring.
@@ -142,7 +144,7 @@ def run_all_steps(  # noqa: PLR0913
     # Steps 4, 5 and 6 are independent (all only read step 3's output); they
     # just run one after the other here to keep the daemon single-threaded.
     # Step 7 (fetching the TLE history) doesn't depend on any other step;
-    # step 8 reads the output of steps 5-7, so it goes last.
+    # step 8 reads the output of steps 5-7; step 9 only reads step 6's.
     announce(5)
     step_5_pipeline.run(data_dir=data_dir)
     announce(6)
@@ -151,6 +153,8 @@ def run_all_steps(  # noqa: PLR0913
     step_7_pipeline.run(norad_id=norad_id, data_dir=data_dir)
     announce(8)
     step_8_pipeline.run(data_dir=data_dir)
+    announce(9)
+    step_9_pipeline.run(data_dir=data_dir)
 
     logger.info(f"Finished steps 0-{LAST_STEP} -- {run_label}.")
 
@@ -219,7 +223,7 @@ def run(  # noqa: PLR0913
     tools: tuple[str, ...] | None = None,
     idle_backfill: bool = False,
 ) -> None:
-    """Run steps 0-8 forever: one backfill of `start`, then a rerun every
+    """Run steps 0-9 forever: one backfill of `start`, then a rerun every
     `interval` minutes covering the same span (plus whatever's new).
 
     Args:

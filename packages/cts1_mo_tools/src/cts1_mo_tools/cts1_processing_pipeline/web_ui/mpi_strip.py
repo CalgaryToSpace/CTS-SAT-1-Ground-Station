@@ -13,6 +13,7 @@ from __future__ import annotations
 __all__ = [
     "BANDS",
     "BAND_HEIGHT",
+    "CLEANED_MODE_COLUMNS",
     "INTENSITY_GRADIENT_CSS",
     "TILE_WIDTH",
     "VALUE_GRADIENT_CSS",
@@ -45,6 +46,9 @@ from cts1_mo_tools.cts1_processing_pipeline.step_6_extract_mpi_frames import (
 from cts1_mo_tools.cts1_processing_pipeline.step_8_summarize_mpi_collections import (
     pipeline as step_8_pipeline,
 )
+from cts1_mo_tools.cts1_processing_pipeline.step_9_clean_mpi_frames import (
+    pipeline as step_9_pipeline,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -52,10 +56,22 @@ if TYPE_CHECKING:
 
     import numpy.typing as npt
 
-# What each pixel's colour shows: its raw value, or how far it is above (or
+# What each pixel's colour shows: its raw value; how far it is above (or
 # below) that pixel's median over the collection -- which takes out each
-# pixel's own baseline, so a signal stands out from the background.
-IntensityMode = Literal["raw", "minus_median"]
+# pixel's own baseline, so a signal stands out from the background; or its
+# value after step 1, 2 or 3 of simple_sat_ops' cleaning (from step 9 -- see
+# `step_9_clean_mpi_frames.cleaning`).
+IntensityMode = Literal[
+    "raw", "minus_median", "clean_step_1", "clean_step_2", "clean_step_3"
+]
+# The step 9 column each cleaned mode shows.
+CLEANED_MODE_COLUMNS: dict[IntensityMode, str] = dict(
+    zip(
+        ("clean_step_1", "clean_step_2", "clean_step_3"),
+        step_9_pipeline.CLEANED_PIXEL_COLUMNS,
+        strict=True,
+    )
+)
 # The values mapped onto the colour scale's ends: the 1st to 99.5th
 # percentile of the typical frames' pixels, or the full range. A frame isn't
 # typical when its mean is more than `_TYPICAL_FRAME_MADS` median absolute
@@ -161,12 +177,15 @@ VALUE_GRADIENT_CSS = f"linear-gradient(to right, {', '.join(_VIRIDIS_STOPS)})"
 def load_collection_frames(
     data_dir: Path, collection: dict[str, Any], collections: pl.DataFrame
 ) -> pl.DataFrame:
-    """Every frame (from `mpi_frames.parquet`) in `collection` -- one row of
-    `mpi_collections.parquet`, `collections` being all of them -- oldest
-    frame collection first, then by frame counter. Empty if step 6 hasn't
-    run yet.
+    """Every frame in `collection` -- one row of `mpi_collections.parquet`,
+    `collections` being all of them -- oldest frame collection first, then by
+    frame counter. From step 9's `mpi_frames_cleaned.parquet`, with the
+    cleaned pixels; or, until step 9 has run, step 6's `mpi_frames.parquet`,
+    without them. Empty if neither has.
     """
-    path = data_dir / step_6_pipeline.OUTPUT_FILENAME
+    path = data_dir / step_9_pipeline.OUTPUT_FILENAME
+    if not path.exists():
+        path = data_dir / step_6_pipeline.OUTPUT_FILENAME
     if not path.exists():
         return pl.DataFrame()
     lf = pl.scan_parquet(path)
@@ -250,6 +269,11 @@ class MpiStrip:
         return png
 
     @property
+    def has_pixel_values(self) -> bool:
+        """Whether any frame has a value to colour, in this strip's mode."""
+        return bool(np.isfinite(self.pixel_values).any())
+
+    @property
     def detector_height(self) -> int:
         return self.pixel_count * _PIXEL_ROW_HEIGHT
 
@@ -322,9 +346,15 @@ def _rgba(
 
 def _typical_frames(by_frame: npt.NDArray[np.float64]) -> npt.NDArray[np.bool_]:
     """Which frames (rows of `by_frame`) are typical -- see `IntensityRange`."""
-    means = np.nanmean(by_frame, axis=1)
-    deviations = np.abs(means - np.median(means))
-    return deviations <= _TYPICAL_FRAME_MADS * np.median(deviations)
+    # Frames with no values at all (e.g. ones cleaning couldn't clean) are
+    # left out, rather than making every frame's median NaN.
+    has_values = ~np.isnan(by_frame).all(axis=1)
+    means = np.full(by_frame.shape[0], np.nan)
+    means[has_values] = np.mean(
+        by_frame[has_values], axis=1, where=~np.isnan(by_frame[has_values])
+    )
+    deviations = np.abs(means - np.nanmedian(means))
+    return deviations <= _TYPICAL_FRAME_MADS * np.nanmedian(deviations)
 
 
 def column_count(frames: pl.DataFrame) -> int:
@@ -348,41 +378,31 @@ class PreparedFrames:
     # Each frame's raw pixel values, one row per frame, from
     # `first_pixel_index` -- NaN where a frame has none.
     raw_pixels: npt.NDArray[np.float64]
+    # Laid out likewise, the pixels after each cleaning step, by its
+    # `CLEANED_MODE_COLUMNS` mode -- all NaN when the frames came without
+    # them (step 9 hasn't run yet).
+    cleaned_pixels: dict[IntensityMode, npt.NDArray[np.float64]]
     # Each of `BANDS`' values per frame -- NaN where a frame has none.
     band_values: tuple[npt.NDArray[np.float64], ...]
 
 
-def _pixel_matrix(frames: pl.DataFrame) -> tuple[int, npt.NDArray[np.float64]]:
-    """`frames`' pixels as one row per frame, from the lowest pixel index any
-    frame starts at -- vectorised, rather than a Python loop over frames, as
-    a long collection has thousands.
+def _aligned_pixels(
+    frames: pl.DataFrame,
+    column: str,
+    first_pixel: int,
+    shape: tuple[int, ...],
+) -> npt.NDArray[np.float64]:
+    """`frames[column]`'s pixels laid out like `PreparedFrames.raw_pixels`
+    (`shape`, from `first_pixel`) -- all NaN if `frames` hasn't the column.
     """
-    # A frame with no pixels (null) as an empty list, so each frame's values
-    # in the exploded series are exactly its list's length.
-    pixels = (
-        frames["pixels"]
-        .str.json_decode(pl.List(pl.Int64))
-        .fill_null(pl.Series([[]], dtype=pl.List(pl.Int64)))
-    )
-    lengths = pixels.list.len().to_numpy().astype(np.int64)
-    firsts = frames["first_pixel_index"].to_numpy().astype(np.int64)
-    first_pixel = int(firsts.min())
-    pixel_count = max(1, int((firsts + lengths).max()) - first_pixel)
-    matrix = np.full((frames.height, pixel_count), np.nan)
-    values = (
-        pixels.explode(empty_as_null=False)
-        .cast(pl.Float64)
-        .fill_null(np.nan)
-        .to_numpy()
-    )
-    if len(values):
-        rows = np.repeat(np.arange(frames.height), lengths)
-        # Each value's position within its own frame's list.
-        offsets = np.arange(len(values)) - np.repeat(
-            np.cumsum(lengths) - lengths, lengths
-        )
-        matrix[rows, np.repeat(firsts - first_pixel, lengths) + offsets] = values
-    return first_pixel, matrix
+    out = np.full(shape, np.nan)
+    if column not in frames.columns:
+        return out
+    first, values = step_9_pipeline.pixel_matrix(frames, column)
+    offset = first - first_pixel
+    width = min(values.shape[1], shape[1] - offset)
+    out[:, offset : offset + width] = values[:, :width]
+    return out
 
 
 def prepare_frames(frames: pl.DataFrame) -> PreparedFrames | None:
@@ -391,12 +411,16 @@ def prepare_frames(frames: pl.DataFrame) -> PreparedFrames | None:
     """
     if frames.is_empty():
         return None
-    first_pixel, raw_pixels = _pixel_matrix(frames)
+    first_pixel, raw_pixels = step_9_pipeline.pixel_matrix(frames)
     return PreparedFrames(
         columns=_columns(frames),
         first_pixel_index=first_pixel,
         pixel_count=raw_pixels.shape[1],
         raw_pixels=raw_pixels,
+        cleaned_pixels={
+            mode: _aligned_pixels(frames, column, first_pixel, raw_pixels.shape)
+            for mode, column in CLEANED_MODE_COLUMNS.items()
+        },
         band_values=tuple(
             frames[band.column].cast(pl.Float64).fill_null(np.nan).to_numpy()
             if band.column in frames.columns
@@ -476,7 +500,11 @@ def render_prepared(  # noqa: PLR0913
     by_frame = prepared.raw_pixels
     if mode == "minus_median":
         by_frame = by_frame - np.nanmedian(by_frame, axis=0)
-    if intensity_range == "typical":
+    elif mode in CLEANED_MODE_COLUMNS:
+        by_frame = prepared.cleaned_pixels[mode]
+    if np.isnan(by_frame).all():
+        low = high = 0.0  # Nothing to show, e.g. no frame could be cleaned.
+    elif intensity_range == "typical":
         typical = by_frame[_typical_frames(by_frame)]
         low, high = (float(v) for v in np.nanpercentile(typical, _PERCENTILE_RANGE))
     else:

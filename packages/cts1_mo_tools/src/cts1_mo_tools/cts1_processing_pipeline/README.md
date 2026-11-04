@@ -77,14 +77,20 @@ web UI as two containers sharing that directory.
 * Output: `mpi_analyses.parquet` -- every distinct successful `analyze_mpi_data_*` response (identical re-downlinks kept once), one row each: the `analysis_*` fields below plus the raw `analysis_response_text`, and `analysis_strong_signal_frames_downlinked` (JSON array: for each strong signal, how many frames starting in its `bytes` range were downlinked and recovered during the analysis's `earliest`..`latest`).
 * Output: `mpi_collections.parquet` -- one row per data collection event
 
+### Step 9: Clean MPI frames
+
+* Read `mpi_frames.parquet` from step 6. Only depends on step 6, but runs after step 8.
+* Logic: the MPI cleaning from simple_sat_ops' MPI viewer (`utils/mpi_viewer.c`), in three steps, each building on the one before -- see `step_9_clean_mpi_frames/cleaning.py`. Step 1 undoes the instrument's own background subtraction (which uses a 0 V frame kept every 256 frames, landing frames on a ~2000 DN offset), leaving raw counts. Step 2 detrends each frame by taking off a least-squares line through its first two and last two pixels. Step 3 takes off a local background: the pixel-by-pixel median of the 0 V first frames of the 5 sweeps centred on each sweep. Steps 2 and 3 put the 2000 DN offset back on. Each frame collection is cleaned on its own, and the whole file is recomputed every run, since a frame's cleaned values depend on its neighbours.
+* Output: `mpi_frames_cleaned.parquet` -- `mpi_frames.parquet`'s rows and columns, plus `pixels_clean_step_1`, `pixels_clean_step_2` and `pixels_clean_step_3` (JSON arrays on the same pixel indices as `pixels`; null where a frame has no value at that step). The web UI's MPI Vis page reads this file.
+
 ### Parquet steps
 
-* `cts1_processing_pipeline parquet_steps` runs every parquet-in-parquet-out step (2-6 and 8) once, in order -- e.g. to regenerate their outputs after changing one of them.
+* `cts1_processing_pipeline parquet_steps` runs every parquet-in-parquet-out step (2-6, 8 and 9) once, in order -- e.g. to regenerate their outputs after changing one of them.
 * Unlike the daemon, it doesn't list, download or fetch anything (steps 0, 1 and 7), and runs once rather than continuously. Step 8 uses whatever `tle_history.parquet` is already in `--data-dir`.
 
 ### Daemon
 
-* Runs steps 0-8 continuously instead of one-off: an initial backfill of `--start` (default: 24h), then a rerun of steps 0 through 8 every `--interval` minutes (default: 15).
+* Runs steps 0-9 continuously instead of one-off: an initial backfill of `--start` (default: 24h), then a rerun of steps 0 through 9 every `--interval` minutes (default: 15).
 * `--start` is resolved to an absolute time once, at startup, and every run covers the same span: step 0 only re-lists the tail of the listing windows that haven't settled yet (about the last hour of observations), and step 1 only decodes observations not already recorded in `decoder_runs`. So a SatNOGS observation that was still uploading during one run is picked up by the next.
 * With `--idle-backfill` (or `CTS1_IDLE_BACKFILL=1`), the time between runs is spent backfilling steps 0 and 1 for the history before `--start`, back to the satellite's first observations: one 12h listing window at a time, newest first, picking only windows step 0 hasn't listed or with observations step 1 hasn't decoded. A trigger request or the next scheduled run is honoured between windows. Steps 2-6 pick up the backfilled packets on the next run.
 * Runs until interrupted (Ctrl+C).
