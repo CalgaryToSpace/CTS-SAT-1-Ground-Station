@@ -80,51 +80,54 @@ _ScrollAnchor = tuple[float, float]
 # Time-axis labels closer than this fraction of their usual spacing are
 # skipped, so they don't overlap.
 _MIN_TICK_GAP_FRACTION = 0.7
-_MODES: dict[mpi_strip.IntensityMode, str] = {
+# "Value Processing" choices. `_CLEANED` shows the frames as cleaned by
+# step 9, as far as the "Cleaning Steps Applied" choice (`_CLEAN_STEPS`) says.
+_CLEANED = "cleaned"
+_PROCESSING: dict[str, str] = {
     "raw": "Raw DN",
     "minus_median": "Minus each pixel's median",
-    "clean_step_1": "Clean 1: Unsubtracted",
-    "clean_step_2": "Clean 2: Detrended",
-    "clean_step_3": "Clean 3: Local background",
+    _CLEANED: "Cleaned",
 }
-# How the cleaned values (`clean_step_*` modes) were made -- shown under the
-# controls, collapsed by default.
-_CLEANING_DESCRIPTION = f"""
-The **Clean** views are simple_sat_ops' MPI viewer's cleaning, computed by
-pipeline step 9 (`mpi_frames_cleaned.parquet`). Each step builds on the one
-before it, and each recording is cleaned on its own.
-
-**What the instrument does.** The MPI subtracts a background of its own on
-board. Every 256 frames (16 sweeps), it keeps the frame it takes at the 0 V
-setpoint as its no-ion-signal background. It then takes those counts off
-every frame until its next estimate, landing them on a fixed
-~{step_9_cleaning.PEDESTAL:,.0f} DN offset. The frame it kept is sent as
-measured, about 10x its neighbours: those are the bright vertical stripes in
-the **Raw DN** view.
-
-1. **Unsubtracted.** Each frame gets the last background frame before it
-   added back on, with the {step_9_cleaning.PEDESTAL:,.0f} DN offset taken
-   off. That leaves raw counts, and the stripes go. Frames before a
-   recording's first background frame have nothing to add back, so are left
-   blank. What remains steps between 256-frame blocks, wherever an estimate
-   had gone stale by the end of its block.
-2. **Detrended.** A least-squares straight line through each frame's first
-   two and last two pixels comes off the frame, and the
-   {step_9_cleaning.PEDESTAL:,.0f} DN offset goes back on. This takes out
-   those block steps, and any tilt across the strip with them.
-3. **Local background.** The first frame of each sweep is the 0 V dwell read
-   back, so it holds no ion signal. The pixel-by-pixel median of those first
-   frames over the {step_9_cleaning.BACKGROUND_WINDOW_IMAGES} sweeps centred
-   on each sweep comes off every frame of it, and the
-   {step_9_cleaning.PEDESTAL:,.0f} DN offset goes back on. The result reads on
-   the scale the frames arrived on, but against a background measured a few
-   sweeps away instead of one up to 255 frames stale.
-
-A frame with no value at a step (e.g. no background frame in its window) is
-drawn blank. A frame's column within its sweep comes from the previous
-frame's inner dome target voltage, since a frame's pixels were integrated
-during the previous frame's slot.
-"""
+# The cleaning steps are cumulative, so each choice is a run of them.
+_CLEAN_STEPS: dict[mpi_strip.IntensityMode, str] = {
+    "clean_step_1": "Step 1",
+    "clean_step_2": "Steps 1-2",
+    "clean_step_3": "Steps 1-3",
+}
+_DEFAULT_CLEAN_STEP: mpi_strip.IntensityMode = "clean_step_3"
+_PEDESTAL_TEXT = f"{step_9_cleaning.PEDESTAL:,.0f} DN"
+# The cleaning steps, for the explanation: (name, what it does).
+_CLEANING_STEP_TEXTS: tuple[tuple[str, str], ...] = (
+    (
+        "Undo the instrument's subtraction",
+        "Each frame gets the last background frame before it added back on, "
+        f"and the {_PEDESTAL_TEXT} offset taken off. That leaves raw counts "
+        "(around 18,000-24,000 DN), and the bright stripes go. What's left "
+        "jumps between 256-frame blocks, wherever a background estimate had "
+        "gone stale by the end of its block. Frames before a recording's "
+        "first background frame have nothing to add back, so are blank.",
+    ),
+    (
+        "Detrend each frame",
+        "A least-squares straight line through each frame's first two and "
+        "last two pixels is taken off the frame, and the "
+        f"{_PEDESTAL_TEXT} offset is put back on. This removes the jumps "
+        "between blocks, and any tilt across the frame. The strip's own "
+        "curve isn't a straight line, so the middle pixels still read high "
+        "until step 3.",
+    ),
+    (
+        "Subtract a local background",
+        "Each sweep's first frame is taken at 0 V, so it holds no ion "
+        "signal: a measurement of the background alone. The pixel-by-pixel "
+        "median of those first frames over the "
+        f"{step_9_cleaning.BACKGROUND_WINDOW_IMAGES} sweeps centred on each "
+        f"sweep is taken off every frame in it, and the {_PEDESTAL_TEXT} "
+        "offset is put back on. The result reads on the scale the frames "
+        "arrived on, against a background measured a few sweeps away "
+        "instead of one up to 255 frames old.",
+    ),
+)
 _RANGES: dict[mpi_strip.IntensityRange, str] = {
     "typical": "Scale to typical frames",
     "full": "Scale to all frames",
@@ -132,6 +135,14 @@ _RANGES: dict[mpi_strip.IntensityRange, str] = {
 # Roughly how far apart (in screen pixels) the time axis's labels are.
 _TICK_SPACING_PX = 160
 _LABEL_COLUMN_WIDTH = "17rem"
+# A faint divider between a toggle's adjacent options, which otherwise run
+# together into one line of text. Translucent grey, so it suits dark mode too.
+_TOGGLE_CLASS = "mpi-vis-toggle"
+_TOGGLE_CSS = f"""
+    .{_TOGGLE_CLASS} > .q-btn + .q-btn {{
+        border-left: 1px solid rgba(128, 128, 128, 0.3);
+    }}
+"""
 
 
 def _time_text(value: Any) -> str:
@@ -181,8 +192,8 @@ def _readout_lines(
             text = f"Pixel {pixel}: none"
         elif mode == "minus_median":
             text = f"Pixel {pixel}: {value:+.0f} DN vs its median"
-        elif mode in mpi_strip.CLEANED_MODE_COLUMNS:
-            text = f"Pixel {pixel}: {value:.1f} DN ({_MODES[mode]})"
+        elif mode in _CLEAN_STEPS:
+            text = f"Pixel {pixel}: {value:.1f} DN (cleaned, {_CLEAN_STEPS[mode]})"
         else:
             text = f"Pixel {pixel}: {value:.0f} DN"
         lines.append((text, True))
@@ -556,6 +567,55 @@ def _next_zoom(
     return max(smaller, key=lambda z: scales[z]) if smaller else None
 
 
+def _paragraph(text: str) -> None:
+    ui.label(text).classes("text-sm")
+
+
+def _cleaning_explanation() -> None:
+    """What the Cleaned views show, and how each cleaning step works."""
+    with ui.column().classes("w-full gap-3 p-2"):
+        _paragraph(
+            "The Cleaned views use the MPI cleaning from simple_sat_ops' MPI "
+            "viewer, computed by pipeline step 9 (into "
+            "mpi_frames_cleaned.parquet). The steps are cumulative: "
+            '"Steps 1-2" means step 1, then step 2 on its result. Each '
+            "recording is cleaned on its own."
+        )
+
+        ui.label("What the instrument sends").classes("text-sm font-bold")
+        _paragraph(
+            "The MPI subtracts a background of its own on board. Every 256 "
+            "frames (16 sweeps), it keeps the frame it takes at 0 V as its "
+            "background. It takes that frame's counts off every frame until "
+            "its next estimate, which lands them on a fixed offset of about "
+            f"{_PEDESTAL_TEXT}. The frame it kept is sent as measured, about "
+            "10x its neighbours: the bright vertical stripes in the Raw DN "
+            "view."
+        )
+
+        ui.label("The cleaning steps").classes("text-sm font-bold")
+        with ui.grid(columns="repeat(auto-fit, minmax(16rem, 1fr))").classes(
+            "w-full gap-2"
+        ):
+            for number, (name, text) in enumerate(_CLEANING_STEP_TEXTS, start=1):
+                with ui.card().props("flat bordered").classes("gap-1 p-3"):
+                    ui.label(f"Step {number}").classes(
+                        "text-caption text-grey text-uppercase"
+                    )
+                    ui.label(name).classes("text-sm font-bold")
+                    _paragraph(text)
+
+        ui.label("Blank frames").classes("text-sm font-bold")
+        _paragraph(
+            "A frame with no value at a step is drawn blank, like a frame "
+            "that wasn't received: e.g. one with no 0 V frame in its window "
+            "for step 3. Where a frame sits in its sweep comes from the "
+            "previous frame's inner dome target voltage, as a frame's pixels "
+            "were collected during the previous frame's slot. So a frame "
+            "whose previous frame is missing can't be placed in its sweep."
+        )
+
+
 def _labelled(label: str) -> ui.column:
     """A column with a small caption `label`, for a control placed in it."""
     with ui.column().classes("gap-0") as column:
@@ -685,22 +745,35 @@ class _MpiStripView:
                     with _labelled("Time Scale"):
                         zoom_toggle = ui.toggle(_ZOOMS, value=_DEFAULT_ZOOM)
                     with _labelled("Value Processing"):
-                        mode_toggle = ui.toggle(_MODES, value="raw")
+                        processing_toggle = ui.toggle(_PROCESSING, value="raw")
+                    with _labelled("Cleaning Steps Applied").bind_visibility_from(
+                        processing_toggle, "value", value=_CLEANED
+                    ):
+                        clean_step_toggle = ui.toggle(
+                            _CLEAN_STEPS, value=_DEFAULT_CLEAN_STEP
+                        )
                     with _labelled("Value Scale"):
                         range_toggle = ui.toggle(_RANGES, value="typical")
-                    for toggle in (zoom_toggle, mode_toggle, range_toggle):
-                        toggle.props("dense")
+                    for toggle in (
+                        zoom_toggle,
+                        processing_toggle,
+                        clean_step_toggle,
+                        range_toggle,
+                    ):
+                        toggle.props("dense").classes(_TOGGLE_CLASS)
                 with (
-                    ui.expansion("How the Clean views are made", icon="info")
+                    ui.expansion("How the cleaning works", icon="info", value=False)
                     .props("dense")
                     .classes("w-full border rounded")
+                    .bind_visibility_from(processing_toggle, "value", value=_CLEANED)
                 ):
-                    ui.markdown(_CLEANING_DESCRIPTION).classes("text-sm")
+                    _cleaning_explanation()
                 self._body = ui.column().classes("w-full gap-2")
         self._viewer = _StripViewer(
             body=self._body,
             zoom_toggle=zoom_toggle,
-            mode_toggle=mode_toggle,
+            processing_toggle=processing_toggle,
+            clean_step_toggle=clean_step_toggle,
             range_toggle=range_toggle,
         )
         _install_wheel_handler(self._body)
@@ -846,12 +919,14 @@ class _StripViewer:
         *,
         body: ui.element,
         zoom_toggle: ui.toggle,
-        mode_toggle: ui.toggle,
+        processing_toggle: ui.toggle,
+        clean_step_toggle: ui.toggle,
         range_toggle: ui.toggle,
     ) -> None:
         self._body = body
         self._zoom_toggle = zoom_toggle
-        self._mode_toggle = mode_toggle
+        self._processing_toggle = processing_toggle
+        self._clean_step_toggle = clean_step_toggle
         self._range_toggle = range_toggle
         self._loaded: _LoadedCollection | None = None
         self._strips: dict[_StripKey, mpi_strip.MpiStrip] = {}
@@ -863,8 +938,10 @@ class _StripViewer:
         self._pending_anchor: _ScrollAnchor | None = None
         self._rendering = False
 
-        for toggle in (zoom_toggle, mode_toggle, range_toggle):
+        for toggle in (zoom_toggle, processing_toggle, range_toggle):
             toggle.on_value_change(self.render)
+        # Only changes the strip while it's showing cleaned values.
+        clean_step_toggle.on_value_change(self._on_clean_step_change)
         # Registered now, before `body` reaches the browser: a listener added
         # to an element it already has isn't reliably wired up there.
         body.on(
@@ -895,6 +972,16 @@ class _StripViewer:
         self._pending_anchor = None
         await self.render()
 
+    @property
+    def _mode(self) -> mpi_strip.IntensityMode:
+        """What the strip's colours show, per the two processing toggles."""
+        processing = self._processing_toggle.value
+        return self._clean_step_toggle.value if processing == _CLEANED else processing
+
+    async def _on_clean_step_change(self) -> None:
+        if self._processing_toggle.value == _CLEANED:
+            await self.render()
+
     async def render(self) -> None:
         if self._loaded is None:
             return
@@ -905,7 +992,7 @@ class _StripViewer:
             self._rendering = False
 
     async def _render(self, loaded: _LoadedCollection) -> None:
-        mode = self._mode_toggle.value
+        mode = self._mode
         zoom = None if self._zoom_toggle.value == _FIT else self._zoom_toggle.value
         intensity_range = self._range_toggle.value
         key = (mode, intensity_range, zoom is None)
@@ -992,6 +1079,7 @@ def build_mpi_vis_page(data_dir: Path, *, collection: str | None = None) -> None
     """`collection`: a `collection_key` to open at, from the URL -- else the
     newest collection with any frames downlinked.
     """
+    ui.add_css(_TOGGLE_CSS)
     with page_shell():
         ui.label("MPI Vis").classes("text-2xl font-bold")
         view = _MpiStripView(data_dir)
