@@ -1,7 +1,7 @@
 """Field groupings + ECharts option builders for beacon telemetry.
 
-Every chart is a line series with symbols shown, which reads as both a line
-graph (trend over time) and a scatter graph (each received beacon is a
+Every chart is a line series with (small) symbols shown, which reads as both
+a line graph (trend over time) and a scatter graph (each received beacon is a
 visible dot) at once -- one widget satisfies both without duplicating charts.
 Fields whose decoded value is a category label (an enum string, or a bool)
 get a category y-axis instead of a numeric one, since they aren't really
@@ -399,6 +399,20 @@ BEACON_CHART_GROUPS: list[tuple[str, list[ChartSpec]]] = [
 ]
 
 
+# Tooltip time prefix for `trigger: "item"` charts whose `value[0]` is epoch ms.
+_JS_TOOLTIP_TIME = (
+    "new Date(p.value[0]).toISOString().replace('T', ' ').replace('Z', ' UTC')"
+)
+
+
+def _epoch_ms(df: pl.DataFrame, column: str = BEACON_TIME_COLUMN) -> list[int]:
+    """`df[column]` as epoch milliseconds -- what ECharts' time axis takes
+    natively. Much smaller on the wire, and faster to build and parse, than
+    an ISO string per point.
+    """
+    return df[column].dt.epoch("ms").to_list()
+
+
 def _numeric_series(
     df: pl.DataFrame,
     column: str,
@@ -412,16 +426,16 @@ def _numeric_series(
     if valid_max is not None:
         sub = sub.filter(pl.col(column) <= valid_max)
     return [
-        [ts.isoformat(), value]
-        for ts, value in zip(sub[BEACON_TIME_COLUMN], sub[column], strict=True)
+        [ts, value]
+        for ts, value in zip(_epoch_ms(sub), sub[column].to_list(), strict=True)
     ]
 
 
 def _categorical_series(df: pl.DataFrame, column: str) -> list[list[Any]]:
     sub = df.select(BEACON_TIME_COLUMN, column).drop_nulls()
     return [
-        [ts.isoformat(), str(value)]
-        for ts, value in zip(sub[BEACON_TIME_COLUMN], sub[column], strict=True)
+        [ts, str(value)]
+        for ts, value in zip(_epoch_ms(sub), sub[column].to_list(), strict=True)
     ]
 
 
@@ -440,8 +454,12 @@ def chart_option(spec: ChartSpec, df: pl.DataFrame) -> dict[str, Any] | None:
     #  - no `dataZoom` slider: the slider is its own mini chart + DOM + drag
     #    handlers per instance; `inside` (wheel/pinch/drag-pan on the plot
     #    itself) covers zooming for a fraction of the cost.
-    #  - `large`/`largeThreshold`: switches ECharts to its batched, symbol-
-    #    skipping fast path once a series has enough points to matter.
+    #  - `large`/`largeThreshold` (scatter only -- line series ignore it):
+    #    switches ECharts to its batched fast path once a series has enough
+    #    points to matter.
+    #  - epoch-ms timestamps: see `_epoch_ms`.
+    #  - small symbols: with this many beacons, bigger dots just pile up into
+    #    a solid smear (and cost more to draw).
     if spec.categorical:
         column = available[0]
         data = _categorical_series(df, column)
@@ -452,14 +470,17 @@ def chart_option(spec: ChartSpec, df: pl.DataFrame) -> dict[str, Any] | None:
             "animation": False,
             "title": {"text": spec.title, "textStyle": {"fontSize": 14}},
             "grid": {"left": 110, "right": 20, "top": 40, "bottom": 30},
-            "tooltip": {"trigger": "item"},
+            "tooltip": {
+                "trigger": "item",
+                ":formatter": f"p => {_JS_TOOLTIP_TIME} + '<br>' + p.value[1]",
+            },
             "xAxis": {"type": "time"},
             "yAxis": {"type": "category", "data": categories},
             "dataZoom": [{"type": "inside"}],
             "series": [
                 {
                     "type": "scatter",
-                    "symbolSize": 8,
+                    "symbolSize": 3,
                     "data": data,
                     "color": _SERIES_COLORS[0],
                     "large": True,
@@ -482,13 +503,12 @@ def chart_option(spec: ChartSpec, df: pl.DataFrame) -> dict[str, Any] | None:
                 "yAxisIndex": 1 if column in spec.right_axis_columns else 0,
                 "type": "line",
                 "showSymbol": True,
-                "symbolSize": 5,
+                "symbolSize": 2,
+                "lineStyle": {"width": 1},
                 "connectNulls": False,
                 "data": data,
                 "color": _SERIES_COLORS[i % len(_SERIES_COLORS)],
                 "sampling": "lttb",
-                "large": True,
-                "largeThreshold": 200,
             }
         )
     if not any_data:
@@ -617,12 +637,15 @@ def receive_delay_option(medians: pl.DataFrame, *, title: str) -> dict[str, Any]
             {
                 "name": source,
                 "type": "scatter",
-                "symbolSize": 8,
+                "symbolSize": 4,
                 "data": [
-                    [ts.isoformat(), round(median, 3), count]
-                    for ts, median, count in sub.select(
-                        "window_start", "median_delay_sec", "beacon_count"
-                    ).iter_rows()
+                    [ts, round(median, 3), count]
+                    for ts, median, count in zip(
+                        _epoch_ms(sub, "window_start"),
+                        sub["median_delay_sec"].to_list(),
+                        sub["beacon_count"].to_list(),
+                        strict=True,
+                    )
                 ],
                 "color": _SERIES_COLORS[color_index % len(_SERIES_COLORS)],
             }
@@ -641,8 +664,7 @@ def receive_delay_option(medians: pl.DataFrame, *, title: str) -> dict[str, Any]
         "tooltip": {
             "trigger": "item",
             ":formatter": (
-                "p => new Date(p.value[0]).toISOString().replace('T', ' ')"
-                ".replace('Z', ' UTC') + '<br>sync source: ' + p.seriesName"
+                f"p => {_JS_TOOLTIP_TIME} + '<br>sync source: ' + p.seriesName"
                 " + '<br>median ' + p.value[1].toFixed(1)"
                 " + ' s over ' + p.value[2] + ' beacon(s)'"
             ),
@@ -688,12 +710,15 @@ def receive_delay_vs_time_since_sync_option(
             {
                 "name": f"{source} @ {'?' if mhz is None else mhz} MHz",
                 "type": "scatter",
-                "symbolSize": 6,
+                "symbolSize": 3,
                 "data": [
-                    [round(sec / 3600, 4), round(delay, 3), ts.isoformat(), sec]
-                    for ts, sec, delay in sub.select(
-                        BEACON_TIME_COLUMN, "time_since_sync_sec", "delay_sec"
-                    ).iter_rows()
+                    [round(sec / 3600, 4), round(delay, 3), ts, sec]
+                    for ts, sec, delay in zip(
+                        _epoch_ms(sub),
+                        sub["time_since_sync_sec"].to_list(),
+                        sub["delay_sec"].to_list(),
+                        strict=True,
+                    )
                 ],
                 "color": _SERIES_COLORS[i % len(_SERIES_COLORS)],
                 "large": True,
@@ -759,15 +784,22 @@ def channel_states_option(
     def _points(*, on: bool) -> list[list[Any]]:
         sub = long.filter(pl.col("on") == on)
         return [
-            [ts.isoformat(), channel]
-            for ts, channel in zip(sub[BEACON_TIME_COLUMN], sub["channel"], strict=True)
+            [ts, channel]
+            for ts, channel in zip(
+                _epoch_ms(sub), sub["channel"].to_list(), strict=True
+            )
         ]
 
     return {
         "animation": False,
         "title": {"text": title, "textStyle": {"fontSize": 14}},
         "grid": {"left": 190, "right": 20, "top": 50, "bottom": 30},
-        "tooltip": {"trigger": "item"},
+        "tooltip": {
+            "trigger": "item",
+            ":formatter": (
+                f"p => {_JS_TOOLTIP_TIME} + '<br>' + p.value[1] + ': ' + p.seriesName"
+            ),
+        },
         "legend": {"show": True, "top": 26},
         "xAxis": {"type": "time"},
         # Category axes run bottom-up, so reverse to put the first channel on top.
