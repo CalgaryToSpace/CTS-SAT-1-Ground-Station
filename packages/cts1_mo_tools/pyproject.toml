@@ -10,7 +10,6 @@ dependencies = [
     "loguru",
     "openpyxl",
     "ordered-set",
-    "dearpygui",
     "requests",
     "python-dotenv",
     "polars-reverse-geocode>=0.8.1",
