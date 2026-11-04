@@ -45,6 +45,7 @@ from .layout import page_shell
 from .preview_image_route import preview_image_url
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from datetime import datetime
     from pathlib import Path
 
@@ -63,6 +64,8 @@ _FIT_RENDER_WIDTH_PX = 2560
 _FIT_TICK_COUNT = 10
 # Marks the strip's horizontally-scrolling container, for the wheel handler.
 _SCROLLER_CLASS = "mpi-strip-scroller"
+# Marks the strip's image (its tiles, side by side) inside that container.
+_CANVAS_CLASS = "mpi-strip-canvas"
 # Emitted on the strip's container by Ctrl+scroll -- see `_install_wheel_handler`.
 _WHEEL_ZOOM_EVENT = "strip_wheel_zoom"
 # Where a re-rendered strip should be scrolled to: `(fraction, viewport)`
@@ -238,19 +241,75 @@ def _time_axis(
             ).style(f"left: {left}; border-left: 1px solid; padding-left: 2px")
 
 
-def _strip_body(
+def _strip_canvas(
+    strip: mpi_strip.MpiStrip, filename: str, zoom: int | None
+) -> ui.element:
+    """The strip's image -- its tiles side by side -- at `zoom` screen pixels
+    per column (or fit to the width, for None), with a crosshair that follows
+    the mouse (drawn in the browser, so it never waits on the server).
+    """
+    fit = zoom is None
+    # Sized up front (its height is always 1:1), so the layout -- and the
+    # page's vertical scroll -- doesn't collapse while it loads. Stretched
+    # horizontally only; the mouse readout still maps back to image pixels
+    # on each axis separately.
+    width = "100%" if fit else f"{len(strip.columns) * zoom}px"
+    # Nearest-neighbour, so each frame stays a crisp column. (A fit-width
+    # strip's shrunk to about its shown width by the server, averaging
+    # columns, so it's barely resampled either way.)
+    rendering = "auto" if fit else "pixelated"
+    stem = filename.removesuffix(".png")
+    with (
+        ui.element("div")
+        .classes(f"{_CANVAS_CLASS} relative flex no-wrap")
+        .style(f"width: {width}; height: {strip.height}px; cursor: crosshair")
+    ) as canvas:
+        for i, (png, tile_width) in enumerate(
+            zip(strip.tiles, strip.tile_widths, strict=True)
+        ):
+            url = preview_image_url(png, "image/png", f"{stem}_{i}.png")
+            ui.element("img").props(f'src="{url}" draggable="false"').style(
+                f"display: block; flex: none; height: 100%; "
+                f"width: {tile_width / strip.width * 100:.6f}%; "
+                f"image-rendering: {rendering}; pointer-events: none"
+            )
+        line = "position: absolute; pointer-events: none; display: none; "
+        line += "background: rgba(255, 255, 255, 0.5)"
+        cross_x = ui.element("div").style(f"{line}; top: 0; bottom: 0; width: 1px")
+        cross_y = ui.element("div").style(f"{line}; left: 0; right: 0; height: 1px")
+    canvas.on(
+        "mousemove",
+        js_handler=f"""(e) => {{
+            const r = getHtmlElement({canvas.id}).getBoundingClientRect();
+            const x = getHtmlElement({cross_x.id}), y = getHtmlElement({cross_y.id});
+            x.style.left = (e.clientX - r.left) + 'px';
+            y.style.top = (e.clientY - r.top) + 'px';
+            x.style.display = y.style.display = 'block';
+        }}""",
+    )
+    canvas.on(
+        "mouseleave",
+        js_handler=f"""() => {{
+            getHtmlElement({cross_x.id}).style.display = 'none';
+            getHtmlElement({cross_y.id}).style.display = 'none';
+        }}""",
+    )
+    return canvas
+
+
+def _strip_body(  # noqa: PLR0913
     strip: mpi_strip.MpiStrip,
     frames: list[dict[str, Any]],
     mode: mpi_strip.IntensityMode,
     filename: str,
     zoom: int | None,
+    on_download: Callable[[], Awaitable[None]],
 ) -> ui.element:
     """Build the strip, its legends and readout, at `zoom` screen pixels per
     column -- the image stretched to that, pixelated -- or fit to the
     width (None); returns the strip's horizontally-scrolling container.
     """
     fit = zoom is None
-    url = preview_image_url(strip.png, "image/png", filename)
     with ui.row().classes("w-full items-center gap-6"):
         suffix = " vs median" if mode == "minus_median" else ""
         _legend(
@@ -264,11 +323,9 @@ def _strip_body(
                 "background: rgba(128, 128, 128, 0.35); width: 0.75rem; height: 0.75rem"
             )
             ui.label("Frame not received").classes("text-xs")
-        ui.button(
-            "Download PNG",
-            icon="download",
-            on_click=lambda: ui.download.from_url(url, filename),
-        ).props("dense outline")
+        ui.button("Download PNG", icon="download", on_click=on_download).props(
+            "dense outline"
+        )
 
     with ui.row().classes("w-full no-wrap gap-2 items-start"):
         _labels_column(strip)
@@ -279,21 +336,7 @@ def _strip_body(
             )
             .style("flex: 1 1 auto; min-width: 0") as scroller
         ):
-            # Sized up front (its height is always 1:1), so the layout -- and
-            # the page's vertical scroll -- doesn't collapse while it loads.
-            # Stretched horizontally only; the mouse readout still maps back
-            # to image pixels on each axis separately.
-            width = "100%" if fit else f"{len(strip.columns) * zoom}px"
-            # Nearest-neighbour, so each frame stays a crisp column. (A
-            # fit-width strip's rendered wide enough to only ever shrink, and
-            # shrinks smoothly, averaging columns, rather than dropping some.)
-            rendering = "auto" if fit else "pixelated"
-            image = ui.interactive_image(
-                url, events=["mousemove"], cross="rgba(255, 255, 255, 0.5)"
-            ).style(
-                f"width: {width}; height: {strip.height}px; max-width: none; "
-                f"image-rendering: {rendering}"
-            )
+            canvas = _strip_canvas(strip, filename, zoom)
             _time_axis(strip, frames, zoom)
 
     # Tall enough for a full readout (frame, time, pixel, every band, timing),
@@ -313,7 +356,21 @@ def _strip_body(
         if lines is not None:
             readout.set_content(_readout_html(lines))
 
-    image.on("mouse", on_mouse, ["image_x", "image_y"], throttle=0.05)
+    # Only where the mouse is, in image pixels -- the readout's built here,
+    # from data the browser doesn't have.
+    canvas.on(
+        "mousemove",
+        on_mouse,
+        throttle=0.05,
+        js_handler=f"""(e) => {{
+            const r = getHtmlElement({canvas.id}).getBoundingClientRect();
+            if (!r.width || !r.height) return;
+            emit({{
+                image_x: (e.clientX - r.left) * {strip.width} / r.width,
+                image_y: (e.clientY - r.top) * {strip.height} / r.height,
+            }});
+        }}""",
+    )
     return scroller
 
 
@@ -330,7 +387,7 @@ async def _scroll_center_anchor(scroller: ui.element) -> _ScrollAnchor | None:
         fraction = await scroller.client.run_javascript(
             f"""(() => {{
                 const el = getHtmlElement({scroller.id});
-                const img = el && el.querySelector('img');
+                const img = el && el.querySelector('.{_CANVAS_CLASS}');
                 if (!img || !img.clientWidth || el.scrollWidth <= el.clientWidth) {{
                     return null;
                 }}
@@ -354,7 +411,7 @@ def _scroll_to_anchor(scroller: ui.element, anchor: _ScrollAnchor) -> None:
             const start = performance.now();
             const tick = () => {{
                 const el = getHtmlElement({scroller.id});
-                const img = el && el.querySelector('img');
+                const img = el && el.querySelector('.{_CANVAS_CLASS}');
                 if (img && img.clientWidth) {{
                     el.scrollLeft =
                         {fraction} * img.clientWidth - {viewport} * el.clientWidth;
@@ -395,7 +452,7 @@ def _install_wheel_handler(container: ui.element) -> None:
                 let lastZoomAt = 0;
                 root.addEventListener('wheel', (e) => {{
                     const el = e.target.closest('.{_SCROLLER_CLASS}');
-                    const img = el && el.querySelector('img');
+                    const img = el && el.querySelector('.{_CANVAS_CLASS}');
                     if (!img || !img.clientWidth) return;
                     const scale = e.deltaMode === 1 ? 16
                         : e.deltaMode === 2 ? el.clientWidth : 1;
@@ -459,15 +516,10 @@ def _labelled(label: str) -> ui.column:
     return column
 
 
-def _summary_text(collection: dict[str, Any], frames: pl.DataFrame) -> str:
+def _summary_text(frames: pl.DataFrame) -> str:
     recordings = frames["collection_started_at"].n_unique()
     first, last = frames["collected_at"].min(), frames["collected_at"].max()
-    expected = collection.get("frames_expected")
-    parts = [
-        f"{frames.height:,} frame(s) received"
-        + (f" of {expected:,} expected by their counters" if expected else ""),
-        f"{first:%Y-%m-%d} {_time_text(first)} to {_time_text(last)} UTC",
-    ]
+    parts = [f"{first:%Y-%m-%d} {_time_text(first)} to {_time_text(last)} UTC"]
     if recordings > 1:
         parts.append(f"{recordings} recordings, each starting its counter at 0")
     return " · ".join(parts)
@@ -526,7 +578,7 @@ def _load_collection(
     return _LoadedCollection(
         prepared=prepared,
         frame_rows=frames.drop("pixels").to_dicts(),
-        summary=_summary_text(row, frames),
+        summary=_summary_text(frames),
     )
 
 
@@ -591,9 +643,6 @@ class _MpiStripView:
                         range_toggle = ui.toggle(_RANGES, value="typical")
                     for toggle in (zoom_toggle, mode_toggle, range_toggle):
                         toggle.props("dense")
-                    ui.label(
-                        "Over the strip: scroll to pan, Ctrl+scroll to zoom."
-                    ).classes("text-caption text-grey")
                 self._body = ui.column().classes("w-full gap-2")
         self._viewer = _StripViewer(
             body=self._body,
@@ -729,9 +778,8 @@ def _set_url_collection(element: ui.element, key: str, *, replace: bool) -> None
 
 
 # The strip images kept per collection: one per (value processing, value
-# scale, render zoom) -- the render zoom being 1 for the fixed zooms, or the
-# collection's fit-width zoom.
-_StripKey = tuple[str, str, int]
+# scale, fit-width or not) -- every fixed zoom shares one image, stretched.
+_StripKey = tuple[str, str, bool]
 
 
 class _StripViewer:
@@ -806,15 +854,20 @@ class _StripViewer:
     async def _render(self, loaded: _LoadedCollection) -> None:
         mode = self._mode_toggle.value
         zoom = None if self._zoom_toggle.value == _FIT else self._zoom_toggle.value
-        key = (mode, self._range_toggle.value, self._fit_zoom if zoom is None else 1)
+        intensity_range = self._range_toggle.value
+        key = (mode, intensity_range, zoom is None)
         strip = self._strips.get(key)
         if strip is None:
             strip = await run.io_bound(
                 mpi_strip.render_prepared,
                 loaded.prepared,
-                zoom=key[2],
+                zoom=self._fit_zoom if zoom is None else 1,
                 mode=mode,
-                intensity_range=key[1],
+                intensity_range=intensity_range,
+                # Fit-width: no wider than it's worth sending, as the browser
+                # would only shrink it.
+                max_width=_FIT_RENDER_WIDTH_PX if zoom is None else None,
+                tile_width=mpi_strip.TILE_WIDTH,
             )
             if strip is None or loaded is not self._loaded:
                 return  # Server shutting down, or switched collections meanwhile.
@@ -830,10 +883,34 @@ class _StripViewer:
         self._body.clear()
         with self._body:
             self._scroller = _strip_body(
-                strip, loaded.frame_rows, mode, self._filename, zoom
+                strip,
+                loaded.frame_rows,
+                mode,
+                self._filename,
+                zoom,
+                on_download=lambda: self._download(loaded, mode, intensity_range),
             )
         if anchor is not None:
             _scroll_to_anchor(self._scroller, anchor)
+
+    async def _download(
+        self,
+        loaded: _LoadedCollection,
+        mode: mpi_strip.IntensityMode,
+        intensity_range: mpi_strip.IntensityRange,
+    ) -> None:
+        """Download the strip as one PNG, 1 image pixel per column -- only
+        rendered when asked for, as the page itself shows it in tiles.
+        """
+        strip = await run.io_bound(
+            mpi_strip.render_prepared,
+            loaded.prepared,
+            mode=mode,
+            intensity_range=intensity_range,
+        )
+        if strip is not None:
+            with self._body:  # A UI context, for the client to download on.
+                ui.download.content(strip.png, self._filename, "image/png")
 
     def _on_wheel_zoom(self, detail: dict[str, Any]) -> None:
         """Step the zoom in/out at the cursor -- `detail` as dispatched by
@@ -858,11 +935,7 @@ def build_mpi_vis_page(data_dir: Path, *, collection: str | None = None) -> None
     newest collection with any frames downlinked.
     """
     with page_shell():
-        with ui.row().classes("w-full items-center justify-between"):
-            ui.label("MPI Vis").classes("text-2xl font-bold")
-            ui.link("All collections, in detail: MPI Data", "/mpi-data").classes(
-                "text-caption"
-            )
+        ui.label("MPI Vis").classes("text-2xl font-bold")
         view = _MpiStripView(data_dir)
 
     async def _load() -> None:
