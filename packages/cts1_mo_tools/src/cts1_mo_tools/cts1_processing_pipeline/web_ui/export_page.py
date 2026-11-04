@@ -94,7 +94,7 @@ def _parse_range_input(value: str | None) -> datetime | None:
         return None
 
 
-def _tables_section(selected: dict[str, bool]) -> None:
+def _tables_section(selected: dict[str, bool], selected_types: dict[str, bool]) -> None:
     with ui.card().classes("w-full"):
         ui.label("Tables").classes("text-lg font-bold")
         ui.label(
@@ -123,20 +123,44 @@ def _tables_section(selected: dict[str, bool]) -> None:
                             "⚡ direct parquet download", raw_export_url(spec.key)
                         ).classes("text-caption")
                     ui.label(spec.description).classes("text-caption text-grey")
+                    if spec.has_packet_type:
+                        _packet_type_filter(selected_types)
 
 
 def _packet_type_filter(selected_types: dict[str, bool]) -> None:
-    with ui.card().classes("w-full"):
-        ui.label("Packet type filter").classes("text-lg font-bold")
-        with ui.row().classes("gap-4 flex-wrap mt-2"):
-            for packet_type in export_tables.PACKET_TYPES:
+    """Checkboxes picking which packet types a table with a `packet_type`
+    column is filtered to, with one button to select or deselect them all.
+    """
+    checkboxes: list[ui.checkbox] = []
+
+    def _all_selected() -> bool:
+        return all(selected_types.values())
+
+    def _on_change(packet_type: str, value: bool) -> None:  # noqa: FBT001
+        selected_types[packet_type] = value
+        toggle_all.set_text("Deselect all" if _all_selected() else "Select all")
+
+    def _toggle_all() -> None:
+        value = not _all_selected()
+        for checkbox in checkboxes:
+            checkbox.value = value  # Updates `selected_types`, via `_on_change`.
+
+    with ui.column().classes("gap-1 mt-2"):
+        with ui.row().classes("items-center gap-2"):
+            ui.label("Packet type filter").classes("text-sm font-medium")
+            toggle_all = ui.button(
+                "Deselect all" if _all_selected() else "Select all",
+                on_click=_toggle_all,
+            ).props("dense flat no-caps size=sm")
+        with ui.row().classes("gap-x-4 gap-y-0 flex-wrap"):
+            checkboxes.extend(
                 ui.checkbox(
                     packet_type,
                     value=selected_types[packet_type],
-                    on_change=lambda e, pt=packet_type: selected_types.__setitem__(
-                        pt, bool(e.value)
-                    ),
-                )
+                    on_change=lambda e, pt=packet_type: _on_change(pt, bool(e.value)),
+                ).props("dense")
+                for packet_type in export_tables.PACKET_TYPES
+            )
 
 
 def _time_filter_section(time_state: dict[str, str | None]) -> None:
@@ -260,6 +284,9 @@ def build_export_page(data_dir: Path) -> None:
         start = _parse_range_input(time_state["start"])
         end = _parse_range_input(time_state["end"])
         checked_types = [pt for pt, checked in selected_packet_types.items() if checked]
+        if not checked_types and any(spec.has_packet_type for spec in specs):
+            ui.notify("Pick at least one packet type to export.", type="warning")
+            return
         packet_types = (
             checked_types
             if checked_types and len(checked_types) < len(export_tables.PACKET_TYPES)
@@ -309,8 +336,7 @@ def build_export_page(data_dir: Path) -> None:
             ui.label("Pipeline Overview").classes("text-lg font-bold")
             ui.mermaid(PIPELINE_FLOWCHART).classes("w-full")
 
-        _tables_section(selected_tables)
-        _packet_type_filter(selected_packet_types)
+        _tables_section(selected_tables, selected_packet_types)
         _time_filter_section(time_state)
         _options_section(options)
 
