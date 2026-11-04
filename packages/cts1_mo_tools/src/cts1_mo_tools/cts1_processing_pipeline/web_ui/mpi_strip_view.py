@@ -516,15 +516,10 @@ def _labelled(label: str) -> ui.column:
     return column
 
 
-def _summary_text(collection: dict[str, Any], frames: pl.DataFrame) -> str:
+def _summary_text(frames: pl.DataFrame) -> str:
     recordings = frames["collection_started_at"].n_unique()
     first, last = frames["collected_at"].min(), frames["collected_at"].max()
-    expected = collection.get("frames_expected")
-    parts = [
-        f"{frames.height:,} frame(s) received"
-        + (f" of {expected:,} expected by their counters" if expected else ""),
-        f"{first:%Y-%m-%d} {_time_text(first)} to {_time_text(last)} UTC",
-    ]
+    parts = [f"{first:%Y-%m-%d} {_time_text(first)} to {_time_text(last)} UTC"]
     if recordings > 1:
         parts.append(f"{recordings} recordings, each starting its counter at 0")
     return " · ".join(parts)
@@ -583,7 +578,7 @@ def _load_collection(
     return _LoadedCollection(
         prepared=prepared,
         frame_rows=frames.drop("pixels").to_dicts(),
-        summary=_summary_text(row, frames),
+        summary=_summary_text(frames),
     )
 
 
@@ -648,9 +643,6 @@ class _MpiStripView:
                         range_toggle = ui.toggle(_RANGES, value="typical")
                     for toggle in (zoom_toggle, mode_toggle, range_toggle):
                         toggle.props("dense")
-                    ui.label(
-                        "Over the strip: scroll to pan, Ctrl+scroll to zoom."
-                    ).classes("text-caption text-grey")
                 self._body = ui.column().classes("w-full gap-2")
         self._viewer = _StripViewer(
             body=self._body,
@@ -943,11 +935,7 @@ def build_mpi_vis_page(data_dir: Path, *, collection: str | None = None) -> None
     newest collection with any frames downlinked.
     """
     with page_shell():
-        with ui.row().classes("w-full items-center justify-between"):
-            ui.label("MPI Vis").classes("text-2xl font-bold")
-            ui.link("All collections, in detail: MPI Data", "/mpi-data").classes(
-                "text-caption"
-            )
+        ui.label("MPI Vis").classes("text-2xl font-bold")
         view = _MpiStripView(data_dir)
 
     async def _load() -> None:
