@@ -127,8 +127,9 @@ def _reassemble_lazy(lf: pl.LazyFrame) -> pl.LazyFrame:
             "packet_id",
             "tcmd_response_text",
         )
-        # Earliest-received copy of each duplicated part wins.
-        .sort("received_at", nulls_last=True)
+        # Earliest-received copy of each duplicated part wins (`packet_id`
+        # only breaks exact-time ties, so the pick doesn't hinge on row order).
+        .sort("received_at", "packet_id", nulls_last=True)
         .unique(subset=[*_GROUP_KEY, "tcmd_response_seq_num"], keep="first")
     )
 
