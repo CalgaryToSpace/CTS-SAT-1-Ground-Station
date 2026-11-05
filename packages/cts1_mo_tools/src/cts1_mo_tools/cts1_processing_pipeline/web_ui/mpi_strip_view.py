@@ -32,12 +32,12 @@ __all__ = [
 
 import contextlib
 import html
-import json
 import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
+import orjson
 from nicegui import run, ui
 
 from cts1_mo_tools.cts1_processing_pipeline.step_9_clean_mpi_frames import (
@@ -411,8 +411,19 @@ def _strip_body(  # noqa: PLR0913
         lines = _readout_lines(
             strip, frames, mode, e.args["image_x"], e.args["image_y"]
         )
-        if lines is not None:
-            readout.set_content(_readout_html(lines))
+        if lines is None:
+            return
+        # Straight into the DOM, not `readout.set_content`: any element update
+        # makes NiceGUI re-render the whole page's Vue tree, and a burst of
+        # them (when the server's busy, e.g. the pipeline's running, and
+        # catches up on a backlog of mouse events) ties up the browser's
+        # main thread -- freezing the crosshair, which is drawn there.
+        readout.client.run_javascript(
+            f"""(() => {{
+                const el = getHtmlElement({readout.id});
+                if (el) el.innerHTML = {orjson.dumps(_readout_html(lines)).decode()};
+            }})()"""
+        )
 
     # Only where the mouse is, in image pixels -- the readout's built here,
     # from data the browser doesn't have.
@@ -895,7 +906,7 @@ def _set_url_collection(element: ui.element, key: str, *, replace: bool) -> None
     element.client.run_javascript(
         f"""(() => {{
             const url = new URL(location.href);
-            const key = {json.dumps(key)};
+            const key = {orjson.dumps(key).decode()};
             if (url.searchParams.get('{COLLECTION_QUERY_PARAM}') === key) return;
             url.searchParams.set('{COLLECTION_QUERY_PARAM}', key);
             history.{method}(null, '', url);
