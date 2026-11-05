@@ -26,6 +26,7 @@ __all__ = [
     "run",
 ]
 
+import os
 import time
 from datetime import timedelta
 from typing import TYPE_CHECKING
@@ -34,12 +35,15 @@ import polars as pl
 from loguru import logger
 
 from cts1_mo_tools.cts1_processing_pipeline.common import connect_duckdb
+from cts1_mo_tools.cts1_processing_pipeline.landing_db import quote_literal
 from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
     pipeline as step_3_pipeline,
 )
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    import duckdb
 
 DEFAULT_DATA_DIR = step_3_pipeline.DEFAULT_DATA_DIR
 OUTPUT_FILENAME = "tle_history.parquet"
@@ -66,6 +70,30 @@ TLE_HISTORY_SCHEMA = {
 }
 
 
+# A Hugging Face access token (https://huggingface.co/settings/tokens, "read"
+# is enough), from the environment -- e.g. `.env`. Optional: the dataset is
+# public, but anonymous requests are rate-limited much harder.
+HF_TOKEN_ENV_VAR = "HF_TOKEN"  # noqa: S105 -- the variable's name, not a token.
+
+
+def _use_hf_token(con: duckdb.DuckDBPyConnection) -> None:
+    """Authenticate `con`'s `hf://` reads with `HF_TOKEN_ENV_VAR`'s token, if
+    it's set. The secret is temporary: it lives only as long as `con`."""
+    token = os.environ.get(HF_TOKEN_ENV_VAR, "").strip()
+    if not token:
+        return
+    try:
+        con.execute(
+            "CREATE TEMPORARY SECRET hf_token "
+            f"(TYPE huggingface, TOKEN {quote_literal(token)})"
+        )
+    except Exception:  # noqa: BLE001
+        # Not chained or logged: DuckDB's error can quote the statement,
+        # token and all.
+        msg = f"Couldn't use {HF_TOKEN_ENV_VAR} as a DuckDB Hugging Face secret"
+        raise RuntimeError(msg) from None
+
+
 def fetch_tle_history(norad_id: str) -> pl.DataFrame:
     """Every TLE in the dataset for `norad_id`, oldest first -- see
     `TLE_HISTORY_SCHEMA`. Blocking, and needs the network.
@@ -73,6 +101,7 @@ def fetch_tle_history(norad_id: str) -> pl.DataFrame:
     with connect_duckdb() as con:
         # Its progress bar would otherwise fill the daemon's log.
         con.execute("SET enable_progress_bar = false")
+        _use_hf_token(con)
         df = con.execute(
             f"""
             SELECT {", ".join(TLE_HISTORY_SCHEMA)}
@@ -112,7 +141,11 @@ def run(*, norad_id: str = "69015", data_dir: Path = DEFAULT_DATA_DIR) -> None:
             )
             return
 
-    logger.info(f"Fetching the TLE history of NORAD {norad_id} from {_DATASET_GLOB}")
+    authenticated = bool(os.environ.get(HF_TOKEN_ENV_VAR, "").strip())
+    logger.info(
+        f"Fetching the TLE history of NORAD {norad_id} from {_DATASET_GLOB} "
+        f"({'with' if authenticated else 'without'} a Hugging Face token)"
+    )
     try:
         df = fetch_tle_history(norad_id)
     except Exception as e:  # noqa: BLE001 -- any failure: keep the old file.
