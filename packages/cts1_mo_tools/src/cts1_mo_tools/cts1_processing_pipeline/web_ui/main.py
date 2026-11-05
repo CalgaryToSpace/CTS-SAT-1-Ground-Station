@@ -5,7 +5,8 @@ recent beacon(s) at a glance, plus line/scatter charts for every field in
 the basic and extended beacon packets, grouped by subsystem -- see
 `beacon_stats_page`, `packet_browser_page`, `satellite_events_page`,
 `mpi_data_page`, `mpi_strip_view`, `file_reassembler_page`, `overpasses_page`,
-`pipeline_status_page`, and `export_page` for the individual pages.
+`pipeline_status_page`, and `export_page` for the individual pages, and
+`nav_pipeline_indicator` for the navbar's live pipeline progress.
 
 Usage (uv):
     uv run cts1_serve_dashboard
@@ -21,6 +22,7 @@ __all__ = ["main"]
 import copy
 import logging
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -39,6 +41,7 @@ from .export_raw import register_raw_export_route
 from .file_reassembler_page import build_file_reassembler_page
 from .mpi_data_page import build_mpi_data_page
 from .mpi_strip_view import MPI_VIS_PATH, build_mpi_vis_page, vis_page_url
+from .nav_pipeline_indicator import build_nav_pipeline_indicator
 from .overpasses_page import build_overpasses_page
 from .packet_browser_page import build_packet_browser_page
 from .pipeline_status_page import build_pipeline_status_page
@@ -108,6 +111,10 @@ NAV_LINKS = (
     ("Export Data", "/export"),
 )
 
+# Tailwind's `xl` breakpoint: below it, the navbar collapses its links into a
+# menu button -- keep in step with the `xl:` classes in `_nav`.
+NAV_COLLAPSE_BELOW_PX = 1280
+
 
 def _page_title(path: str) -> str:
     """Browser tab title for the page at `path`, e.g. "Beacon Data | <app>"."""
@@ -130,6 +137,11 @@ class Args:
     """Port to serve the dashboard on."""
 
 
+def _navigate_to(path: str) -> Callable[[], None]:
+    """A click handler that navigates to `path`."""
+    return lambda: ui.navigate.to(path)
+
+
 def _build_pages(args: Args) -> None:  # noqa: C901
     def _nav() -> None:
         # Remembered per-browser (see STORAGE_SECRET) so a toggle sticks
@@ -141,16 +153,40 @@ def _build_pages(args: Args) -> None:  # noqa: C901
             dark.toggle()
             app.storage.user["dark_mode"] = dark.value
 
-        with ui.header().classes("items-center gap-4"):
-            ui.label(APP_TITLE).classes("text-lg font-bold")
-            with ui.row().classes("items-center gap-0 ml-4 divide-x divide-white/25"):
+        # Below Tailwind's `xl` breakpoint the full link row doesn't fit (it
+        # used to wrap into a multi-row header eating a third of a phone
+        # screen): collapse it into a menu button, slim the header down, and
+        # let it slide away while scrolling down (Quasar's `reveal`), coming
+        # back on scroll up. `:reveal` is evaluated in the browser on render.
+        header = ui.header().classes("items-center gap-2 px-2 py-1 xl:gap-4 xl:p-4")
+        header.props[":reveal"] = f"window.innerWidth < {NAV_COLLAPSE_BELOW_PX}"
+        with header:
+            with (
+                ui.button(icon="menu")
+                .props("flat round dense color=white")
+                .classes("xl:hidden"),
+                ui.menu(),
+            ):
+                for label, path in NAV_LINKS:
+                    ui.menu_item(label, on_click=_navigate_to(path))
+            ui.label(APP_TITLE).classes(
+                "min-w-0 truncate text-base font-bold 2xl:text-lg"
+            )
+            # Slightly tighter links between `xl` and `2xl`, so the full row
+            # still fits on one line alongside the pipeline indicator on a
+            # typical 1366/1440px laptop.
+            with ui.row().classes(
+                "max-xl:hidden items-center gap-0 ml-2 2xl:ml-4 "
+                "divide-x divide-white/25"
+            ):
                 for label, path in NAV_LINKS:
                     ui.link(label, path).classes(
-                        "text-white text-body1 no-underline px-3"
+                        "text-white no-underline text-sm px-2 2xl:text-base 2xl:px-3"
                     )
             ui.space()
+            build_nav_pipeline_indicator(args.data_dir)
             ui.button(icon="dark_mode", on_click=_toggle_dark).props(
-                "flat round color=white"
+                "flat round dense color=white"
             ).bind_icon_from(
                 dark,
                 "value",
