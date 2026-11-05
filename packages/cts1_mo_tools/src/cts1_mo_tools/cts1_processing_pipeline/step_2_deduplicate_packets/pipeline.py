@@ -181,7 +181,18 @@ def _prepare_rows(packets: pl.LazyFrame, observations: pl.LazyFrame) -> pl.LazyF
         obs_start=pl.col("start").dt.replace_time_zone("UTC"),
         obs_end=pl.col("end").dt.replace_time_zone("UTC"),
     )
-    packets = packets.filter(
+    packets = packets.select(
+        "observation_id",
+        "decoder",
+        "received_at",
+        "time_in_file_ms",
+        "data_hex",
+        "data_length_bytes",
+        "rssi_db",
+        "rs_corrected_error_count",
+        "rs_correctable",
+        "csp_crc_valid",
+    ).filter(
         pl.col("data_hex").is_not_null()
         & (pl.col("data_hex") != "")
         & pl.col("rs_correctable")
@@ -200,10 +211,6 @@ def _prepare_rows(packets: pl.LazyFrame, observations: pl.LazyFrame) -> pl.LazyF
                 default=None,
                 return_dtype=pl.UInt32,
             ),
-            _source=pl.struct(
-                *(pl.col(f) for f in _SOURCE_FIELDS),
-                received_at=pl.col("received_at").dt.strftime("%Y-%m-%dT%H:%M:%S%.3fZ"),
-            ).struct.json_encode(),
         )
     )
 
@@ -334,7 +341,20 @@ def _aggregate_clusters(rows: pl.LazyFrame) -> pl.LazyFrame:
     if_baseline = pl.when(~pl.col("_is_leftover"))
     return (
         rows.sort(
-            ["_is_leftover", "_cluster", "_trust_rank", "received_at"],
+            [
+                "_is_leftover",
+                "_cluster",
+                "_trust_rank",
+                "received_at",
+                # Tie-breakers only, so the picks below never depend on
+                # input row order (which the streaming engine doesn't keep).
+                "observation_id",
+                "decoder",
+                "time_in_file_ms",
+                "csp_crc_source",
+                "rssi_db",
+                "rs_corrected_error_count",
+            ],
             nulls_last=True,
         )
         .group_by(["_is_leftover", "_cluster"], maintain_order=True)
@@ -354,7 +374,7 @@ def _aggregate_clusters(rows: pl.LazyFrame) -> pl.LazyFrame:
             pl.col("rs_correctable").first(),
             pl.col("decoder").unique().sort().alias("decoders"),
             pl.col("observation_id").unique().sort().alias("observation_ids"),
-            pl.col("_source").alias("sources"),
+            pl.struct(*_SOURCE_FIELDS, "received_at").alias("sources"),
         )
         # Looked up only now, once per distinct packet, rather than carried
         # through the sort and group-by above.
@@ -387,7 +407,19 @@ def _finalize(df: pl.LazyFrame) -> pl.LazyFrame:
             + "]"
         ),
         packet_count=pl.col("sources").list.len(),
-        sources="[" + pl.col("sources").list.join(",") + "]",
+        sources="["
+        + pl.col("sources")
+        .list.eval(
+            pl.element()
+            .struct.with_fields(
+                received_at=pl.field("received_at").dt.strftime(
+                    "%Y-%m-%dT%H:%M:%S%.3fZ"
+                )
+            )
+            .struct.json_encode()
+        )
+        .list.join(",")
+        + "]",
     )
     df = df.with_columns(
         packet_id=(
@@ -416,7 +448,7 @@ def _finalize(df: pl.LazyFrame) -> pl.LazyFrame:
         "decoders",
         "observation_ids",
         "sources",
-    ).sort("received_at")
+    ).sort("received_at", "packet_id")
 
 
 def compute_distinct_packets(
@@ -438,10 +470,14 @@ def compute_distinct_packets(
     # the final aggregation) reads these rows and joins back on `_row_id`, so
     # they must all see the exact same `_row_id` assignment -- not depend on
     # the optimizer deduplicating the shared subplan.
-    rows = _prepare_rows(packets.lazy(), observations.lazy()).collect().lazy()
+    rows = (
+        _prepare_rows(packets.lazy(), observations.lazy())
+        .collect(engine="streaming")
+        .lazy()
+    )
     clusters = _assign_clusters(rows)
     clustered_rows = rows.join(clusters, on="_row_id", how="inner")
-    return _finalize(_aggregate_clusters(clustered_rows)).collect()
+    return _finalize(_aggregate_clusters(clustered_rows)).collect(engine="streaming")
 
 
 def _write_parquet_atomic(df: pl.DataFrame, path: Path) -> None:

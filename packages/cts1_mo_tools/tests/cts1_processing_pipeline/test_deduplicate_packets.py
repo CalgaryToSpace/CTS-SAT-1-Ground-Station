@@ -720,3 +720,32 @@ def test_output_schema_and_json_columns() -> None:
     assert isinstance(json.loads(row["observation_ids"]), list)
     assert isinstance(json.loads(row["sources"]), list)
     assert row["packet_id"] is not None
+
+
+def test_output_does_not_depend_on_input_row_order() -> None:
+    """Same content, same time, several stations/decoders: every pick among
+    them (`.first()`, the order of `sources`) is down to tie-breaking."""
+    observations = _observations_df([{**_OBS_1, "id": oid} for oid in (1, 2, 3)])
+    packets = _packets_df(
+        [
+            _packet(
+                received_at="2026-08-12T19:35:00",
+                observation_id=oid,
+                decoder=decoder,
+                rssi_db=rssi,
+                rs_corrected_error_count=errors,
+            )
+            for oid, decoder, rssi, errors in [
+                (1, "sso_rx_replay", -3.0, 2),
+                (2, "sso_rx_replay", -1.0, 0),
+                (3, "sso_rx_replay", -2.0, 1),
+                (1, "gr_satellites_pdu", -5.0, 0),
+                (2, "satnogs_client_live_data", -4.0, 0),
+            ]
+        ]
+    )
+
+    expected = compute_distinct_packets(packets, observations)
+    for seed in range(5):
+        shuffled = packets.sample(fraction=1.0, shuffle=True, seed=seed)
+        assert compute_distinct_packets(shuffled, observations).equals(expected)
