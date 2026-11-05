@@ -29,6 +29,10 @@ over the history before `start` instead, back to a few days before the
 satellite's SatNOGS DB launch date, one 12h chunk at a time -- see
 `idle_backfill`.
 
+The first run after the daemon starts reprocesses steps 2 and 3 in full;
+every run after that only reprocesses what changed since (see
+`partitions`), including history idle backfill has landed meanwhile.
+
 Invoked via the top-level CLI's `daemon` subcommand -- see
 `cts1_mo_tools.cts1_processing_pipeline.cli`.
 """
@@ -100,8 +104,12 @@ def run_all_steps(  # noqa: PLR0913
     tools: tuple[str, ...] | None,
     reporter: StatusReporter,
     run_label: str,
+    incremental: bool = False,
 ) -> None:
     """Run steps 0-9 once, publishing which step is in flight as it goes.
+
+    `incremental` makes steps 2 and 3 only reprocess what changed since
+    their last run (see `partitions`), rather than everything.
 
     `start` bounds both step 0's listing and step 1's decoding -- see the
     module docstring.
@@ -136,9 +144,9 @@ def run_all_steps(  # noqa: PLR0913
         ),
     )
     announce(2)
-    step_2_pipeline.run(data_dir=data_dir)
+    step_2_pipeline.run(data_dir=data_dir, incremental=incremental)
     announce(3)
-    step_3_pipeline.run(data_dir=data_dir)
+    step_3_pipeline.run(data_dir=data_dir, incremental=incremental)
     announce(4)
     step_4_pipeline.run(data_dir=data_dir)
     # Steps 4, 5 and 6 are independent (all only read step 3's output); they
@@ -262,7 +270,7 @@ def run(  # noqa: PLR0913
     # covering observations listed/decoded on earlier runs.
     start_at = parse_start_filter(start).isoformat()
 
-    def run_once(run_label: str) -> None:
+    def run_once(run_label: str, *, incremental: bool) -> None:
         run_all_steps(
             norad_id=norad_id,
             data_dir=data_dir,
@@ -274,6 +282,7 @@ def run(  # noqa: PLR0913
             tools=tools,
             reporter=reporter,
             run_label=run_label,
+            incremental=incremental,
         )
 
     backfiller = (
@@ -297,7 +306,9 @@ def run(  # noqa: PLR0913
         daemon_signals.clear_trigger_request(data_dir)
 
         logger.info(f"Daemon: initial backfill, start={start!r} ({start_at})")
-        run_once("backfill")
+        # Always in full: a new deploy may have changed how any step
+        # processes its data, so nothing already written is trusted.
+        run_once("backfill", incremental=False)
 
         while True:
             logger.info(f"Daemon: sleeping up to {interval} minute(s) until next run")
@@ -309,4 +320,7 @@ def run(  # noqa: PLR0913
             )
 
             logger.info(f"Daemon: requerying since {start_at}")
-            run_once("requery (requested)" if was_triggered else "requery")
+            run_once(
+                "requery (requested)" if was_triggered else "requery",
+                incremental=True,
+            )

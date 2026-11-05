@@ -8,15 +8,20 @@ parquet file from disk exactly as it sits in `output/`, with no polars
 load/filter/re-encode step in between and no zipping. That makes it the
 cheapest possible way to get a whole table out, at the cost of not
 supporting any of the filtering `export_tables.export_selected_tables` does
-(or downloading more than one table per request).
+(or downloading more than one table per request). A month-partitioned table
+(see `partitions`) is the one exception: its months are first streamed into
+a single temp file, which is served and then deleted.
 """
 
 __all__ = ["RAW_EXPORT_PATH", "raw_export_url", "register_raw_export_route"]
 
+import tempfile
 from pathlib import Path
 
+import polars as pl
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 
 from . import export_tables
 
@@ -46,8 +51,19 @@ def register_raw_export_route(app: FastAPI, data_dir: Path) -> None:
                 detail=f"{table_key} hasn't been produced by the pipeline yet.",
             )
 
+        if not path.is_dir():
+            return FileResponse(
+                path, filename=spec.filename, media_type="application/octet-stream"
+            )
+
+        with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
+            merged = Path(tmp.name)
+        pl.scan_parquet(path).sink_parquet(merged)
         return FileResponse(
-            path, filename=spec.filename, media_type="application/octet-stream"
+            merged,
+            filename=spec.filename,
+            media_type="application/octet-stream",
+            background=BackgroundTask(merged.unlink, missing_ok=True),
         )
 
     # Registered via `add_api_route` rather than the `@app.get(...)` decorator

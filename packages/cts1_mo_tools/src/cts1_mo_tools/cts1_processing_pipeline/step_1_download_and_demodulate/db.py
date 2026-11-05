@@ -40,11 +40,13 @@ import orjson
 import polars as pl
 from loguru import logger
 
+from cts1_mo_tools.cts1_processing_pipeline import partitions
 from cts1_mo_tools.cts1_processing_pipeline.landing_db import (
     add_missing_columns,
     export_table_to_parquet,
     insert_with_type_repair,
     quote_ident,
+    quote_literal,
     table_exists,
 )
 from cts1_mo_tools.cts1_processing_pipeline.step_0_list_observations.db import (
@@ -52,7 +54,7 @@ from cts1_mo_tools.cts1_processing_pipeline.step_0_list_observations.db import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from pathlib import Path
 
     import duckdb
@@ -206,20 +208,86 @@ def record_decoder_runs(
 
 
 def export_parquets(con: duckdb.DuckDBPyConnection, db_path: Path) -> None:
-    """Copy raw_packets/decoder_runs out to Parquet files next to db_path."""
+    """Copy raw_packets/decoder_runs out to Parquet next to db_path:
+    decoder_runs as one file, raw_packets month-partitioned (see
+    `partitions`) -- only the months whose rows changed are rewritten.
+    """
     out_dir = db_path.parent
-    order_by = {
-        RAW_PACKETS_TABLE: ["received_at", "observation_id"],
-        DECODER_RUNS_TABLE: ["observation_id", "decoder"],
+    if table_exists(con, RAW_PACKETS_TABLE):
+        _export_raw_packets(con, out_dir / f"{RAW_PACKETS_TABLE}.parquet")
+    if table_exists(con, DECODER_RUNS_TABLE):
+        export_table_to_parquet(
+            con,
+            table=DECODER_RUNS_TABLE,
+            out_path=out_dir / f"{DECODER_RUNS_TABLE}.parquet",
+            order_by_columns=["observation_id", "decoder"],
+        )
+
+
+# `partitions.month_expr`, in DuckDB.
+_MONTH_SQL = (
+    "coalesce(strftime(received_at AT TIME ZONE 'UTC', '%Y-%m'), "
+    f"{quote_literal(partitions.NO_MONTH)})"
+)
+
+
+def _export_raw_packets(con: duckdb.DuckDBPyConnection, out_path: Path) -> None:
+    """Write raw_packets to the partitioned directory `out_path`.
+
+    raw_packets is append-only, so a month whose row count matches its
+    file's is unchanged and left alone; the rest are rewritten. If that
+    leaves the months' schemas disagreeing (a column was added or widened
+    since -- see `landing_db`), every month is rewritten instead.
+    """
+    counts = dict(
+        con.execute(
+            f"SELECT {_MONTH_SQL} AS month, count(*) "  # noqa: S608
+            f"FROM {quote_ident(RAW_PACKETS_TABLE)} GROUP BY month"
+        ).fetchall()
+    )
+    existing = partitions.month_files(out_path)
+    stale = {
+        month
+        for month, file in existing.items()
+        if counts.get(month) != pl.scan_parquet(file).select(pl.len()).collect().item()
     }
-    for table, order_by_columns in order_by.items():
-        if table_exists(con, table):
-            export_table_to_parquet(
-                con,
-                table=table,
-                out_path=out_dir / f"{table}.parquet",
-                order_by_columns=order_by_columns,
+    changed = stale | (set(counts) - set(existing))
+
+    def writer(month: str) -> Callable[[Path], None]:
+        def write(tmp: Path) -> None:
+            con.execute(
+                f"""
+                    COPY (
+                        SELECT * FROM {quote_ident(RAW_PACKETS_TABLE)}
+                        WHERE {_MONTH_SQL} = {quote_literal(month)}
+                        ORDER BY received_at, observation_id
+                    ) TO {quote_literal(str(tmp))} (FORMAT PARQUET, COMPRESSION ZSTD)
+                """  # noqa: S608
             )
+
+        return write
+
+    full = not existing
+    if not full:
+        partitions.replace_months(
+            out_path,
+            {month: writer(month) if month in counts else None for month in changed},
+            full=False,
+        )
+        schemas = {
+            str(pl.read_parquet_schema(file))
+            for file in partitions.month_files(out_path).values()
+        }
+        full = len(schemas) > 1
+    if full:
+        partitions.replace_months(
+            out_path, {month: writer(month) for month in counts}, full=True
+        )
+        changed = set(counts)
+    logger.info(
+        f"{RAW_PACKETS_TABLE}: exported {len(changed)} of {len(counts)} month(s) "
+        f"to {out_path}"
+    )
 
 
 def load_observations(
