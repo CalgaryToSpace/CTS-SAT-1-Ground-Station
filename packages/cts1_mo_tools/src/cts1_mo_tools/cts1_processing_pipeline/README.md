@@ -88,6 +88,13 @@ web UI as two containers sharing that directory.
 * `cts1_processing_pipeline parquet_steps` runs every parquet-in-parquet-out step (2-6, 8 and 9) once, in order -- e.g. to regenerate their outputs after changing one of them.
 * Unlike the daemon, it doesn't list, download or fetch anything (steps 0, 1 and 7), and runs once rather than continuously. Step 8 uses whatever `tle_history.parquet` is already in `--data-dir`.
 
+### Partitioned outputs and incremental runs
+
+* `raw_packets.parquet`, `distinct_packets_over_time.parquet` and `everything_decoded.parquet` are directories holding one file per UTC month of `received_at` (e.g. `everything_decoded.parquet/2026-11.parquet`). Polars reads such a directory just like a single file (`pl.scan_parquet(path)`). Never put any other file in one: polars then refuses to read it. See `partitions.py`.
+* Every month file of a directory has the same schema. For `everything_decoded`, that's `step_3_decode_packets/schema.py`'s `DECODED_SCHEMA`: when the decoder grows a field, add it there (a test checks this).
+* Step 1 only re-exports months whose row count in DuckDB changed. Steps 2 and 3 run either in full or incrementally (`incremental=True`), reprocessing only what's affected by the months of their input that changed since their last run, as recorded in `<output>.state.json` next to their output. An incremental run's output is the same as a full run's.
+* The daemon's first run after it starts is always in full (so a new deploy reprocesses everything); every run after that is incremental, and picks up history landed by idle backfill too. Deleting an output directory (or its `.state.json`) forces a full rebuild of it on the next run.
+
 ### Daemon
 
 * Runs steps 0-9 continuously instead of one-off: an initial backfill of `--start` (default: 24h), then a rerun of steps 0 through 9 every `--interval` minutes (default: 15).

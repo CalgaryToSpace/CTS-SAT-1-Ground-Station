@@ -43,8 +43,17 @@ since it's cheap to run incrementally against new SatNOGS observations --
 this step and every step after it are parquet-in-parquet-out: it reads
 `raw_packets.parquet`/`raw_observations.parquet` (as exported by step 1)
 and writes `distinct_packets_over_time.parquet` straight back out, no
-database involved. The whole dataset is cheap enough to reprocess from
-scratch on every run, so there's no incremental state to reconcile.
+database involved.
+
+Both are month-partitioned directories (see `partitions`). A full run
+reprocesses everything; an incremental one (`run(incremental=True)`, every
+daemon run after its first) only the packets whose raw decodes could have
+changed: no distinct packet ever spans two contents, so every distinct
+packet whose content appears in a raw month that changed since the last run
+is recomputed -- from all of that content's decodes, whatever their month --
+and every other one is left as it was. The result is the same as a full
+run's (as long as `raw_packets` is only ever appended to, which step 1
+guarantees, and `raw_observations` windows don't change after the fact).
 """
 
 __all__ = [
@@ -63,6 +72,7 @@ import polars_hash
 from loguru import logger
 
 from cts1_mo_tools.cts1_decode_satnogs_packets import CSP_CRC32C_SIZE
+from cts1_mo_tools.cts1_processing_pipeline import partitions
 from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate import (
     pipeline as step_1_pipeline,
 )
@@ -480,21 +490,98 @@ def compute_distinct_packets(
     return _finalize(_aggregate_clusters(clustered_rows)).collect(engine="streaming")
 
 
-def _write_parquet_atomic(df: pl.DataFrame, path: Path) -> None:
-    """Write `df` to `path` via a temp file + rename, so a crash mid-write
-    can't leave a truncated/corrupt parquet file at `path`.
-    """
-    tmp_path = path.with_suffix(".tmp")
-    df.write_parquet(tmp_path)
-    tmp_path.replace(path)
+def _recompute_contents(
+    packets_path: Path, observations: pl.LazyFrame, changed_months: set[str]
+) -> tuple[pl.Series, pl.DataFrame]:
+    """The incremental run's work: every content (as `data_hex`) with a
+    decode in `changed_months` of `raw_packets`, and its distinct packets
+    recomputed from every one of its decodes."""
+    files = partitions.month_files(packets_path)
+    changed_rows = pl.scan_parquet([files[month] for month in sorted(changed_months)])
+    contents = (
+        _prepare_rows(changed_rows, observations)
+        .select(data_hex=pl.col("_data").bin.encode("hex"))
+        .unique()
+        .collect(engine="streaming")["data_hex"]
+    )
+    # Every raw decode of these contents, wherever it is: its `data_hex` is
+    # the content itself, or the content minus the CRC-32C that
+    # `_complete_missing_crc` adds back. That can also catch some other
+    # content's decodes (one that's another's prefix), so the result is cut
+    # back down to `contents` -- those other contents' clusters are
+    # incomplete here, and left as they are in the output.
+    without_crc = contents.str.head(-2 * CSP_CRC32C_SIZE)
+    candidates = pl.scan_parquet(packets_path).filter(
+        pl.col("data_hex")
+        .str.to_lowercase()
+        .is_in(pl.concat([contents, without_crc]).implode())
+    )
+    recomputed = compute_distinct_packets(candidates, observations).filter(
+        pl.col("data_hex").is_in(contents.implode())
+    )
+    return contents, recomputed
 
 
-def run(*, data_dir: Path = DEFAULT_DATA_DIR) -> None:
+def _run_incremental(
+    packets_path: Path,
+    observations: pl.LazyFrame,
+    out_path: Path,
+    changed_months: set[str],
+) -> None:
+    contents, recomputed = _recompute_contents(
+        packets_path, observations, changed_months
+    )
+    previous = pl.scan_parquet(out_path)
+    is_recomputed = pl.col("data_hex").is_in(contents.implode())
+    affected_months = set(
+        pl.concat(
+            [
+                previous.filter(is_recomputed).select(month=partitions.month_expr()),
+                recomputed.lazy().select(month=partitions.month_expr()),
+            ]
+        )
+        .unique()
+        .collect()["month"]
+    )
+    out_files = partitions.month_files(out_path)
+    recomputed_months = recomputed.with_columns(_month=partitions.month_expr())
+    rewritten: list[str] = []
+    # A month is only rewritten if its rows actually changed: recomputing a
+    # content that recurs across months (identical packets weeks apart)
+    # usually reproduces those other months' rows exactly, and leaving their
+    # files alone is what keeps step 3 from re-decoding them.
+    for month in sorted(affected_months):
+        previous_month = (
+            pl.read_parquet(out_files[month])
+            if month in out_files
+            else recomputed.clear()
+        )
+        updated = pl.concat(
+            [
+                previous_month.filter(~is_recomputed),
+                recomputed_months.filter(pl.col("_month") == month).drop("_month"),
+            ]
+        ).sort("received_at", "packet_id")
+        if not updated.equals(previous_month):
+            partitions.write_frame(updated, out_path, months={month})
+            rewritten.append(month)
+    logger.info(
+        f"Done. Recomputed {recomputed.height:,} distinct packet(s) of "
+        f"{len(contents):,} content(s) seen in changed raw month(s) "
+        f"{sorted(changed_months)}; month(s) {rewritten} of {out_path} changed."
+    )
+
+
+def run(*, data_dir: Path = DEFAULT_DATA_DIR, incremental: bool = False) -> None:
     """Recompute `distinct_packets_over_time.parquet` from step 1's exports.
 
     Reads `raw_packets.parquet`/`raw_observations.parquet` from `data_dir`
     (where step 1 exports them) and writes the result back into the same
     directory -- parquet-in-parquet-out, no database involved.
+
+    With `incremental`, only what changed since the last run is reprocessed
+    (see the module docstring) -- falling back to a full run when there's
+    no record of a previous one to go from.
     """
     packets_path = data_dir / "raw_packets.parquet"
     observations_path = data_dir / "raw_observations.parquet"
@@ -503,21 +590,37 @@ def run(*, data_dir: Path = DEFAULT_DATA_DIR) -> None:
             msg = f"{path} not found -- run step_1 first."
             raise FileNotFoundError(msg)
 
-    packets = pl.scan_parquet(packets_path)
+    out_path = data_dir / OUTPUT_FILENAME
+    input_signatures = partitions.signatures(packets_path)
     observations = pl.scan_parquet(observations_path)
+    changed_months = (
+        partitions.changed_input_months(out_path, input_signatures)
+        if incremental
+        else None
+    )
+    if changed_months is not None:
+        if changed_months:
+            _run_incremental(packets_path, observations, out_path, changed_months)
+        else:
+            logger.info("Done. No raw packets changed since the last run.")
+    else:
+        _run_full(packets_path, observations, out_path)
+    partitions.write_state(out_path, input_signatures)
+
+
+def _run_full(packets_path: Path, observations: pl.LazyFrame, out_path: Path) -> None:
+    packets = pl.scan_parquet(packets_path)
     # Both counts come straight from the parquet footers.
     raw_packet_count = packets.select(pl.len()).collect().item()
     raw_observation_count = observations.select(pl.len()).collect().item()
     logger.info(
         f"Scanning {raw_packet_count:,} raw packets across "
         f"{raw_observation_count:,} raw observations "
-        f"from {packets_path} and {observations_path}."
+        f"from {packets_path}."
     )
 
     result_df = compute_distinct_packets(packets, observations)
-
-    out_path = data_dir / OUTPUT_FILENAME
-    _write_parquet_atomic(result_df, out_path)
+    partitions.write_frame(result_df, out_path)
 
     stats = result_df.select(
         distinct=pl.len(),

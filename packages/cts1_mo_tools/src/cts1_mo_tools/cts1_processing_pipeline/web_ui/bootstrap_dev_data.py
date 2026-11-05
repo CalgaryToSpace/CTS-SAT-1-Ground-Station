@@ -19,6 +19,7 @@ from __future__ import annotations
 
 __all__ = ["main"]
 
+import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -79,6 +80,10 @@ def _download_table(spec: TableSpec, base_url: str, data_dir: Path) -> bool:
     except requests.RequestException as e:
         logger.error(f"Failed to download {spec.key}: {e}")
         return False
+    if dest.is_dir():
+        # A month-partitioned output from a local pipeline run (see
+        # `partitions`) -- replaced by the server's single-file export.
+        shutil.rmtree(dest)
     tmp_path.replace(dest)
     logger.info(f"Saved {spec.key} ({dest.stat().st_size / 1e6:,.1f} MB)")
     return True

@@ -1,13 +1,19 @@
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import polars as pl
 import pytest
 from cts1_mo_tools.cts1_decode_satnogs_packets import crc32c, verify_csp_packet_crc32c
+from cts1_mo_tools.cts1_processing_pipeline import partitions
+from cts1_mo_tools.cts1_processing_pipeline.step_2_deduplicate_packets import (
+    pipeline as step_2_pipeline,
+)
 from cts1_mo_tools.cts1_processing_pipeline.step_2_deduplicate_packets.pipeline import (
     compute_distinct_packets,
 )
+from polars.testing import assert_frame_equal
 
 _DEFAULT_PACKET = {
     "observation_id": 1,
@@ -749,3 +755,79 @@ def test_output_does_not_depend_on_input_row_order() -> None:
     for seed in range(5):
         shuffled = packets.sample(fraction=1.0, shuffle=True, seed=seed)
         assert compute_distinct_packets(shuffled, observations).equals(expected)
+
+
+def test_incremental_run_matches_a_full_one(tmp_path: Path) -> None:
+    """New decodes landing in one month -- including a decode of content
+    first received in the month before, just across the month boundary --
+    give the same output incrementally as a full run over everything."""
+    observations = _observations_df(
+        [
+            {
+                "id": 1,
+                "start": _dt("2026-08-31T23:55:00"),
+                "end": _dt("2026-09-01T00:05:00"),
+            },
+            {
+                "id": 2,
+                "start": _dt("2026-08-31T23:56:00"),
+                "end": _dt("2026-09-01T00:06:00"),
+            },
+            {
+                "id": 3,
+                "start": _dt("2026-08-15T00:00:00"),
+                "end": _dt("2026-08-15T00:10:00"),
+            },
+        ]
+    )
+    before = _packets_df(
+        [
+            _packet(received_at="2026-08-31T23:59:30", data_hex="c2a28a00aa"),
+            _packet(
+                received_at="2026-08-15T00:05:00",
+                data_hex="c2a28a00bb",
+                observation_id=3,
+            ),
+        ]
+    )
+    new = _packets_df(
+        [
+            _packet(
+                received_at="2026-09-01T00:00:10",
+                data_hex="c2a28a00aa",
+                observation_id=2,
+            ),
+            _packet(
+                received_at="2026-09-01T00:03:00",
+                data_hex="c2a28a00cc",
+                observation_id=2,
+            ),
+        ]
+    )
+
+    def setup(data_dir: Path, packets: pl.DataFrame) -> None:
+        data_dir.mkdir()
+        observations.write_parquet(data_dir / "raw_observations.parquet")
+        partitions.write_frame(
+            packets.sort("received_at"), data_dir / "raw_packets.parquet"
+        )
+
+    incremental_dir = tmp_path / "incremental"
+    setup(incremental_dir, before)
+    step_2_pipeline.run(data_dir=incremental_dir, incremental=True)  # First: full.
+    partitions.write_frame(
+        new.sort("received_at"),
+        incremental_dir / "raw_packets.parquet",
+        months={"2026-09"},
+    )
+    step_2_pipeline.run(data_dir=incremental_dir, incremental=True)
+
+    full_dir = tmp_path / "full"
+    setup(full_dir, pl.concat([before, new]))
+    step_2_pipeline.run(data_dir=full_dir)
+
+    def output(data_dir: Path) -> pl.DataFrame:
+        return pl.read_parquet(data_dir / step_2_pipeline.OUTPUT_FILENAME)
+
+    assert output(incremental_dir).height == 3
+    assert_frame_equal(output(incremental_dir), output(full_dir))

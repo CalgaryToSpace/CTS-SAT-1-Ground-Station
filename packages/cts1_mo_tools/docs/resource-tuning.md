@@ -142,12 +142,12 @@ sized to the machine.)
 
 ## Disk
 
-Step 1 rewrites its parquet files (`raw_packets` above all) in full at
-each checkpoint, which on
-btrfs-with-compression is the most disruptive thing the pipeline does to
-the web UI reading those same files. It's rate-limited to one rewrite per
-10 minutes (`MIN_SECONDS_BETWEEN_CHECKPOINTS`, in step 1's `pipeline.py`);
-a crash loses at most that much decode work.
+`raw_packets`, `distinct_packets_over_time` and `everything_decoded` are
+month-partitioned (see the pipeline README), so a routine run only rewrites
+the months that changed -- usually just the current one. Only the daemon's
+first run after it starts rewrites them in full. Step 1's checkpoints are
+still rate-limited to one per 10 minutes (`MIN_SECONDS_BETWEEN_CHECKPOINTS`,
+in step 1's `pipeline.py`); a crash loses at most that much decode work.
 
 If I/O is still the bottleneck, the daemon's disk priority can be dropped
 from the host as well -- niceness covers CPU only:
