@@ -31,12 +31,12 @@ __all__ = [
 ]
 
 import contextlib
-import html
 import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
+import numpy as np
 import orjson
 from nicegui import run, ui
 
@@ -54,7 +54,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import polars as pl
-    from nicegui.events import GenericEventArguments
 
 # Image pixels across per frame -- or "fit": the whole strip scaled to the
 # dialog's width (horizontally only, so the detector rows stay legible).
@@ -149,79 +148,245 @@ def _time_text(value: Any) -> str:
     return f"{value:%H:%M:%S.%f}"[:-3]
 
 
-def _band_value_text(band: mpi_strip.Band, value: Any) -> str:
-    if value is None:
-        return f"{band.label}: ?"
-    unit = f" {band.unit}" if band.unit else ""
-    return f"{band.label}: {value:{band.format}}{unit}"
+# The mouse readout is built in the browser, by `_READOUT_JS`, from data
+# fetched once per strip -- so moving the mouse never touches the server
+# (each mousemove used to be a websocket round trip). Its column codes for
+# a column that isn't a received frame:
+_COLUMN_MISSING = -1
+_COLUMN_SEPARATOR = -2
 
 
-def _readout_lines(
+def _format_decimals(fmt: str) -> int:
+    """The decimal places of a fixed-point format spec like ".2f"."""
+    if not (fmt.startswith(".") and fmt.endswith("f")):
+        msg = f"Not a fixed-point format: {fmt!r}"
+        raise ValueError(msg)
+    return int(fmt[1:-1])
+
+
+def _readout_frames_json(
+    columns: list[mpi_strip.StripColumn], frames: list[dict[str, Any]]
+) -> bytes:
+    """Everything the readout shows that's the same in every strip of a
+    collection (the columns, and each frame's fields bar its pixels), for
+    `_READOUT_JS`. Per frame (or column), as arrays -- far smaller than an
+    object each.
+    """
+
+    def column_code(column: mpi_strip.StripColumn) -> int:
+        if column.kind == "separator":
+            return _COLUMN_SEPARATOR
+        if column.kind == "missing" or column.frame_index is None:
+            return _COLUMN_MISSING
+        return column.frame_index
+
+    return orjson.dumps(
+        {
+            "columnFrames": [column_code(c) for c in columns],
+            "columnCounters": [c.frame_counter for c in columns],
+            "times": [
+                f"{f['collected_at']:%Y-%m-%d} {_time_text(f['collected_at'])} UTC"
+                for f in frames
+            ],
+            "timing": [
+                f"{f['timing_method']} (sync {f['time_sync_source']})" for f in frames
+            ],
+            # NaN serializes as null, shown as "?" like a missing value.
+            "bands": [
+                {
+                    "label": b.label,
+                    "unit": b.unit,
+                    "decimals": _format_decimals(b.format),
+                    "values": [f.get(b.column) for f in frames],
+                }
+                for b in mpi_strip.BANDS
+            ],
+        }
+    )
+
+
+def _pixel_format(mode: mpi_strip.IntensityMode) -> dict[str, Any]:
+    """How the readout shows a pixel's value in `mode`, for `_READOUT_JS`."""
+    if mode == "minus_median":
+        return {"decimals": 0, "signed": True, "suffix": " DN vs its median"}
+    if mode in _CLEAN_STEPS:
+        suffix = f" DN (cleaned, {_CLEAN_STEPS[mode]})"
+        return {"decimals": 1, "signed": False, "suffix": suffix}
+    return {"decimals": 0, "signed": False, "suffix": " DN"}
+
+
+def _readout_config(
     strip: mpi_strip.MpiStrip,
-    frames: list[dict[str, Any]],
     mode: mpi_strip.IntensityMode,
-    image_x: float,
-    image_y: float,
-) -> list[tuple[str, bool]] | None:
-    """What's under the mouse at (`image_x`, `image_y`), for display: one
-    `(text, is_under_mouse)` per line, the detector pixel or band the mouse
-    is directly over marked. Lines stay in a fixed order (and the pixel line
-    is always there), so the list doesn't jump about as the mouse moves.
+    *,
+    frames_url: str,
+    pixels_url: str,
+) -> dict[str, Any]:
+    """`strip`'s layout (in image pixels) and where its readout data is, for
+    `_READOUT_JS` -- see `mpi_strip.MpiStrip`'s `column_at`, `pixel_index_at`
+    and `band_at`, which this mirrors.
     """
-    column = strip.column_at(image_x)
-    if column is None:
-        return None
-    if column.kind == "separator":
-        return [("Between two recordings merged into this collection.", False)]
-    if column.kind == "missing" or column.frame_index is None:
-        return [(f"Frame {column.frame_counter}: not received.", False)]
-    frame = frames[column.frame_index]
-    lines = [
-        (f"Frame {column.frame_counter}", False),
-        (
-            f"{frame['collected_at']:%Y-%m-%d} {_time_text(frame['collected_at'])} UTC",
-            False,
-        ),
-    ]
-    pixel = strip.pixel_index_at(image_y)
-    if pixel is None:
-        lines.append(("Pixel: -", False))
-    else:
-        value = strip.pixel_value(column.frame_index, pixel)
-        if value is None:
-            text = f"Pixel {pixel}: none"
-        elif mode == "minus_median":
-            text = f"Pixel {pixel}: {value:+.0f} DN vs its median"
-        elif mode in _CLEAN_STEPS:
-            text = f"Pixel {pixel}: {value:.1f} DN (cleaned, {_CLEAN_STEPS[mode]})"
-        else:
-            text = f"Pixel {pixel}: {value:.0f} DN"
-        lines.append((text, True))
-    band = strip.band_at(image_y)
-    lines += [
-        (
-            _band_value_text(b, frame.get(b.column)),
-            band is not None and band.band == b,
-        )
-        for b in mpi_strip.BANDS
-    ]
-    lines.append(
-        (f"{frame['timing_method']} (sync {frame['time_sync_source']})", False)
-    )
-    return lines
+    return {
+        "framesUrl": frames_url,
+        "pixelsUrl": pixels_url,
+        "width": strip.width,
+        "height": strip.height,
+        "zoom": strip.zoom,
+        "binColumns": strip.bin_columns,
+        "firstPixel": strip.first_pixel_index,
+        "pixelCount": strip.pixel_count,
+        "detectorHeight": strip.detector_height,
+        "rowHeight": strip.detector_height / max(1, strip.pixel_count),
+        "bandTops": [b.top for b in strip.bands],
+        "bandHeight": mpi_strip.BAND_HEIGHT,
+        "pixelFormat": _pixel_format(mode),
+    }
 
 
-def _readout_html(lines: list[tuple[str, bool]]) -> str:
-    """`lines` (see `_readout_lines`) as a bulleted list, the one under the
-    mouse in bold.
+def _pixels_f32(strip: mpi_strip.MpiStrip) -> bytes:
+    """`strip`'s pixel values (one row per frame, NaN for none) as raw
+    little-endian float32, for `_READOUT_JS`'s `Float32Array` -- half the
+    size of float64. Good to ~0.002 DN at the detector's ~24,000 DN, so the
+    readout's 0.1 DN can only differ from float64's right at a rounding tie.
     """
-    items = "".join(
-        f"<li><b>{html.escape(text)}</b></li>"
-        if bold
-        else f"<li>{html.escape(text)}</li>"
-        for text, bold in lines
-    )
-    return f'<ul class="list-disc pl-5 m-0">{items}</ul>'
+    return np.ascontiguousarray(strip.pixel_values, dtype="<f4").tobytes()
+
+
+# The page's readout, as `mpiVisReadout`: `attach` (per strip rendered)
+# fetches its data, and `move` (on each mousemove over it) shows what's
+# under the mouse -- one line per field, in a fixed order (the pixel line is
+# always there) so the list doesn't jump about, the detector pixel or band
+# the mouse is directly over in bold.
+_READOUT_JS = """
+window.mpiVisReadout = (() => {
+    // Fetches by URL (content addressed, so never stale), newest last: a
+    // few kept, so flipping between settings doesn't refetch.
+    const cache = new Map();
+    const load = (url, parse) => {
+        let p = cache.get(url);
+        if (p) {
+            cache.delete(url);
+        } else {
+            p = fetch(url).then((r) => {
+                if (!r.ok) throw new Error(`HTTP ${r.status} fetching ${url}`);
+                return parse(r);
+            });
+            p.catch(() => { if (cache.get(url) === p) cache.delete(url); });
+        }
+        cache.set(url, p);
+        while (cache.size > 6) cache.delete(cache.keys().next().value);
+        return p;
+    };
+    // `v` to `decimals` places as Python's format spec does: `toFixed`
+    // rounds an exact tie (e.g. 18.25 to 1 place) up, Python to even.
+    const fixed = (v, decimals) => {
+        const a = Math.abs(v);
+        // A tie's a multiple of 2^-(decimals+1) -- small, so exactly scaled.
+        if (Number.isInteger(a * 2 ** (decimals + 1))) {
+            const scaled = a * 10 ** decimals;
+            const n = Math.floor(scaled);
+            if (scaled - n === 0.5) {
+                return (v < 0 ? '-' : '')
+                    + ((n % 2 ? n + 1 : n) / 10 ** decimals).toFixed(decimals);
+            }
+        }
+        return v.toFixed(decimals);
+    };
+    const num = (v, decimals, signed) =>
+        (signed && v >= 0 ? '+' : '') + fixed(v, decimals);
+
+    // The strip on the page (there's only ever one).
+    let view = null;
+
+    const lines = ({ cfg, frames, pixels }, x, y) => {
+        const i = Math.floor(x * cfg.binColumns / cfg.zoom);
+        if (!(i >= 0 && i < frames.columnFrames.length)) return null;
+        const f = frames.columnFrames[i];
+        if (f === COLUMN_SEPARATOR) {
+            return [['Between two recordings merged into this collection.', false]];
+        }
+        const counter = frames.columnCounters[i];
+        if (f < 0) return [[`Frame ${counter}: not received.`, false]];
+        const out = [[`Frame ${counter}`, false], [frames.times[f], false]];
+        if (y >= 0 && y < cfg.detectorHeight) {
+            const p = Math.floor(y / cfg.rowHeight);
+            const pixel = cfg.firstPixel + p;
+            const value = pixels[f * cfg.pixelCount + p];
+            const fmt = cfg.pixelFormat;
+            out.push([
+                Number.isNaN(value) ? `Pixel ${pixel}: none` : `Pixel ${pixel}: `
+                    + `${num(value, fmt.decimals, fmt.signed)}${fmt.suffix}`,
+                true,
+            ]);
+        } else {
+            out.push(['Pixel: -', false]);
+        }
+        frames.bands.forEach((b, k) => {
+            const value = b.values[f];
+            const top = cfg.bandTops[k];
+            const unit = b.unit ? ` ${b.unit}` : '';
+            out.push([
+                value == null ? `${b.label}: ?`
+                    : `${b.label}: ${num(value, b.decimals, false)}${unit}`,
+                y >= top && y < top + cfg.bandHeight,
+            ]);
+        });
+        out.push([frames.timing[f], false]);
+        return out;
+    };
+
+    const show = (v, x, y) => {
+        const el = getHtmlElement(v.readoutId);
+        if (!el) return;
+        if (v.failed) {
+            el.textContent = "Couldn't load the strip's values -- reload the page.";
+            return;
+        }
+        const ls = lines(v, x, y);
+        if (!ls) return;
+        const ul = document.createElement('ul');
+        ul.className = 'list-disc pl-5 m-0';
+        for (const [text, bold] of ls) {
+            const li = ul.appendChild(document.createElement('li'));
+            const target = bold ? li.appendChild(document.createElement('b')) : li;
+            target.textContent = text;
+        }
+        el.replaceChildren(ul);
+    };
+
+    return {
+        attach(canvasId, readoutId, cfg) {
+            const v = { canvasId, readoutId, cfg, frames: null, pixels: null };
+            view = v;
+            Promise.all([
+                load(cfg.framesUrl, (r) => r.json()),
+                load(cfg.pixelsUrl, async (r) => (
+                    new Float32Array(await r.arrayBuffer()))),
+            ]).then(([frames, pixels]) => {
+                v.frames = frames;
+                v.pixels = pixels;
+            }).catch((err) => {
+                console.error('MPI Vis readout:', err);
+                v.failed = true;
+            }).finally(() => {
+                // Catch up with a mouse that's been over it meanwhile.
+                if (view === v && v.last) show(v, ...v.last);
+            });
+        },
+        move(canvasId, e) {
+            const v = view;
+            if (!v || v.canvasId !== canvasId) return;
+            const r = getHtmlElement(canvasId)?.getBoundingClientRect();
+            if (!r || !r.width || !r.height) return;
+            v.last = [
+                (e.clientX - r.left) * v.cfg.width / r.width,
+                (e.clientY - r.top) * v.cfg.height / r.height,
+            ];
+            if (v.frames || v.failed) show(v, ...v.last);
+        },
+    };
+})();
+""".replace("COLUMN_SEPARATOR", str(_COLUMN_SEPARATOR))
 
 
 def _legend(gradient_css: str, low: str, high: str) -> None:
@@ -358,6 +523,7 @@ def _strip_canvas(
 def _strip_body(  # noqa: PLR0913
     strip: mpi_strip.MpiStrip,
     frames: list[dict[str, Any]],
+    frames_json: bytes,
     mode: mpi_strip.IntensityMode,
     filename: str,
     zoom: int | None,
@@ -366,6 +532,7 @@ def _strip_body(  # noqa: PLR0913
     """Build the strip, its legends and readout, at `zoom` screen pixels per
     column -- the image stretched to that, pixelated -- or fit to the
     width (None); returns the strip's horizontally-scrolling container.
+    `frames_json`: `frames`' `_readout_frames_json`.
     """
     fit = zoom is None
     with ui.row().classes("w-full items-center gap-6"):
@@ -407,39 +574,26 @@ def _strip_body(  # noqa: PLR0913
         .style(f"min-height: {readout_lines * 1.25}rem")
     )
 
-    def on_mouse(e: GenericEventArguments) -> None:
-        lines = _readout_lines(
-            strip, frames, mode, e.args["image_x"], e.args["image_y"]
-        )
-        if lines is None:
-            return
-        # Straight into the DOM, not `readout.set_content`: any element update
-        # makes NiceGUI re-render the whole page's Vue tree, and a burst of
-        # them (when the server's busy, e.g. the pipeline's running, and
-        # catches up on a backlog of mouse events) ties up the browser's
-        # main thread -- freezing the crosshair, which is drawn there.
-        readout.client.run_javascript(
-            f"""(() => {{
-                const el = getHtmlElement({readout.id});
-                if (el) el.innerHTML = {orjson.dumps(_readout_html(lines)).decode()};
-            }})()"""
-        )
-
-    # Only where the mouse is, in image pixels -- the readout's built here,
-    # from data the browser doesn't have.
-    canvas.on(
-        "mousemove",
-        on_mouse,
-        throttle=0.05,
-        js_handler=f"""(e) => {{
-            const r = getHtmlElement({canvas.id}).getBoundingClientRect();
-            if (!r.width || !r.height) return;
-            emit({{
-                image_x: (e.clientX - r.left) * {strip.width} / r.width,
-                image_y: (e.clientY - r.top) * {strip.height} / r.height,
-            }});
-        }}""",
+    # Entirely in the browser (see `_READOUT_JS`): the handler never emits,
+    # so the mouse never waits on -- or loads -- the server. The data's
+    # fetched over HTTP rather than pushed down the websocket: it's a few MB
+    # for a long collection, and the browser caches it.
+    stem = filename.removesuffix(".png")
+    config = _readout_config(
+        strip,
+        mode,
+        frames_url=preview_image_url(
+            frames_json, "application/json", f"{stem}_frames.json"
+        ),
+        pixels_url=preview_image_url(
+            _pixels_f32(strip), "application/octet-stream", f"{stem}_{mode}.f32"
+        ),
     )
+    readout.client.run_javascript(
+        f"mpiVisReadout.attach({canvas.id}, {readout.id}, "
+        f"{orjson.dumps(config).decode()})"
+    )
+    canvas.on("mousemove", js_handler=f"(e) => mpiVisReadout.move({canvas.id}, e)")
     return scroller
 
 
@@ -680,6 +834,9 @@ class _LoadedCollection:
     prepared: mpi_strip.PreparedFrames
     # Each frame's fields bar its pixels, for the readout and time axis.
     frame_rows: list[dict[str, Any]]
+    # The readout's data that's the same in every strip of it, for the
+    # browser -- see `_readout_frames_json`.
+    readout_frames_json: bytes
     summary: str
 
 
@@ -693,9 +850,11 @@ def _load_collection(
     prepared = mpi_strip.prepare_frames(frames)
     if prepared is None:
         return None
+    frame_rows = frames.drop("pixels").to_dicts()
     return _LoadedCollection(
         prepared=prepared,
-        frame_rows=frames.drop("pixels").to_dicts(),
+        frame_rows=frame_rows,
+        readout_frames_json=_readout_frames_json(prepared.columns, frame_rows),
         summary=_summary_text(frames),
     )
 
@@ -1041,6 +1200,7 @@ class _StripViewer:
             self._scroller = _strip_body(
                 strip,
                 loaded.frame_rows,
+                loaded.readout_frames_json,
                 mode,
                 self._filename,
                 zoom,
@@ -1091,6 +1251,7 @@ def build_mpi_vis_page(data_dir: Path, *, collection: str | None = None) -> None
     newest collection with any frames downlinked.
     """
     ui.add_css(_TOGGLE_CSS)
+    ui.add_body_html(f"<script>{_READOUT_JS}</script>")
     with page_shell():
         ui.label("MPI Vis").classes("text-2xl font-bold")
         view = _MpiStripView(data_dir)
