@@ -34,9 +34,9 @@ __all__ = ["AttitudePlayer", "AttitudeView", "Pacing"]
 
 import bisect
 import math
-import time
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import orjson
@@ -48,7 +48,6 @@ from . import data as beacon_data
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
-    from pathlib import Path
 
     from nicegui import events
     from nicegui.elements.scene.scene_object3d import Object3D
@@ -351,6 +350,24 @@ class AttitudeView:
             "}"
         )
 
+    def client_ids(self) -> dict[str, Any]:
+        """The ids `attitude_player.js` needs to re-pose this view itself:
+        scene object ids (for the scene's `rotate`/`move`/...) and NiceGUI
+        element ids (for the client-side element store).
+        """
+        return {
+            "scene": self._scene.id,
+            "body": self._body.id,
+            "rate_arrow": self._rate_arrow.id,
+            "shaft": self._shaft.id,
+            "head": self._head.id,
+            "rate_label": self._rate_label.id,
+            "axis_labels": {a: label.id for a, label in self._axis_labels.items()},
+            "readout": {name: label.id for name, label in self._readout.items()},
+            "caption": self._caption.id,
+            "no_attitude": self._no_attitude.id,
+        }
+
     def update(self, row: dict[str, Any] | None, caption: str) -> None:
         """Re-pose the model from an extended-beacon `row` (None or missing
         attitude fields leaves it at zero attitude, with a note).
@@ -446,8 +463,9 @@ _TIME_SCALE_CHOICES: dict[float, str] = {
 _DEFAULT_FRAME_RATE = 2.0
 _DEFAULT_TIME_SCALE = 30.0
 
-# Real-time mode ticks at a fixed rate and advances the clock by however
-# much wall time actually elapsed, so a slow tick doesn't slow playback.
+# Real-time mode (in `attitude_player.js`) ticks at a fixed rate and
+# advances the clock by however much wall time actually elapsed, so a slow
+# tick doesn't slow playback.
 _REAL_TIME_TICK_SEC = 0.1
 # "Skip gaps": no frame is held on screen longer than this -- once it has
 # been, the clock jumps straight to the next beacon. So the hours between
@@ -455,6 +473,24 @@ _REAL_TIME_TICK_SEC = 0.1
 # their true (scaled) length and a longer gap never plays shorter than a
 # shorter one.
 _MAX_HOLD_SEC = 1.5
+
+
+# How long to wait for the browser to report where playback stopped before
+# falling back to the frame playback started from.
+_PAUSE_SYNC_TIMEOUT_SEC = 5.0
+
+_PLAYER_JS = Path(__file__).with_name("attitude_player.js").read_text()
+
+
+def _to_epoch(t: datetime) -> float:
+    """Seconds since the epoch, taking a naive `t` as UTC (see `_from_epoch`)."""
+    return (t if t.tzinfo else t.replace(tzinfo=UTC)).timestamp()
+
+
+def _from_epoch(seconds: float, like: datetime) -> datetime:
+    """Inverse of `_to_epoch`, naive or aware to match `like`."""
+    t = datetime.fromtimestamp(seconds, like.tzinfo or UTC)
+    return t if like.tzinfo else t.replace(tzinfo=None)
 
 
 class AttitudePlayer:
@@ -468,10 +504,18 @@ class AttitudePlayer:
     that was never measured. The caption shows each frame's gap to the
     previous one instead, so a jump across a gap is obvious.
 
+    Playback runs in the browser (`attitude_player.js`): pressing play
+    sends every frame in the window at once, and the client re-poses the
+    view itself, so a dropped request can't stall or stutter it. While
+    playing, the server only forwards control changes (seek, speed,
+    pacing); when playback stops it asks the client where it got to and
+    re-renders that frame server-side, which re-syncs every element.
+
     `reload()` (called on the page's periodic refresh) re-queries the
     window, keeping the current frame by timestamp -- or, if the scrubber
     is parked on the newest frame, following the newest one as new
-    beacons arrive.
+    beacons arrive. A reload that lands mid-playback is held until
+    playback stops.
     """
 
     def __init__(
@@ -492,13 +536,15 @@ class AttitudePlayer:
 
         self._pacing = Pacing.PER_BEACON
         self._speed = _DEFAULT_FRAME_RATE
-        # Real-time mode state: the satellite-time instant being shown, and
-        # (monotonic) wall-clock bookkeeping for advancing it.
+        # Real-time mode: the satellite-time instant being shown.
         self._clock: datetime | None = None
-        self._last_tick_wall = 0.0
-        self._frame_shown_wall = 0.0
+        self._playing = False
+        # A reload that arrived mid-playback, applied once playback stops.
+        self._pending: tuple[list[dict[str, Any]], bool] | None = None
 
+        ui.add_head_html(f"<script>{_PLAYER_JS}</script>")
         self._view = AttitudeView()
+        self._client = self._view.container.client
         with self._view.container:
             with ui.row().classes("w-full items-center gap-1 flex-wrap"):
                 ui.select(
@@ -540,7 +586,9 @@ class AttitudePlayer:
                     on_change=self._set_speed,
                 ).classes("w-40 ml-2")
                 self._skip_gaps = (
-                    ui.checkbox("Skip gaps", value=True)
+                    ui.checkbox(
+                        "Skip gaps", value=True, on_change=self._push_client_config
+                    )
                     .tooltip(
                         f"Hold each beacon for at most {_MAX_HOLD_SEC:g}s, "
                         "skipping long waits (e.g. between passes)."
@@ -552,7 +600,15 @@ class AttitudePlayer:
             self._slider = ui.slider(
                 min=0, max=1, value=0, on_change=self._on_slider
             ).classes("w-full px-2")
-        self._timer = ui.timer(1.0 / self._speed, self._tick, active=False)
+
+        self._client_ids = {
+            **self._view.client_ids(),
+            "position": self._position.id,
+            "slider": self._slider.id,
+            "ended_event": f"cts1_attitude_ended_{self._view.client_ids()['scene']}",
+        }
+        self._client_ids_json = orjson.dumps(self._client_ids).decode()
+        ui.on(self._client_ids["ended_event"], self._on_client_ended)
         self.reload()
 
     # -- data ---------------------------------------------------------------
@@ -571,6 +627,9 @@ class AttitudePlayer:
         """`reload`, with the query run off the event loop."""
         loaded = await run.io_bound(self._load_frames, self._hours)
         if loaded is None:  # Only when the server's shutting down.
+            return
+        if self._playing:
+            self._pending = loaded
             return
         frames, showing_fallback = loaded
         self._apply_frames(frames, showing_fallback=showing_fallback)
@@ -614,6 +673,7 @@ class AttitudePlayer:
 
     async def _set_window(self, label: str) -> None:
         self._hours = self._window_choices[label]
+        await self._pause()
         await self.reload_async()
 
     # -- navigation ---------------------------------------------------------
@@ -631,22 +691,28 @@ class AttitudePlayer:
 
     def _jump(self, index: int) -> None:
         """Oldest/latest buttons: move there, keep playing if playing."""
-        self._seek(index)
+        if self._playing:
+            self._client_call("seek", index)
+        else:
+            self._seek(index)
 
-    def _step(self, delta: int) -> None:
-        self._pause()
+    async def _step(self, delta: int) -> None:
+        await self._pause()
         self._seek(self._index + delta)
 
     def _on_slider(self, e: events.ValueChangeEventArguments) -> None:
         if e.value is None or not self._frames:
             return
+        if self._playing:  # The user dragged the scrubber mid-playback.
+            self._client_call("seek", int(e.value))
+            return
         self._on_frame(int(e.value))
 
     def _on_frame(self, index: int) -> None:
         self._index = max(0, min(index, len(self._frames) - 1))
-        # Keep the real-time clock inside the shown frame's span. A tick that
-        # advanced the clock into this frame is already inside it (keep its
-        # sub-frame progress); a manual seek isn't (snap to the frame).
+        # Keep the real-time clock inside the shown frame's span. A clock the
+        # client's playback left inside this frame keeps its sub-frame
+        # progress; a manual seek snaps it to the frame.
         if self._frames:
             start = self._times[self._index]
             end = (
@@ -658,7 +724,6 @@ class AttitudePlayer:
                 start <= self._clock and (end is None or self._clock < end)
             ):
                 self._clock = start
-        self._frame_shown_wall = time.monotonic()
         self._show()
 
     # -- playback -----------------------------------------------------------
@@ -671,65 +736,132 @@ class AttitudePlayer:
             options, self._speed = _TIME_SCALE_CHOICES, _DEFAULT_TIME_SCALE
         self._speed_select.set_options(options, value=self._speed)
         self._skip_gaps.set_visibility(pacing is Pacing.REAL_TIME)
-        self._apply_timer_interval()
+        self._push_client_config()
 
     def _set_speed(self, e: events.ValueChangeEventArguments) -> None:
         if e.value is None:
             return
         self._speed = float(e.value)
-        self._apply_timer_interval()
+        self._push_client_config()
 
-    def _apply_timer_interval(self) -> None:
-        self._timer.interval = (
-            1.0 / self._speed
-            if self._pacing is Pacing.PER_BEACON
-            else _REAL_TIME_TICK_SEC
+    def _client_config(self) -> dict[str, Any]:
+        return {
+            "pacing": self._pacing.value,
+            "speed": self._speed,
+            "skipGaps": bool(self._skip_gaps.value),
+            "maxHoldSec": _MAX_HOLD_SEC,
+            "realTimeTickSec": _REAL_TIME_TICK_SEC,
+        }
+
+    def _push_client_config(self) -> None:
+        if self._playing:
+            self._client_call("configure", self._client_config())
+
+    def _client_call(self, method: str, *args: Any) -> None:
+        """Fire-and-forget `cts1Attitude.<method>(sceneId, ...args)`."""
+        args_js = "".join(f", {orjson.dumps(a).decode()}" for a in args)
+        self._client.run_javascript(
+            f"cts1Attitude.{method}({self._client_ids['scene']}{args_js})"
         )
 
-    def _toggle_play(self) -> None:
-        if self._timer.active:
-            self._pause()
-            return
+    def _client_frames(self) -> dict[str, list[Any]]:
+        """Every frame, column-wise, for `attitude_player.js`: just the
+        values its render needs, with the caption pre-formatted.
+        """
+        rows = self._frames
+
+        def col(name: str) -> list[Any]:
+            return [row.get(name) for row in rows]
+
+        return {
+            "t": [_to_epoch(t) for t in self._times],
+            "roll": col("adcs_estimated_roll_angle_deg"),
+            "pitch": col("adcs_estimated_pitch_angle_deg"),
+            "yaw": col("adcs_estimated_yaw_angle_deg"),
+            "wx": col("adcs_estimated_rate_x_deg_per_sec"),
+            "wy": col("adcs_estimated_rate_y_deg_per_sec"),
+            "wz": col("adcs_estimated_rate_z_deg_per_sec"),
+            "est": [_mode(row, "adcs_attitude_estimation_mode") for row in rows],
+            "ctrl": [_mode(row, "adcs_control_mode") for row in rows],
+            "caption": [self._caption(i) for i in range(len(rows))],
+        }
+
+    async def _toggle_play(self) -> None:
+        if self._playing:
+            await self._pause()
+        else:
+            self._play()
+
+    def _play(self) -> None:
         if len(self._frames) <= 1:
             return
         if self._index >= len(self._frames) - 1:
             self._seek(0)  # at the end: play again from the start
-        self._last_tick_wall = time.monotonic()
-        self._frame_shown_wall = self._last_tick_wall
-        self._timer.activate()
+        self._playing = True
         self._play_button.props("icon=pause")
+        state = {
+            **self._client_config(),
+            "index": self._index,
+            "clock": None if self._clock is None else _to_epoch(self._clock),
+        }
+        # orjson writes NaN as null, which the client reads as "no value".
+        frames_json = orjson.dumps(self._client_frames()).decode()
+        self._client.run_javascript(
+            f"cts1Attitude.play({self._client_ids_json}, {frames_json}, "
+            f"{orjson.dumps(state).decode()})"
+        )
 
-    def _pause(self) -> None:
-        self._timer.deactivate()
-        self._play_button.props("icon=play_arrow")
-
-    def _tick(self) -> None:
-        if self._index >= len(self._frames) - 1:
-            self._pause()
+    async def _pause(self) -> None:
+        """Stop playback, then re-sync to wherever the client got to."""
+        if not self._playing:
             return
-        if self._pacing is Pacing.PER_BEACON:
-            self._seek(self._index + 1)
-        else:
-            self._tick_real_time()
+        self._playing = False
+        self._play_button.props("icon=play_arrow")
+        try:
+            state = await self._client.run_javascript(
+                f"return cts1Attitude.pause({self._client_ids['scene']})",
+                timeout=_PAUSE_SYNC_TIMEOUT_SEC,
+            )
+        except TimeoutError:
+            state = None  # Fall back to the frame playback started from.
+        self._sync_from_client(state)
 
-    def _tick_real_time(self) -> None:
-        now = time.monotonic()
-        elapsed = now - self._last_tick_wall
-        self._last_tick_wall = now
-        if self._clock is None:
-            self._clock = self._times[self._index]
-        self._clock += timedelta(seconds=elapsed * self._speed)
+    def _on_client_ended(self, e: events.GenericEventArguments) -> None:
+        """The client's playback reached the last frame and stopped."""
+        if not self._playing:
+            return
+        self._playing = False
+        self._play_button.props("icon=play_arrow")
+        self._sync_from_client(e.args)
 
-        if self._skip_gaps.value and now - self._frame_shown_wall >= _MAX_HOLD_SEC:
-            self._clock = max(self._clock, self._times[self._index + 1])
-
-        # The newest beacon at/before the clock. At high speeds this can
-        # skip several beacons in one tick, same as real playback would.
-        index = bisect.bisect_right(self._times, self._clock) - 1
-        if index != self._index:
-            self._seek(index)
+    def _sync_from_client(self, state: Any) -> None:
+        """Re-render, server-side, the frame the client stopped on (`state`
+        is `{index, clock}` from `attitude_player.js`, or None if unknown).
+        That brings every element's server-side state back in line with
+        what the client shows. Then apply any reload held during playback.
+        """
+        index = self._index
+        if isinstance(state, dict) and self._frames:
+            index = int(state.get("index", index))
+            clock = state.get("clock")
+            if clock is not None:
+                self._clock = _from_epoch(float(clock), self._times[0])
+        self._seek(index, force=True)
+        if self._pending is not None:
+            (frames, showing_fallback), self._pending = self._pending, None
+            self._apply_frames(frames, showing_fallback=showing_fallback)
 
     # -- rendering ----------------------------------------------------------
+
+    def _caption(self, index: int) -> str:
+        beacon_time = self._times[index]
+        caption = f"From extended beacon at {self._format_time(beacon_time)}"
+        if self._showing_fallback:
+            caption += " -- none in the playback window, showing the latest"
+        elif index > 0:
+            gap = beacon_time - self._times[index - 1]
+            caption += f" -- {duration_str(gap)} after the previous frame"
+        return caption
 
     def _show(self) -> None:
         if not self._frames:
@@ -737,13 +869,5 @@ class AttitudePlayer:
             self._position.set_text("")
             return
 
-        row = self._frames[self._index]
-        beacon_time = row[beacon_data.BEACON_TIME_COLUMN]
-        caption = f"From extended beacon at {self._format_time(beacon_time)}"
-        if self._showing_fallback:
-            caption += " -- none in the playback window, showing the latest"
-        elif self._index > 0:
-            gap = beacon_time - self._times[self._index - 1]
-            caption += f" -- {duration_str(gap)} after the previous frame"
-        self._view.update(row, caption)
+        self._view.update(self._frames[self._index], self._caption(self._index))
         self._position.set_text(f"Frame {self._index + 1} of {len(self._frames)}")
