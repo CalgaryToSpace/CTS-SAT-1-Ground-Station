@@ -192,8 +192,10 @@
         scene.move(ids.rate_label, ...rates.map((c) => (c / norm) * (length + 0.25)));
         texts[ids.rate_label] = `ω ${norm.toFixed(2)}°/s`;
       }
-      scene.visible(ids.rate_arrow, showRate);
-      scene.visible(ids.rate_label, showRate);
+      // Drawn only when its checkbox (an element in the store) is ticked.
+      const vectorEnabled = !!store[ids.show_rate_vector]?.props?.["model-value"];
+      scene.visible(ids.rate_arrow, showRate && vectorEnabled);
+      scene.visible(ids.rate_label, showRate && vectorEnabled);
       for (const [id, text] of Object.entries(texts)) {
         const obj = scene.objects?.get(id);
         if (obj?.element && obj.element.textContent !== text) obj.element.textContent = text;

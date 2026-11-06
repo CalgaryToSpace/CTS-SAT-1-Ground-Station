@@ -230,13 +230,23 @@ class AttitudeView:
                             self._readout[name] = ui.label().classes(
                                 "text-base font-medium font-mono"
                             )
+                    # Off by default: the arrow swings around a lot from frame
+                    # to frame, which is distracting during playback.
+                    self._show_rate_vector = ui.checkbox(
+                        "Show angular velocity vector",
+                        value=False,
+                        on_change=self._apply_rate_visibility,
+                    ).tooltip(
+                        "Yellow arrow along the instantaneous rotation axis, "
+                        "length log-scaled by the rotation rate."
+                    )
                     ui.icon("info_outline", size="sm").classes(
                         "text-grey cursor-help"
                     ).tooltip(
                         "Orbit frame: +X ram, +Z nadir, -Y orbit normal. "
                         "Euler 3-2-1 (yaw, pitch, roll). Body rates drawn in "
-                        "body axes; yellow arrow = angular velocity vector "
-                        "(log-scaled). Drag to orbit the camera."
+                        "body axes; yellow arrow (optional) = angular velocity "
+                        "vector (log-scaled). Drag to orbit the camera."
                     )
         self._scene.move_camera(3.4, -4.6, 2.6, 0.3, 0, -0.2, duration=0)
 
@@ -327,6 +337,15 @@ class AttitudeView:
                 ).material(_RATE_COLOR)
             self._rate_label = scene.text("", _LABEL_STYLE)
         self._label_text: dict[str, str] = {}
+        # Whether the current frame has a rate worth drawing; the arrow is
+        # shown only if this and the "Show angular velocity vector" box are
+        # both set.
+        self._has_rate = False
+
+    def _apply_rate_visibility(self) -> None:
+        show = self._has_rate and bool(self._show_rate_vector.value)
+        self._rate_arrow.visible(show)
+        self._rate_label.visible(show)
 
     def _set_label_texts(self, texts: dict[Object3D, str]) -> None:
         """Change scene text labels in place. `ui.scene` has no API for this,
@@ -366,6 +385,7 @@ class AttitudeView:
             "readout": {name: label.id for name, label in self._readout.items()},
             "caption": self._caption.id,
             "no_attitude": self._no_attitude.id,
+            "show_rate_vector": self._show_rate_vector.id,
         }
 
     def update(self, row: dict[str, Any] | None, caption: str) -> None:
@@ -411,9 +431,8 @@ class AttitudeView:
             self._head.move(0, shaft_length + _RATE_HEAD_LENGTH / 2, 0)
             self._rate_label.move(*(c / norm * (length + 0.25) for c in omega))
             texts[self._rate_label] = f"ω {norm:.2f}°/s"
-        if self._rate_arrow.visible_ != show_rate:
-            self._rate_arrow.visible(show_rate)
-            self._rate_label.visible(show_rate)
+        self._has_rate = show_rate
+        self._apply_rate_visibility()
         self._set_label_texts(texts)
 
         self._no_attitude.set_visibility(not has_attitude)
