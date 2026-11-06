@@ -469,18 +469,24 @@ _FRAME_RATE_CHOICES: dict[float, str] = {
     2.0: "2 beacons/s",
     5.0: "5 beacons/s",
     10.0: "10 beacons/s",
+    20.0: "20 beacons/s",
+    50.0: "50 beacons/s",
+    100.0: "100 beacons/s",
 }
 # Real-time speeds: seconds of satellite time per second of playback.
 _TIME_SCALE_CHOICES: dict[float, str] = {
     1.0: "1x (real time)",
     10.0: "10x",
+    20.0: "20x",
     30.0: "30x",
+    50.0: "50x",
     60.0: "60x (1 min/s)",
+    100.0: "100x",
     300.0: "300x (5 min/s)",
     3600.0: "3600x (1 h/s)",
 }
-_DEFAULT_FRAME_RATE = 2.0
-_DEFAULT_TIME_SCALE = 30.0
+_DEFAULT_FRAME_RATE = 20.0
+_DEFAULT_TIME_SCALE = 3600.0
 
 # Real-time mode (in `attitude_player.js`) ticks at a fixed rate and
 # advances the clock by however much wall time actually elapsed, so a slow
@@ -553,8 +559,8 @@ class AttitudePlayer:
         self._index = 0
         self._showing_fallback = False
 
-        self._pacing = Pacing.PER_BEACON
-        self._speed = _DEFAULT_FRAME_RATE
+        self._pacing = Pacing.REAL_TIME
+        self._speed = _DEFAULT_TIME_SCALE
         # Real-time mode: the satellite-time instant being shown.
         self._clock: datetime | None = None
         self._playing = False
@@ -599,7 +605,7 @@ class AttitudePlayer:
                     "(true timing between beacons)."
                 )
                 self._speed_select = ui.select(
-                    _FRAME_RATE_CHOICES,
+                    _TIME_SCALE_CHOICES,
                     value=self._speed,
                     label="Speed",
                     on_change=self._set_speed,
@@ -614,7 +620,7 @@ class AttitudePlayer:
                     )
                     .classes("ml-1")
                 )
-                self._skip_gaps.set_visibility(False)
+                self._skip_gaps.set_visibility(self._pacing is Pacing.REAL_TIME)
                 self._position = ui.label().classes("text-caption text-grey ml-2")
             self._slider = ui.slider(
                 min=0, max=1, value=0, on_change=self._on_slider
