@@ -156,7 +156,7 @@ def _mpi_frames(mpi_frames: pl.LazyFrame) -> pl.LazyFrame:
     )
 
 
-@cached(TTLCache(maxsize=2, ttl=_CACHE_TTL_SECONDS))
+@cached(TTLCache(maxsize=2, ttl=_CACHE_TTL_SECONDS), lock=threading.Lock())
 def load_collection_timeline(data_dir: Path) -> pl.DataFrame:
     """One row per `BIN_SECONDS` bin of each source with anything in it:
     `collected_at` (the bin's start) and `count`, how many distinct

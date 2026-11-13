@@ -42,6 +42,7 @@ __all__ = [
     "v5plus_receive_delay_vs_time_since_sync",
 ]
 
+import threading
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -199,7 +200,7 @@ def _scan_beacons(
     )
 
 
-@cached(TTLCache(maxsize=3, ttl=_CACHE_TTL_SECONDS))
+@cached(TTLCache(maxsize=3, ttl=_CACHE_TTL_SECONDS), lock=threading.Lock())
 def load_packet_counts_per_window(
     path: Path = DEFAULT_PARQUET_PATH,
     *,
@@ -274,7 +275,7 @@ def _dedupe_by_beacon_time(lf: pl.LazyFrame) -> pl.LazyFrame:
     )
 
 
-@cached(TTLCache(maxsize=3, ttl=_CACHE_TTL_SECONDS))
+@cached(TTLCache(maxsize=3, ttl=_CACHE_TTL_SECONDS), lock=threading.Lock())
 def load_beacon_window(
     path: Path = DEFAULT_PARQUET_PATH, *, since: datetime | None = None
 ) -> pl.DataFrame:
@@ -292,7 +293,7 @@ def load_beacon_window(
     return _dedupe_by_beacon_time(lf).collect()
 
 
-@cached(TTLCache(maxsize=3, ttl=_CACHE_TTL_SECONDS))
+@cached(TTLCache(maxsize=3, ttl=_CACHE_TTL_SECONDS), lock=threading.Lock())
 def load_attitude_window(
     path: Path = DEFAULT_PARQUET_PATH, *, since: datetime | None = None
 ) -> pl.DataFrame:
@@ -331,7 +332,7 @@ def _filter_to_ranges(
     return lf.filter(in_any_range)
 
 
-@cached(TTLCache(maxsize=3, ttl=_CACHE_TTL_SECONDS))
+@cached(TTLCache(maxsize=3, ttl=_CACHE_TTL_SECONDS), lock=threading.Lock())
 def load_bulk_file_downlink_packets(
     path: Path = DEFAULT_PARQUET_PATH,
     *,
@@ -357,7 +358,7 @@ def load_bulk_file_downlink_packets(
     return lf.sort("bulk_file_offset", "received_at").collect()
 
 
-@cached(TTLCache(maxsize=3, ttl=_CACHE_TTL_SECONDS))
+@cached(TTLCache(maxsize=3, ttl=_CACHE_TTL_SECONDS), lock=threading.Lock())
 def load_reassembled_tcmd_responses(
     path: Path = DEFAULT_REASSEMBLED_TCMD_PATH,
     *,
@@ -379,7 +380,7 @@ def load_reassembled_tcmd_responses(
     return lf.sort("first_received_at").collect()
 
 
-@cached(TTLCache(maxsize=3, ttl=_CACHE_TTL_SECONDS))
+@cached(TTLCache(maxsize=3, ttl=_CACHE_TTL_SECONDS), lock=threading.Lock())
 def latest_beacons(
     path: Path = DEFAULT_PARQUET_PATH,
     n: int = 10,
@@ -404,7 +405,7 @@ def latest_beacons(
     return newest_rows(lf, n, column=BEACON_TIME_COLUMN)
 
 
-@cached(TTLCache(maxsize=3, ttl=_CACHE_TTL_SECONDS))
+@cached(TTLCache(maxsize=3, ttl=_CACHE_TTL_SECONDS), lock=threading.Lock())
 def latest_friendly_message(
     path: Path = DEFAULT_PARQUET_PATH,
     *,
