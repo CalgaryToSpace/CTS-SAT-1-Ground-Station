@@ -28,6 +28,7 @@ __all__ = [
     "tcmds_uplinked_per_pass",
 ]
 
+import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -196,7 +197,7 @@ def detect_finished_uplinks(beacons: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-@cached(TTLCache(maxsize=3, ttl=_CACHE_TTL_SECONDS))
+@cached(TTLCache(maxsize=3, ttl=_CACHE_TTL_SECONDS), lock=threading.Lock())
 def _finished_uplinks_since(path: Path, since: datetime) -> pl.DataFrame:
     if not path.exists():
         return pl.DataFrame(schema=_OUTPUT_SCHEMA)
@@ -242,7 +243,7 @@ _PASS_TCMD_SCHEMA = {
 }
 
 
-@cached(TTLCache(maxsize=3, ttl=_CACHE_TTL_SECONDS))
+@cached(TTLCache(maxsize=3, ttl=_CACHE_TTL_SECONDS), lock=threading.Lock())
 def _load_beacon_tcmd_counts_since(path: Path, since: datetime) -> pl.DataFrame:
     schema = {
         "beacon_utc_time": pl.Datetime("us", "UTC"),

@@ -42,6 +42,7 @@ __all__ = [
 ]
 
 import io
+import threading
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -365,7 +366,7 @@ def _total_and_non_null_columns(
     return _total_and_non_null_columns_cached(path, versions, filters)
 
 
-@cached(TTLCache(maxsize=8, ttl=300))
+@cached(TTLCache(maxsize=8, ttl=300), lock=threading.Lock())
 def _total_and_non_null_columns_cached(
     path: Path,
     versions: tuple[int | None, ...],  # noqa: ARG001 -- only part of the cache key
