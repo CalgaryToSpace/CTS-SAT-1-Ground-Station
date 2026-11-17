@@ -567,23 +567,48 @@ def _best_named_candidate(
     return max(named, key=_score)
 
 
-def _is_header_incomplete(candidate: BulkHeaderCandidate) -> bool:
-    """Whether this candidate's *header* is missing anything -- nothing to do
-    with whether the file itself came down whole (that's `_partial_reason`).
-
-    Either one of the response's frames never arrived (so step 5 filled it
-    with `?`s and the JSON no longer parses), or the SHA-256 is shorter than
-    a full one.
+@dataclass(frozen=True, slots=True)
+class _ByteRange:
+    """The `[start, end)` byte range of the file a header says was
+    downlinked, and whether that's the whole file.
     """
-    return not candidate.is_complete or (
-        candidate.sha256 is not None and len(candidate.sha256) < SHA256_HEX_LEN
+
+    start: int
+    end: int
+    is_whole_file: bool
+
+    def label(self) -> str:
+        if self.end <= self.start:
+            return f"{self.start:,} (empty)"
+        return f"{self.start:,} - {self.end - 1:,}"
+
+
+def _downlinked_byte_range(candidate: BulkHeaderCandidate) -> _ByteRange | None:
+    """The byte range `candidate` says was downlinked, if it can tell.
+
+    With an `offset`/`length`, that's the range, clamped to `file_size` when
+    known. Without either, the action downlinks the whole file -- but only a
+    header that parsed whole is trusted on that, since a lost frame could
+    have eaten the `offset`/`length` of a partial downlink.
+    """
+    offset, length, size = candidate.offset, candidate.length, candidate.file_size
+    if offset is None and length is None:
+        if size is None or not candidate.is_complete:
+            return None
+        return _ByteRange(0, size, is_whole_file=True)
+    if offset is None or length is None:
+        return None
+    end = offset + length if size is None else min(offset + length, size)
+    return _ByteRange(
+        offset, end, is_whole_file=size is not None and offset == 0 and end >= size
     )
 
 
 @dataclass(frozen=True, slots=True)
 class _HeaderGroup:
     """One or more consecutive (by `received_at`) candidates that all agree
-    on action/file/size/crc16/sha256/ADCS modified timestamp -- distinct
+    on action/file/size/crc16/sha256/ADCS modified timestamp/offset/length --
+    distinct
     receipts of what's presumably the same underlying header, kept together
     as one row with the individual receipts available on expand.
     """
@@ -594,7 +619,8 @@ class _HeaderGroup:
     crc16: str | None
     sha256: str | None
     adcs_modified_timestamp_utc: str | None
-    is_header_incomplete: bool
+    offset: int | None
+    length: int | None
     members: tuple[BulkHeaderCandidate, ...]
 
     @property
@@ -607,7 +633,16 @@ class _HeaderGroup:
 
 def _group_key(
     c: BulkHeaderCandidate,
-) -> tuple[str | None, str | None, int | None, str | None, str | None, str | None]:
+) -> tuple[
+    str | None,
+    str | None,
+    int | None,
+    str | None,
+    str | None,
+    str | None,
+    int | None,
+    int | None,
+]:
     return (
         c.action,
         c.file,
@@ -615,6 +650,8 @@ def _group_key(
         c.crc16,
         c.sha256,
         c.adcs_modified_timestamp_utc,
+        c.offset,
+        c.length,
     )
 
 
@@ -631,13 +668,7 @@ def _group_consecutive_candidates(
     for c in candidates_by_time:
         if groups and _group_key(groups[-1].members[-1]) == _group_key(c):
             group = groups[-1]
-            groups[-1] = replace(
-                group,
-                is_header_incomplete=(
-                    group.is_header_incomplete and _is_header_incomplete(c)
-                ),
-                members=(*group.members, c),
-            )
+            groups[-1] = replace(group, members=(*group.members, c))
         else:
             groups.append(
                 _HeaderGroup(
@@ -647,7 +678,8 @@ def _group_consecutive_candidates(
                     crc16=c.crc16,
                     sha256=c.sha256,
                     adcs_modified_timestamp_utc=c.adcs_modified_timestamp_utc,
-                    is_header_incomplete=_is_header_incomplete(c),
+                    offset=c.offset,
+                    length=c.length,
                     members=(c,),
                 )
             )
@@ -726,7 +758,9 @@ _HEADER_TABLE_BODY_SLOT = r"""
                 :icon="props.expand ? 'remove' : 'add'" />
         </q-td>
         <q-td v-for="col in props.cols" :key="col.name" :props="props"
-            :class="col.name === 'sha256' ? 'ellipsis' : ''"
+            :class="col.name === 'sha256' ? 'ellipsis'
+                : col.name === 'byte_range' && props.row.byte_range_is_whole_file
+                ? 'text-positive text-weight-medium' : ''"
             :style="col.name === 'sha256' ? 'max-width: 220px' : ''">
             {{ col.value }}
         </q-td>
@@ -822,11 +856,7 @@ def _header_candidates_table(
             "label": ADCS_MODIFIED_TIMESTAMP_LABEL,
             "field": "adcs_modified_timestamp_utc",
         },
-        {
-            "name": "is_header_incomplete",
-            "label": "Header Incomplete?",
-            "field": "is_header_incomplete",
-        },
+        {"name": "byte_range", "label": "Byte Range", "field": "byte_range"},
     ]
     rows = [
         {
@@ -843,7 +873,10 @@ def _header_candidates_table(
             "crc16": group.crc16 or "",
             "sha256": group.sha256 or "",
             "adcs_modified_timestamp_utc": group.adcs_modified_timestamp_utc or "",
-            "is_header_incomplete": "yes" if group.is_header_incomplete else "",
+            "byte_range": byte_range.label() if byte_range is not None else "",
+            "byte_range_is_whole_file": (
+                byte_range is not None and byte_range.is_whole_file
+            ),
             "properties": [
                 {
                     "key": key,
@@ -855,6 +888,7 @@ def _header_candidates_table(
             "raw_variants": _raw_text_variants(group),
         }
         for i, group in enumerate(groups)
+        for byte_range in [_downlinked_byte_range(group.most_complete_member)]
     ]
     table = ui.table(columns=columns, rows=rows, row_key="id").classes("w-full")
     table.add_slot("header", _HEADER_TABLE_HEADER_SLOT)
