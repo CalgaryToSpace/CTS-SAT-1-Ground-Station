@@ -27,10 +27,15 @@ def test_duckdb_bootstrap_sql() -> None:
         TableSpec(key, step, "", "", None, has_packet_type=False)
         for key, step in [("a", "Step 0"), ("b", "Step 0"), ("c", "Step 1")]
     )
-    sql = duckdb_bootstrap_sql("https://x.test/", {a: [], b: [], c: ["c1", "c2"]})
+    urls = {
+        "a": ["/raw-export/a.parquet"],
+        "b": ["/raw-export/b.parquet"],
+        "c": ["/raw-export/c/2026-10.parquet", "/raw-export/c/2026-11.parquet"],
+    }
+    sql = duckdb_bootstrap_sql("https://x.test/", {a: [], b: [], c: ["c1", "c2"]}, urls)
     view = (
         "CREATE OR REPLACE VIEW {0} AS SELECT * FROM "
-        "read_parquet('https://x.test/raw-export/{0}.parquet');"
+        "read_parquet(['https://x.test/raw-export/{0}.parquet']);"
     )
     assert sql.splitlines() == [
         "-- Step 0",
@@ -38,7 +43,9 @@ def test_duckdb_bootstrap_sql() -> None:
         view.format("b"),
         "",
         "-- Step 1",
-        view.format("c"),
+        "CREATE OR REPLACE VIEW c AS SELECT * FROM read_parquet(["
+        "'https://x.test/raw-export/c/2026-10.parquet', "
+        "'https://x.test/raw-export/c/2026-11.parquet']);",
         "",
         "-- Step 0",
         "SELECT * FROM a;",
