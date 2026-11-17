@@ -58,6 +58,15 @@ _LISTING_STATUS_TEXT = {
     "never_listed": "Never listed",
 }
 
+# How each chunk was tied to its file -- see `step_11_reassemble_downlinked_files`.
+_ATTRIBUTION_TEXT = {
+    "header": "header",
+    "beacon": "beacon",
+    "next_beacon": "next beacon",
+    "time_window": "nearby (filled a gap)",
+    "unattributed": "unattributed",
+}
+
 _SOURCE_TEXT = {
     "listing": "listing",
     "bulk_downlink_header": "downlink header",
@@ -466,7 +475,12 @@ def _summary_row(row: dict[str, Any]) -> None:
                 if row["rejected_downlink_count"]
                 else ""
             )
-            + f", {row['chunk_count']:,} chunks",
+            + f", {row['chunk_count']:,} chunks"
+            + (
+                f" ({row['rescued_chunk_count']:,} filling gaps from nearby)"
+                if row.get("rescued_chunk_count")
+                else ""
+            ),
         ),
         ("First downlinked", _when(row["first_downlinked_at"])),
         ("Last downlinked", _when(row["last_downlinked_at"])),
@@ -540,14 +554,18 @@ def _downlinks_card(downlinks: pl.DataFrame) -> None:
             "Each run of this file's chunks. A rejected downlink disagreed "
             "with the rest of the file (before firmware issue #653's fix, a "
             "new downlink could carry the previous file's bytes), and is left "
-            "out of it."
+            'out of it. One tied "nearby" was unattributed chunks received '
+            "within minutes of this file's downlinks, taken only to fill its "
+            "gaps without disagreeing with any byte (and, from across a "
+            "header, only if that completed the file with the satellite's "
+            "SHA-256)."
         ).classes("text-caption text-grey")
         rows = [
             {
                 "_i": i,
                 "started_at": _when(row["started_at"]),
                 "ended_at": _when(row["ended_at"]),
-                "attributions": _json_list_text(row["attributions"]),
+                "attributions": _json_list_text(row["attributions"], _ATTRIBUTION_TEXT),
                 "chunk_count": f"{row['chunk_count']:,}",
                 "offsets": f"{row['offset_min']:,} to {row['offset_end']:,}",
                 "bytes_received": f"{row['bytes_received']:,}",

@@ -44,6 +44,27 @@ another verified file's bytes, else the one covering the most bytes. The
 other downlinks are rejected (`rejected_reason`, naming the file they carry
 where known) and left out of the file.
 
+Then the gaps left in each file are filled, where possible, from the
+unattributed chunks received within `RESCUE_WINDOW` of one of its kept
+downlinks (`rescue_nearby_chunks`; `time_window` attribution) -- e.g. the
+last chunks of a downlink that ran past the header's expected end, or the
+start of one whose first beacon came late. A chunk near more than one
+file's downlinks is left alone. Candidates are taken per unattributed
+downlink, nearest first, and only if every chunk fits the file's known
+size, agrees byte for byte with whatever the file already has (or has
+been given), and together they fill at least one missing byte. If that
+completes a file with a SHA-256 on record but the hash doesn't match,
+none of it is taken.
+
+A candidate with a header received between it and the downlink is from
+a different downlink -- seen in flight right before nearly every header:
+the tail of whatever was downlinking before -- as is one outside the
+byte range the file's own header said it was sending. The header says
+nothing about those, so they're only taken if they complete the file
+with a SHA-256 the satellite reported (often they're an earlier pass of
+the same file, whose own header was missed). On the data so far, the
+rescue verifies ten more files, and completes none with the wrong hash.
+
 All the kept chunks of a file -- over every downlink of it -- are
 reassembled together
 (`file_reassembly.reassemble_bulk_chunks`, judging every byte good, missing
@@ -68,12 +89,14 @@ __all__ = [
     "DOWNLINK_GAP",
     "HEADER_MARGIN",
     "MIN_DOWNLINK_BYTES_PER_SEC",
+    "RESCUE_WINDOW",
     "Attribution",
     "attribute_chunks",
     "decode_segments",
     "encode_segments",
     "reassemble_downlinked_files",
     "reject_inconsistent_downlinks",
+    "rescue_nearby_chunks",
     "run",
     "summarize_downlinks",
 ]
@@ -125,6 +148,11 @@ HEADER_WITHOUT_LENGTH_CONTEXT = timedelta(minutes=10)
 BEACON_CONTEXT = timedelta(minutes=2)
 # A longer gap between two chunks of a file starts a new downlink.
 DOWNLINK_GAP = timedelta(minutes=2)
+# How far either side of a file's downlinks `rescue_nearby_chunks` looks for
+# unattributed chunks to fill its gaps. Measured on the data so far: 2 min
+# verifies 6 more files, 5 min 10, 15 min 11 -- while the chunks near more
+# than one file (so left alone) grow from 38 to 268 to 352.
+RESCUE_WINDOW = timedelta(minutes=5)
 
 # Two downlinks of a file disagreeing on more bytes than this (where both
 # have them) are of different content -- see the module docstring. A few
@@ -151,6 +179,8 @@ class Attribution(StrEnum):
     BEACON = "beacon"
     NEXT_BEACON = "next_beacon"
     UNATTRIBUTED = "unattributed"
+    # Unattributed, then taken into a file's gaps by `rescue_nearby_chunks`.
+    TIME_WINDOW = "time_window"
 
 
 _SEGMENT_STATUS_CODES = {
@@ -204,6 +234,8 @@ _FILES_SCHEMA = {
     "downlink_count": pl.Int64,  # kept ones
     "rejected_downlink_count": pl.Int64,
     "chunk_count": pl.Int64,  # kept ones
+    # Of `chunk_count`, how many `rescue_nearby_chunks` filled gaps with.
+    "rescued_chunk_count": pl.Int64,
     # JSON array of [start, end, status, min_copies, max_copies] runs
     # tiling `data` -- status "G"ood, "M"issing or "C"onflicting.
     "segments": pl.String,
@@ -673,6 +705,204 @@ def reject_inconsistent_downlinks(
     return pl.DataFrame(rejected, schema=schema)
 
 
+@dataclass(slots=True)
+class _FileBytes:
+    """A file's bytes so far, and which of them are known."""
+
+    data: np.ndarray
+    covered: np.ndarray
+    size: int | None  # as the satellite reported it, if it ever did
+
+    @classmethod
+    def of(cls, chunks: pl.DataFrame, size: int | None) -> _FileBytes:
+        result = reassemble_bulk_chunks(chunks)
+        length = max(result.span_bytes, size or 0)
+        data = np.zeros(length, dtype=np.uint8)
+        data[: result.span_bytes] = np.frombuffer(result.data, dtype=np.uint8)
+        covered = np.zeros(length, dtype=bool)
+        for segment in result.segments:
+            if segment.status is not ByteStatus.MISSING:
+                covered[segment.start : segment.end] = True
+        return cls(data, covered, size)
+
+    def try_add(self, chunks: pl.DataFrame) -> bool:
+        """Add all of `chunks` if each fits, none disagrees with a byte
+        already known (or with each other), and together they fill at least
+        one gap -- else add none of them.
+        """
+        trial_data, trial_covered = self.data.copy(), self.covered.copy()
+        fills = False
+        for offset, hex_str in zip(
+            chunks["bulk_file_offset"].to_list(),
+            chunks["bulk_data_hex"].to_list(),
+            strict=True,
+        ):
+            payload = np.frombuffer(bytes.fromhex(hex_str), dtype=np.uint8)
+            end = offset + len(payload)
+            if self.size is not None and end > self.size:
+                return False
+            if end > len(trial_data):
+                extra = end - len(trial_data)
+                trial_data = np.concatenate(
+                    [trial_data, np.zeros(extra, dtype=np.uint8)]
+                )
+                trial_covered = np.concatenate(
+                    [trial_covered, np.zeros(extra, dtype=bool)]
+                )
+            known = trial_covered[offset:end]
+            if np.any(trial_data[offset:end][known] != payload[known]):
+                return False
+            fills = fills or not bool(known.all())
+            trial_data[offset:end] = payload
+            trial_covered[offset:end] = True
+        if fills:
+            self.data, self.covered = trial_data, trial_covered
+        return fills
+
+    @property
+    def sha256_if_complete(self) -> str | None:
+        """The hash of the whole file, once every byte of it is known."""
+        if self.size is None or not self.covered[: self.size].all():
+            return None
+        return hashlib.sha256(self.data[: self.size].tobytes()).hexdigest()
+
+
+def rescue_nearby_chunks(attributed: pl.DataFrame, files: pl.DataFrame) -> pl.DataFrame:
+    """Fill files' gaps with unattributed chunks received near their
+    downlinks -- see the module docstring.
+
+    `attributed` is `attribute_chunks`' output with `rejected_reason` joined
+    on (see `reject_inconsistent_downlinks`). Returns it with every rescued
+    chunk moved into its file: `attribution` `time_window`, the file's
+    `file_key`/`file_path`/`path_sha256_prefix`, and a `downlink_index` of
+    its own per (file, unattributed downlink it came from).
+    """
+    if attributed.is_empty():
+        return attributed
+
+    is_named = ~pl.col("file_key").str.starts_with(UNIDENTIFIED_KEY_PREFIX)
+    kept = attributed.filter(is_named & pl.col("rejected_reason").is_null())
+    loose = attributed.filter(pl.col("attribution") == Attribution.UNATTRIBUTED.value)
+    if kept.is_empty() or loose.is_empty():
+        return attributed
+
+    # `h_at` is the latest header before each chunk (whether or not the
+    # chunk is from it): a downlink is one header's "epoch".
+    windows = kept.group_by("file_key", "downlink_index").agg(
+        _start=pl.col("received_at").min(),
+        _end=pl.col("received_at").max(),
+        _h_at=pl.col("h_at").first(),
+        _target_path=pl.col("file_path").first(),
+    )
+    seconds_away = pl.max_horizontal(
+        (pl.col("_start") - pl.col("received_at")).dt.total_seconds(),
+        (pl.col("received_at") - pl.col("_end")).dt.total_seconds(),
+        pl.lit(0.0),
+    )
+    candidates = loose.join_where(
+        windows.select(
+            _target=pl.col("file_key"),
+            _start=pl.col("_start"),
+            _end=pl.col("_end"),
+            _h_at=pl.col("_h_at"),
+            _target_path=pl.col("_target_path"),
+        ),
+        pl.col("received_at") >= pl.col("_start") - RESCUE_WINDOW,
+        pl.col("received_at") <= pl.col("_end") + RESCUE_WINDOW,
+    )
+    # A header between them means a new downlink started; and the file's own
+    # header only sent its `offset`..`offset + length` -- see the module
+    # docstring for what either takes.
+    offset = pl.col("bulk_file_offset")
+    in_own_headers_range = pl.col("h_path").ne_missing(pl.col("_target_path")) | (
+        (offset >= pl.col("h_offset"))
+        & (
+            pl.col("h_length").is_null()
+            | (offset < pl.col("h_offset") + pl.col("h_length"))
+        )
+    ).fill_null(value=True)
+    candidates = candidates.with_columns(
+        _away=seconds_away,
+        _same_epoch=pl.col("h_at").eq_missing(pl.col("_h_at")) & in_own_headers_range,
+    )
+    # A chunk near more than one file's downlinks could be either's.
+    unambiguous = (
+        candidates.group_by("packet_id")
+        .agg(pl.col("_target").n_unique().alias("_targets"))
+        .filter(pl.col("_targets") == 1)
+    )
+    candidates = (
+        candidates.join(unambiguous, on="packet_id")
+        .sort("_away")
+        .unique("packet_id", keep="first")
+    )
+
+    known = {row["file_path"]: row for row in files.iter_rows(named=True)}
+    rescued: list[pl.DataFrame] = []
+    for (target,), offered in candidates.group_by("_target"):
+        key = cast("str", target)
+        mine = kept.filter(pl.col("file_key") == key)
+        size, sha256s = _file_size_and_sha256s(key, mine, known)
+        groups: list[pl.DataFrame] = [
+            group.sort("received_at")
+            for _, group in offered.sort("_away").group_by(
+                "downlink_index", maintain_order=True
+            )
+        ]
+        same_epoch = [g for g in groups if g["_same_epoch"].all()]
+        across_header = [g for g in groups if not g["_same_epoch"].all()]
+
+        file_bytes = _FileBytes.of(mine, size)
+        taken = [g for g in same_epoch if file_bytes.try_add(g)]
+        completed = file_bytes.sha256_if_complete
+        if completed is not None and sha256s and completed not in sha256s:
+            logger.info(
+                f"Not rescuing chunks into {key}: they'd complete it with the "
+                "wrong SHA-256."
+            )
+            taken, file_bytes = [], _FileBytes.of(mine, size)
+        across = [g for g in across_header if file_bytes.try_add(g)]
+        if across and file_bytes.sha256_if_complete in sha256s:
+            taken += across
+        if not taken:
+            continue
+        first = mine.row(0, named=True)
+        rescued.extend(
+            group.select("packet_id", "downlink_index").with_columns(
+                _file_key=pl.lit(key),
+                _file_path=pl.lit(first["file_path"], pl.String),
+                _prefix=pl.lit(first["path_sha256_prefix"], pl.String),
+            )
+            for group in taken
+        )
+    if not rescued:
+        return attributed
+
+    # Each (file, source downlink) is a downlink of its own.
+    next_index = cast("int", attributed["downlink_index"].max()) + 1
+    moves = pl.concat(rescued).with_columns(
+        _new_index=pl.struct("_file_key", "downlink_index").rank("dense").cast(pl.Int64)
+        + next_index
+        - 1
+    )
+    moved = pl.col("_new_index").is_not_null()
+    return (
+        attributed.join(moves.drop("downlink_index"), on="packet_id", how="left")
+        .with_columns(
+            attribution=pl.when(moved)
+            .then(pl.lit(Attribution.TIME_WINDOW.value))
+            .otherwise(pl.col("attribution")),
+            file_key=pl.coalesce("_file_key", "file_key"),
+            file_path=pl.when(moved).then("_file_path").otherwise("file_path"),
+            path_sha256_prefix=pl.when(moved)
+            .then("_prefix")
+            .otherwise("path_sha256_prefix"),
+            downlink_index=pl.coalesce("_new_index", "downlink_index"),
+        )
+        .drop("_file_key", "_file_path", "_prefix", "_new_index")
+    )
+
+
 def encode_segments(segments: list[ByteSegment]) -> str:
     """`segments` as stored in `downlinked_files.segments`."""
     return orjson.dumps(
@@ -809,6 +1039,9 @@ def _reassemble_one(
         "rejected_downlink_count": all_chunks["downlink_index"].n_unique()
         - chunks["downlink_index"].n_unique(),
         "chunk_count": chunks.height,
+        "rescued_chunk_count": int(
+            (chunks["attribution"] == Attribution.TIME_WINDOW.value).sum()
+        ),
         "segments": encode_segments(segments),
         "content_kind": "image" if image else _content_kind(data, segments),
         "preview_media_type": image.media_type if image else None,
@@ -873,7 +1106,9 @@ def _log_summary(attributed: pl.DataFrame, downlinked: pl.DataFrame) -> None:
         f"({(named['sha256_verified'] == False).sum():,} mismatched); "  # noqa: E712
         f"plus {downlinked.height - named.height:,} unidentified downlink(s). "
         f"{named['rejected_downlink_count'].sum():,} downlink(s) rejected as "
-        "not matching the rest of their file."
+        "not matching the rest of their file; "
+        f"{named['rescued_chunk_count'].sum():,} unattributed chunk(s) rescued "
+        "into files' gaps."
     )
 
 
@@ -917,6 +1152,7 @@ def run(*, data_dir: Path = DEFAULT_DATA_DIR) -> None:
         on="downlink_index",
         how="left",
     )
+    attributed = rescue_nearby_chunks(attributed, files)
     downlinks = summarize_downlinks(attributed)
     downlinked = reassemble_downlinked_files(attributed, files)
 

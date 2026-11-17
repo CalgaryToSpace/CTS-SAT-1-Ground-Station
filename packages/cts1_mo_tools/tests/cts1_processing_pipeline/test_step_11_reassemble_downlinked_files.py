@@ -15,6 +15,7 @@ from cts1_mo_tools.cts1_processing_pipeline.step_11_reassemble_downlinked_files.
     decode_segments,
     reassemble_downlinked_files,
     reject_inconsistent_downlinks,
+    rescue_nearby_chunks,
     summarize_downlinks,
 )
 
@@ -121,6 +122,7 @@ def _run(
         on="downlink_index",
         how="left",
     )
+    attributed = rescue_nearby_chunks(attributed, files)
     return (
         attributed,
         summarize_downlinks(attributed),
@@ -156,7 +158,8 @@ def test_header_only_vouches_until_its_downlink_should_be_over() -> None:
         zip(attributed["bulk_file_offset"], attributed["attribution"], strict=True)
     )
     assert by_offset[0] == Attribution.HEADER
-    assert by_offset[195] == Attribution.UNATTRIBUTED
+    # Not the header's any more -- but near enough to fill the file's gap.
+    assert by_offset[195] == Attribution.TIME_WINDOW
 
 
 def test_header_offset_range_is_respected() -> None:
@@ -325,3 +328,70 @@ def test_picam_image_without_end_line_still_previews() -> None:
     assert row["content_kind"] == "image"
     assert row["preview_label"] == "Detected PiCAM image (no end-of-image line)"
     assert row["preview_image"] == jpg
+
+
+def _attribution_at(attributed: pl.DataFrame, offset: int, seconds: float) -> str:
+    return attributed.filter(
+        (pl.col("bulk_file_offset") == offset) & (pl.col("received_at") == _at(seconds))
+    )["attribution"].item()
+
+
+def test_chunk_just_past_the_headers_window_fills_the_gap() -> None:
+    # 975 B: its header vouches until 975 / 500 + 120 = 122 s.
+    data = _content("a", 975)
+    attributed, downlinks, downlinked = _run(
+        _chunks(data, 5, offsets=[0, 195, 390, 585])
+        + _chunks(data, 200, offsets=[780]),
+        _responses((0, _header("c/a", data))),
+    )
+    assert _attribution_at(attributed, 780, 200) == Attribution.TIME_WINDOW
+    row = _file(downlinked, "c/a")
+    assert row["sha256_verified"] is True
+    assert row["rescued_chunk_count"] == 1
+    assert downlinks.height == 2  # the rescued chunk is a downlink of its own
+
+
+def test_rescue_is_all_or_nothing_per_downlink_and_never_collides() -> None:
+    data = _content("a", 975)
+    wrong = bytearray(data)
+    wrong[585:780] = _content("other", 195)
+    late = _chunks(bytes(wrong), 200, offsets=[585, 780])  # one downlink
+    attributed, _, downlinked = _run(
+        _chunks(data, 5, offsets=[0, 195, 390, 585]) + late,
+        _responses((0, _header("c/a", data))),
+    )
+    assert set(attributed.filter(pl.col("received_at") >= _at(200))["attribution"]) == {
+        Attribution.UNATTRIBUTED
+    }
+    row = _file(downlinked, "c/a")
+    assert row["rescued_chunk_count"] == 0
+    assert row["conflict_bytes"] == 0
+    assert row["missing_bytes"] == 975 - 780
+
+
+def test_chunk_from_before_a_header_needs_the_sha256_to_be_taken() -> None:
+    # Received before c/a's header: whatever was downlinking then.
+    for size, taken in ((975, True), (1200, False)):
+        data = _content("a", size)
+        attributed, _, downlinked = _run(
+            _chunks(data, 30, offsets=[780])
+            + _chunks(data, 61, offsets=[0, 195, 390, 585]),
+            _responses((60, _header("c/a", data))),
+        )
+        expected = Attribution.TIME_WINDOW if taken else Attribution.UNATTRIBUTED
+        assert _attribution_at(attributed, 780, 30) == expected, size
+        assert _file(downlinked, "c/a")["sha256_verified"] is (True if taken else None)
+
+
+def test_chunk_near_two_files_is_left_alone() -> None:
+    a = _content("a", 975)
+    b = _content("b", 390)
+    attributed, _, downlinked = _run(
+        _chunks(a, 5, offsets=[0, 195, 390, 585])
+        + _chunks(b, 105)
+        # c/a's missing last chunk -- but c/b's downlink is just as near.
+        + _chunks(a, 150, offsets=[780]),
+        _responses((0, _header("c/a", a)), (100, _header("c/b", b))),
+    )
+    assert _attribution_at(attributed, 780, 150) == Attribution.UNATTRIBUTED
+    assert _file(downlinked, "c/a")["rescued_chunk_count"] == 0
