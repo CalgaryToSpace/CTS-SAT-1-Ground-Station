@@ -241,17 +241,6 @@ _MENTIONS_CELL_SLOT = r"""
 def _files_card(data_dir: Path, files: pl.DataFrame | None) -> None:
     with ui.card().classes("w-full"):
         ui.label("Files").classes("text-lg font-bold")
-        ui.label(
-            "Every file named in a telecommand response (step 10: directory "
-            "listings, downlink headers, file maps and MPI analyses), and "
-            "every file reassembled from bulk downlinks (step 11). A chunk is "
-            "tied to its file by the downlink header before it or the "
-            'beacons\' path hash. "Listing" compares a file with the latest complete '
-            "listing of its directory that covers its name (a listing may be "
-            'just one page). "File Timestamp" is when a camera image was '
-            "captured, an MPI recording started or an ADCS file was last "
-            "modified, by the satellite's clocks."
-        ).classes("text-caption text-grey")
         if files is None:
             _loading()
             return
