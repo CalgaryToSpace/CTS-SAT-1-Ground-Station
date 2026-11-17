@@ -949,3 +949,56 @@ def test_detect_image_ignores_an_image_missing_its_start() -> None:
 def test_detect_image_ignores_a_non_image() -> None:
     assert detect_image(b"timestamp,voltage_mV\n2026-01-01T00:00:00Z,3300\n") is None
     assert detect_image(b"") is None
+
+
+_V3_FILE_SHA = "543751B0D1ADE688FB6654EB5DD4B70F840AB9DCAA95F7C432CEBCBC7B94EBA4"
+_V3_CHUNK_SHA = "7164d682fe086561f01046fc2c5dee97c39498195257d85de6119ccd39e8527d"
+
+
+def test_v3_file_prefixed_hash_and_crc_are_the_header_fields() -> None:
+    text = (
+        '{"action":"bulk_downlink_start_v3_blob","file":"mpi_data/2026-08-08.mpi",'
+        f'"file_size":1443001,"chunk_sha256":"{_V3_CHUNK_SHA}",'
+        f'"chunk_crc16":"0x1234","file_sha256":"{_V3_FILE_SHA}",'
+        '"file_crc16":"0xb51a","offset":160485,"length":1170}'
+    )
+    (c,) = find_header_candidates(_tcmd_df([_tcmd_row(text=text)]))
+    assert c.sha256 == _V3_FILE_SHA.lower()
+    assert c.crc16 == "0xb51a"
+    assert c.offset == 160485
+    assert c.length == 1170
+    assert c.is_complete
+    props = dict(c.properties)
+    assert props["chunk_sha256"] == _V3_CHUNK_SHA
+    assert props["chunk_crc16"] == "0x1234"
+
+
+def test_v3_chunk_only_hash_is_not_taken_as_the_file_hash() -> None:
+    text = (
+        '{"action":"bulk_downlink_start_v3_blob","file":"x",'
+        f'"chunk_sha256":"{_V3_CHUNK_SHA}","chunk_crc16":"0x1234"}}'
+    )
+    (c,) = find_header_candidates(_tcmd_df([_tcmd_row(text=text)]))
+    assert c.sha256 is None
+    assert c.crc16 is None
+
+
+def test_v3_truncated_file_sha256_still_yields_a_prefix() -> None:
+    text = (
+        '{"action":"bulk_downlink_start_v3_blob","file":"mpi_data/2026-08-08.mpi",'
+        f'"chunk_sha256":"{_V3_CHUNK_SHA}","file_sha256":"{_V3_FILE_SHA[:48]}'
+        + "?"
+        * 40
+    )
+    (c,) = find_header_candidates(_tcmd_df([_tcmd_row(text=text, is_complete=False)]))
+    assert c.sha256 == _V3_FILE_SHA[:48].lower()
+    assert not c.is_complete
+
+
+def test_v3_truncated_chunk_sha256_is_not_taken_as_the_file_hash() -> None:
+    text = (
+        '{"action":"bulk_downlink_start_v3_blob","file":"x",'
+        f'"chunk_sha256":"{_V3_CHUNK_SHA[:30]}' + "?" * 40
+    )
+    (c,) = find_header_candidates(_tcmd_df([_tcmd_row(text=text, is_complete=False)]))
+    assert c.sha256 is None
