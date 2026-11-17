@@ -311,15 +311,30 @@ TABLE_SPECS: tuple[TableSpec, ...] = (
         has_packet_type=False,
     ),
     TableSpec(
-        key="file_downlinks",
+        key="file_downlink_time_periods",
         step="Step 11 -- Reassemble Downlinked Files",
         description=(
-            "One row per bulk downlink: which file (tied by its header or the "
-            "beacons' path hash), when, the offsets and bytes received, its "
-            "header's fields, and why it was rejected, if it was."
+            "One row per time period a file was being downlinked: which file "
+            "(tied by its header or the beacons' path hash), when, the offsets "
+            "and bytes received, its header's fields, and why it was "
+            "rejected, if it was."
         ),
-        filename=step_11_pipeline.DOWNLINKS_OUTPUT_FILENAME,
+        filename=step_11_pipeline.DOWNLINK_TIME_PERIODS_OUTPUT_FILENAME,
         time_column="started_at",
+        has_packet_type=False,
+    ),
+    TableSpec(
+        key="downlinked_files",
+        step="Step 11 -- Reassemble Downlinked Files",
+        description=(
+            "One row per file -- every one known to be on the satellite, "
+            "downlinked or not: its listing and "
+            "mention details, and for a downlinked one its "
+            "good/missing/conflicting byte counts, SHA-256 check against what "
+            "the satellite reported, and the reassembled bytes themselves."
+        ),
+        filename=step_11_pipeline.DOWNLINKED_FILES_OUTPUT_FILENAME,
+        time_column="last_downlinked_at",
         has_packet_type=False,
     ),
 )
@@ -437,9 +452,15 @@ def _excel_sheet_name(key: str) -> str:
     return _EXCEL_SHEET_NAME_INVALID_CHARS.sub("_", key)[:_EXCEL_MAX_SHEET_NAME_LEN]
 
 
+def _binary_as_hex(df: pl.DataFrame) -> pl.DataFrame:
+    """CSV and Excel can't hold raw bytes (e.g. `downlinked_files.data`)."""
+    return df.with_columns(pl.col(pl.Binary).bin.encode("hex"))
+
+
 def _write_csv_files(tables: Mapping[TableSpec, pl.DataFrame]) -> dict[str, bytes]:
     return {
-        f"{spec.key}.csv": df.write_csv().encode("utf-8") for spec, df in tables.items()
+        f"{spec.key}.csv": _binary_as_hex(df).write_csv().encode("utf-8")
+        for spec, df in tables.items()
     }
 
 
@@ -456,7 +477,7 @@ def _write_excel_file(tables: Mapping[TableSpec, pl.DataFrame]) -> dict[str, byt
     buf = io.BytesIO()
     workbook = xlsxwriter.Workbook(buf, {"in_memory": True})
     for spec, df in tables.items():
-        df_write = drop_timezones_for_excel(df)
+        df_write = drop_timezones_for_excel(_binary_as_hex(df))
         df_write.write_excel(workbook=workbook, worksheet=_excel_sheet_name(spec.key))
     workbook.close()
     return {"export.xlsx": buf.getvalue()}

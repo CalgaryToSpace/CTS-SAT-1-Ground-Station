@@ -1,8 +1,9 @@
-"""The "Satellite Files" page: every file known to be on the satellite
-(step 10), every file reassembled from bulk downlinks (step 11) with a
-gallery of the images among them, and -- with `?file=<file key>` -- one
-reassembled file's viewer: its image/text/hex preview, byte coverage map,
-and every downlink of it. See `downlinked_files` for the data layer.
+"""The "Satellite Files" page: one table of every file known to be on the
+satellite or reassembled from bulk downlinks (step 11's `downlinked_files`),
+and -- with `?file=<file key>` -- one reassembled file's viewer: its
+image/text/hex preview, byte coverage map, and every downlink of it. Plus
+the "Image Gallery" page, of the images among them. See `downlinked_files`
+for the data layer.
 """
 
 # pyright: standard
@@ -10,7 +11,13 @@ and every downlink of it. See `downlinked_files` for the data layer.
 
 from __future__ import annotations
 
-__all__ = ["SATELLITE_FILES_PATH", "build_satellite_files_page", "file_page_url"]
+__all__ = [
+    "IMAGE_GALLERY_PATH",
+    "SATELLITE_FILES_PATH",
+    "build_image_gallery_page",
+    "build_satellite_files_page",
+    "file_page_url",
+]
 
 from dataclasses import dataclass
 from pathlib import Path  # noqa: TC003 -- tyro needs this at runtime elsewhere
@@ -30,6 +37,7 @@ if TYPE_CHECKING:
     import polars as pl
 
 SATELLITE_FILES_PATH = "/satellite-files"
+IMAGE_GALLERY_PATH = "/image-gallery"
 
 # How much of a file the viewer shows as text or hex.
 TEXT_PREVIEW_BYTES = 64 * 1024
@@ -49,6 +57,7 @@ _STATUS_COLORS = {
     "SHA-256 mismatch": "negative",
     "Conflicting": "warning",
     "Partial": "grey",
+    "Not downlinked": "grey",
 }
 
 _LISTING_STATUS_TEXT = {
@@ -136,7 +145,6 @@ def _status_cell_slot() -> str:
 
 def _gallery_card(files: pl.DataFrame | None) -> None:
     with ui.card().classes("w-full"):
-        ui.label("Image Gallery").classes("text-lg font-bold")
         if files is None:
             _loading()
             return
@@ -149,20 +157,12 @@ def _gallery_card(files: pl.DataFrame | None) -> None:
             _not_run_yet("step_11")
             return
 
-        named_only = ui.switch("Only named files", value=True)
-
-        @ui.refreshable
-        def grid() -> None:
-            shown = [row for row in images if row["file_path"] or not named_only.value]
-            with ui.element("div").classes(
-                "w-full grid gap-3 grid-cols-[repeat(auto-fill,minmax(180px,1fr))]"
-            ):
-                for row in shown:
-                    _gallery_tile(row)
-            ui.label(f"{len(shown):,} image(s).").classes("text-caption text-grey")
-
-        named_only.on_value_change(grid.refresh)
-        grid()
+        with ui.element("div").classes(
+            "w-full grid gap-3 grid-cols-[repeat(auto-fill,minmax(180px,1fr))]"
+        ):
+            for row in images:
+                _gallery_tile(row)
+        ui.label(f"{len(images):,} image(s).").classes("text-caption text-grey")
 
 
 def _gallery_tile(row: dict[str, Any]) -> None:
@@ -177,9 +177,7 @@ def _gallery_tile(row: dict[str, Any]) -> None:
             'loading="lazy" fit="contain" no-spinner'
         ).classes("w-full bg-grey-2").style(f"height: {GALLERY_THUMBNAIL_HEIGHT_PX}px")
         with ui.column().classes("p-2 gap-0 w-full"):
-            ui.label(downlinked_files.display_name(row)).classes(
-                "text-sm font-medium break-all"
-            )
+            ui.label(row["file_path"]).classes("text-sm font-medium break-all")
             with ui.row().classes("items-center gap-2"):
                 ui.badge(status, color=_STATUS_COLORS.get(status, "grey"))
                 ui.label(f"{row['received_fraction']:.0%}").classes(
@@ -187,130 +185,41 @@ def _gallery_tile(row: dict[str, Any]) -> None:
                 )
 
 
-# -- Downlinked files table ----------------------------------------------------
+# -- Files table ---------------------------------------------------------------
 
-_DOWNLINKED_COLUMNS: tuple[dict[str, Any], ...] = (
+_FILES_COLUMNS: tuple[dict[str, Any], ...] = (
     {"name": "_open", "label": "", "field": "_open"},
-    {"name": "name", "label": "File", "field": "name", "align": "left"},
+    {"name": "file_path", "label": "File", "field": "file_path", "align": "left"},
     {"name": "content_kind", "label": "Kind", "field": "content_kind", "align": "left"},
-    {"name": "status", "label": "Status", "field": "status", "align": "left"},
+    {"name": "status", "label": "Downlinked", "field": "status", "align": "left"},
     {
         "name": "received_fraction",
         "label": "Received",
         "field": "received_fraction",
-        ":format": "v => (v * 100).toFixed(1) + '%'",
+        ":format": "v => v == null ? '' : (v * 100).toFixed(1) + '%'",
     },
     {
-        "name": "byte_length",
+        "name": "size",
         "label": "Size",
-        "field": "byte_length",
-        ":format": "v => v.toLocaleString() + ' B'",
+        "field": "size",
+        ":format": "v => v == null ? '' : v.toLocaleString() + ' B'",
     },
+    {"name": "listing", "label": "Listing", "field": "listing", "align": "left"},
     {"name": "downlink_count", "label": "Downlinks", "field": "downlink_count"},
     {
         "name": "rejected_downlink_count",
         "label": "Rejected",
         "field": "rejected_downlink_count",
     },
-    {"name": "first", "label": "First Downlinked (UTC)", "field": "first"},
-    {"name": "last", "label": "Last Downlinked (UTC)", "field": "last"},
-)
-
-
-def _downlinked_files_card(files: pl.DataFrame | None) -> None:
-    with ui.card().classes("w-full"):
-        ui.label("Downlinked Files").classes("text-lg font-bold")
-        ui.label(
-            "Every file reassembled from bulk downlinks (step 11). A chunk is "
-            "tied to its file by the downlink header before it or the "
-            "beacons' path hash; unidentified downlinks are ones neither "
-            "covered (e.g. their header was sent before any station could hear)."
-        ).classes("text-caption text-grey")
-        if files is None:
-            _loading()
-            return
-        if files.is_empty():
-            _not_run_yet("step_11")
-            return
-
-        all_rows = [
-            {
-                "file_key": row["file_key"],
-                "_open": file_page_url(row["file_key"]),
-                "name": downlinked_files.display_name(row),
-                "content_kind": row["content_kind"],
-                "status": downlinked_files.status_text(row),
-                "received_fraction": row["received_fraction"],
-                "byte_length": row["byte_length"],
-                "downlink_count": row["downlink_count"],
-                "rejected_downlink_count": row["rejected_downlink_count"],
-                "first": _when(row["first_downlinked_at"]),
-                "last": _when(row["last_downlinked_at"]),
-                "_named": row["file_path"] is not None,
-            }
-            for row in files.to_dicts()
-        ]
-
-        def visible(*, include_unidentified: bool) -> list[dict[str, Any]]:
-            return [r for r in all_rows if r["_named"] or include_unidentified]
-
-        with ui.row().classes("w-full items-center gap-4"):
-            search = ui.row()
-            unidentified = ui.switch("Show unidentified downlinks", value=False)
-        table = ui.table(
-            columns=[
-                {**c, "sortable": c["name"] != "_open"} for c in _DOWNLINKED_COLUMNS
-            ],
-            rows=visible(include_unidentified=False),
-            row_key="file_key",
-            pagination={"rowsPerPage": TABLE_ROWS_PER_PAGE},
-        ).classes("w-full")
-        table.props("dense flat")
-        table.add_slot(
-            "body-cell-_open",
-            _link_cell_slot("_open", "visibility", "Open this file"),
-        )
-        table.add_slot("body-cell-status", _status_cell_slot())
-        with search:
-            _search_input(table, "Search files")
-
-        def _toggle(e: Any) -> None:
-            table.rows = visible(include_unidentified=e.value)
-            table.update()
-
-        unidentified.on_value_change(_toggle)
-        named = sum(1 for r in all_rows if r["_named"])
-        verified = sum(1 for r in all_rows if r["status"] == "Verified")
-        ui.label(
-            f"{named:,} named file(s) ({verified:,} verified by SHA-256), plus "
-            f"{len(all_rows) - named:,} unidentified downlink(s)."
-        ).classes("text-caption text-grey")
-
-
-# -- Satellite files table -----------------------------------------------------
-
-_SATELLITE_COLUMNS: tuple[dict[str, Any], ...] = (
-    {"name": "_open", "label": "", "field": "_open"},
-    {"name": "file_path", "label": "File", "field": "file_path", "align": "left"},
-    {
-        "name": "file_size",
-        "label": "Size",
-        "field": "file_size",
-        ":format": "v => v == null ? '' : v.toLocaleString() + ' B'",
-    },
-    {"name": "listing", "label": "Listing", "field": "listing", "align": "left"},
-    {"name": "status", "label": "Downlinked", "field": "status", "align": "left"},
-    {
-        "name": "received",
-        "label": "Received",
-        "field": "received",
-        ":format": "v => v == null ? '' : (v * 100).toFixed(1) + '%'",
-    },
     {"name": "sources", "label": "Seen In", "field": "sources", "align": "left"},
     {"name": "mention_count", "label": "Mentions", "field": "mention_count"},
-    {"name": "first_seen", "label": "First Seen (UTC)", "field": "first_seen"},
     {"name": "last_seen", "label": "Last Seen (UTC)", "field": "last_seen"},
     {"name": "last_listed", "label": "Last Listed (UTC)", "field": "last_listed"},
+    {
+        "name": "last_downlinked",
+        "label": "Last Downlinked (UTC)",
+        "field": "last_downlinked",
+    },
     {"name": "sha256", "label": "SHA-256", "field": "sha256", "align": "left"},
 )
 
@@ -324,59 +233,59 @@ _MENTIONS_CELL_SLOT = r"""
 """
 
 
-def _satellite_files_card(
-    data_dir: Path, satellite: pl.DataFrame | None, files: pl.DataFrame | None
-) -> None:
+def _files_card(data_dir: Path, files: pl.DataFrame | None) -> None:
     with ui.card().classes("w-full"):
-        ui.label("Files on the Satellite").classes("text-lg font-bold")
+        ui.label("Files").classes("text-lg font-bold")
         ui.label(
-            "Every file named in a telecommand response (step 10): directory "
-            "listings, downlink headers, file maps and MPI analyses. "
-            '"Listing" compares it with the latest complete listing of its '
-            "directory that covers its name (a listing may be just one page)."
+            "Every file named in a telecommand response (step 10: directory "
+            "listings, downlink headers, file maps and MPI analyses), and "
+            "every file reassembled from bulk downlinks (step 11). A chunk is "
+            "tied to its file by the downlink header before it or the "
+            'beacons\' path hash. "Listing" compares a file with the latest complete '
+            "listing of its directory that covers its name (a listing may be "
+            "just one page)."
         ).classes("text-caption text-grey")
-        if satellite is None or files is None:
+        if files is None:
             _loading()
             return
-        if satellite.is_empty():
-            _not_run_yet("step_10")
+        if files.is_empty():
+            _not_run_yet("step_11")
             return
 
-        downlinked = (
-            {row["file_path"]: row for row in files.to_dicts() if row["file_path"]}
-            if not files.is_empty()
-            else {}
-        )
-        rows = []
-        for row in satellite.to_dicts():
-            got = downlinked.get(row["file_path"])
-            rows.append(
-                {
-                    "file_path": row["file_path"],
-                    "_open": file_page_url(got["file_key"]) if got else None,
-                    "file_size": row["file_size"],
-                    "listing": _LISTING_STATUS_TEXT.get(
-                        row["listing_status"], row["listing_status"]
-                    ),
-                    "status": downlinked_files.status_text(got) if got else "",
-                    "received": got["received_fraction"] if got else None,
-                    "sources": _json_list_text(row["sources"], _SOURCE_TEXT),
-                    "mention_count": row["mention_count"],
-                    "first_seen": _when(row["first_seen_at"]),
-                    "last_seen": _when(row["last_seen_at"]),
-                    "last_listed": _when(row["last_listed_at"]),
-                    "sha256": (row["sha256"] or "")[:12],
-                }
-            )
+        rows = [
+            {
+                "file_key": row["file_key"],
+                "file_path": row["file_path"],
+                "_open": file_page_url(row["file_key"])
+                if row["downlink_count"]
+                else None,
+                "content_kind": row["content_kind"] or "",
+                "status": downlinked_files.status_text(row),
+                "received_fraction": row["received_fraction"],
+                "size": row["file_size"] or row["byte_length"],
+                "listing": _LISTING_STATUS_TEXT.get(
+                    row["listing_status"], row["listing_status"] or ""
+                ),
+                "downlink_count": row["downlink_count"],
+                "rejected_downlink_count": row["rejected_downlink_count"],
+                "sources": _json_list_text(row["sources"], _SOURCE_TEXT),
+                "mention_count": row["mention_count"],
+                "last_seen": _when(row["last_seen_at"]),
+                "last_listed": _when(row["last_listed_at"]),
+                "last_downlinked": _when(row["last_downlinked_at"]),
+                "sha256": (row["reported_sha256"] or row["sha256"] or "")[:12],
+            }
+            for row in files.to_dicts()
+        ]
 
         search = ui.row()
         table = ui.table(
             columns=[
                 {"name": "_mentions", "label": "", "field": "_mentions"},
-                *({**c, "sortable": c["name"] != "_open"} for c in _SATELLITE_COLUMNS),
+                *({**c, "sortable": c["name"] != "_open"} for c in _FILES_COLUMNS),
             ],
             rows=rows,
-            row_key="file_path",
+            row_key="file_key",
             pagination={"rowsPerPage": TABLE_ROWS_PER_PAGE},
         ).classes("w-full")
         table.props("dense flat")
@@ -390,13 +299,11 @@ def _satellite_files_card(
         with search:
             _search_input(table, "Search files")
 
-        counts: dict[str, int] = {}
-        for row in rows:
-            counts[row["listing"]] = counts.get(row["listing"], 0) + 1
+        downlinked = sum(1 for r in rows if r["downlink_count"])
+        verified = sum(1 for r in rows if r["status"] == "Verified")
         ui.label(
-            f"{len(rows):,} file(s): "
-            + ", ".join(f"{count:,} {label.lower()}" for label, count in counts.items())
-            + f"; {sum(1 for r in rows if r['_open']):,} downlinked."
+            f"{len(rows):,} file(s): {downlinked:,} downlinked ({verified:,} "
+            f"verified by SHA-256), {len(rows) - downlinked:,} not."
         ).classes("text-caption text-grey")
 
 
@@ -489,8 +396,6 @@ def _summary_row(row: dict[str, Any]) -> None:
     ]
     with ui.row().classes("items-center gap-2"):
         ui.badge(status, color=_STATUS_COLORS.get(status, "grey")).classes("text-sm")
-        if row["file_path"] is None:
-            ui.badge("unidentified", color="grey")
     with ui.grid(columns="auto 1fr").classes("gap-x-4 gap-y-1 text-sm"):
         for label, value in facts:
             ui.label(label).classes("text-grey")
@@ -600,9 +505,7 @@ def _file_viewer(
     row = file.row
     with ui.card().classes("w-full"):
         with ui.row().classes("w-full items-center justify-between"):
-            ui.label(downlinked_files.display_name(row)).classes(
-                "text-xl font-bold break-all"
-            )
+            ui.label(row["file_path"]).classes("text-xl font-bold break-all")
             ui.button(
                 f"Download {downlinked_files.download_filename(row)}", icon="download"
             ).props(
@@ -625,7 +528,6 @@ def _file_viewer(
 @dataclass(frozen=True, slots=True)
 class _ListData:
     files: pl.DataFrame
-    satellite: pl.DataFrame
 
 
 @dataclass(frozen=True, slots=True)
@@ -638,7 +540,6 @@ def _load_list_data(data_dir: Path) -> _ListData:
     """Blocking -- run it via `run.io_bound`."""
     return _ListData(
         files=downlinked_files.load_downlinked_files(data_dir),
-        satellite=downlinked_files.load_satellite_files(data_dir),
     )
 
 
@@ -646,7 +547,7 @@ def _load_viewer_data(data_dir: Path, file_key: str) -> _ViewerData:
     """Blocking -- run it via `run.io_bound`."""
     return _ViewerData(
         file=downlinked_files.load_downlinked_file(data_dir, file_key),
-        downlinks=downlinked_files.load_file_downlinks(data_dir, file_key),
+        downlinks=downlinked_files.load_file_downlink_time_periods(data_dir, file_key),
     )
 
 
@@ -663,11 +564,7 @@ def build_satellite_files_page(data_dir: Path, *, file_key: str | None = None) -
                 _file_viewer(data.file, data.downlinks, file_key)
             return
         list_data = data if isinstance(data, _ListData) else None
-        _gallery_card(list_data and list_data.files)
-        _downlinked_files_card(list_data and list_data.files)
-        _satellite_files_card(
-            data_dir, list_data and list_data.satellite, list_data and list_data.files
-        )
+        _files_card(data_dir, list_data and list_data.files)
 
     # Loads in a thread, then rebuilds synchronously -- see
     # `pipeline_status_page.build_pipeline_status_page._reload`. A None
@@ -689,6 +586,27 @@ def build_satellite_files_page(data_dir: Path, *, file_key: str | None = None) -
                         f'flat round type=a href="{SATELLITE_FILES_PATH}"'
                     ).tooltip("All files")
                 ui.label("Satellite Files").classes("text-2xl font-bold")
+            ui.button("Refresh", icon="refresh", on_click=_reload)
+        content(None)
+
+    ui.timer(0, _reload, once=True)
+
+
+def build_image_gallery_page(data_dir: Path) -> None:
+    """Every image among the reassembled files, linking to each one's viewer."""
+
+    @ui.refreshable
+    def content(files: pl.DataFrame | None) -> None:
+        _gallery_card(files)
+
+    async def _reload() -> None:
+        files = await run.io_bound(downlinked_files.load_downlinked_files, data_dir)
+        if files is not None:
+            content.refresh(files)
+
+    with page_shell():
+        with ui.row().classes("w-full items-center justify-between"):
+            ui.label("Image Gallery").classes("text-2xl font-bold")
             ui.button("Refresh", icon="refresh", on_click=_reload)
         content(None)
 

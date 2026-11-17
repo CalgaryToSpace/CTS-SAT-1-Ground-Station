@@ -30,7 +30,7 @@ downlink started by a time-tagged telecommand often sent its header before
 any ground station could hear it -- those chunks are unattributed.
 
 Consecutive chunks of one file, with no gap over `DOWNLINK_GAP` and no new
-header in between, are one downlink (`file_downlinks.parquet`).
+header in between, are one downlink (`file_downlink_time_periods.parquet`).
 
 A header doesn't guarantee what follows it is that file: before the
 `bulk_downlink_start_blob` fix (firmware issue #653), starting a downlink
@@ -70,9 +70,11 @@ reassembled together
 (`file_reassembly.reassemble_bulk_chunks`, judging every byte good, missing
 or conflicting), padded with missing bytes out to its known size, and
 checked against every SHA-256 the satellite reported for it
-(`downlinked_files.parquet`, with the bytes themselves). Chunks whose
-prefix matches no known path are reassembled per prefix, and each
-unattributed downlink on its own.
+(`downlinked_files.parquet`, with the bytes themselves). Chunks of no
+named file -- a prefix matching no known path, or unattributed and not
+rescued -- are left out of both outputs. Every file step 10 knows of but that
+was never downlinked gets a row too (no bytes), and every row carries
+step 10's listing and mention columns -- so it's the one list of files.
 
 Only CRC-valid packets are used. Reads steps 3, 5 (via 10) and 10's
 outputs; parquet-in-parquet-out, recomputed from scratch on every run.
@@ -85,8 +87,8 @@ __all__ = [
     "CONSISTENCY_TOLERANCE_BYTES",
     "DEFAULT_DATA_DIR",
     "DOWNLINKED_FILES_OUTPUT_FILENAME",
-    "DOWNLINKS_OUTPUT_FILENAME",
     "DOWNLINK_GAP",
+    "DOWNLINK_TIME_PERIODS_OUTPUT_FILENAME",
     "HEADER_MARGIN",
     "MIN_DOWNLINK_BYTES_PER_SEC",
     "RESCUE_WINDOW",
@@ -134,7 +136,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 DEFAULT_DATA_DIR = step_10_pipeline.DEFAULT_DATA_DIR
-DOWNLINKS_OUTPUT_FILENAME = "file_downlinks.parquet"
+DOWNLINK_TIME_PERIODS_OUTPUT_FILENAME = "file_downlink_time_periods.parquet"
 DOWNLINKED_FILES_OUTPUT_FILENAME = "downlinked_files.parquet"
 
 # The satellite sends about 800 B/s of file (measured from downlinks
@@ -215,7 +217,7 @@ _DOWNLINKS_SCHEMA = {
 
 _FILES_SCHEMA = {
     "file_key": pl.String,
-    "file_path": pl.String,  # null: unidentified, or a prefix of no known path
+    "file_path": pl.String,
     "path_sha256_prefix": pl.String,
     "file_size": pl.Int64,  # as last reported by the satellite, if ever
     "byte_length": pl.Int64,  # of `data`
@@ -245,7 +247,26 @@ _FILES_SCHEMA = {
     # A preview image converted from the data (a PiCAM image's JPG); null
     # where the data is the image itself, or isn't one.
     "preview_image": pl.Binary,
-    "data": pl.Binary,  # missing bytes are zeros
+    "data": pl.Binary,  # missing bytes are zeros; null if never downlinked
+    # Step 10's `satellite_files` columns -- null for a file it doesn't know.
+    "reported_sha256": pl.String,  # its `sha256`: the latest one reported
+    "listing_status": pl.String,
+    "sources": pl.String,
+    "mention_count": pl.Int64,
+    "first_seen_at": pl.Datetime("us", "UTC"),
+    "last_seen_at": pl.Datetime("us", "UTC"),
+    "last_listed_at": pl.Datetime("us", "UTC"),
+}
+
+# Step 10's columns carried into `_FILES_SCHEMA`, as named there.
+_SATELLITE_FILE_COLUMNS = {
+    "sha256": "reported_sha256",
+    "listing_status": "listing_status",
+    "sources": "sources",
+    "mention_count": "mention_count",
+    "first_seen_at": "first_seen_at",
+    "last_seen_at": "last_seen_at",
+    "last_listed_at": "last_listed_at",
 }
 
 _CHUNK_COLUMNS = (
@@ -464,11 +485,21 @@ def _union_length(intervals: list[tuple[int, int]]) -> int:
     return total
 
 
-def summarize_downlinks(attributed: pl.DataFrame) -> pl.DataFrame:
-    """One row per downlink in `attribute_chunks`' output (with
-    `rejected_reason` from `reject_inconsistent_downlinks`, if joined on),
-    newest first.
+def _named(attributed: pl.DataFrame) -> pl.DataFrame:
+    """Only chunks of a file with a known path: the rest (an unknown path
+    hash, or unattributed) are only used to fill named files' gaps.
     """
+    if attributed.is_empty():
+        return attributed
+    return attributed.filter(pl.col("file_path").is_not_null())
+
+
+def summarize_downlinks(attributed: pl.DataFrame) -> pl.DataFrame:
+    """One row per downlink of a named file in `attribute_chunks`' output
+    (with `rejected_reason` from `reject_inconsistent_downlinks`, if joined
+    on), newest first.
+    """
+    attributed = _named(attributed)
     if attributed.is_empty():
         return pl.DataFrame(schema=_DOWNLINKS_SCHEMA)
     if "rejected_reason" not in attributed.columns:
@@ -1054,24 +1085,64 @@ def _reassemble_one(
 def reassemble_downlinked_files(
     attributed: pl.DataFrame, files: pl.DataFrame
 ) -> pl.DataFrame:
-    """One row per file in `attribute_chunks`' output (`file_key`), newest
-    downlink first -- see `_FILES_SCHEMA`. Downlinks with a
-    `rejected_reason` (see `reject_inconsistent_downlinks`) are left out.
+    """One row per named file in `attribute_chunks`' output (`file_key`),
+    plus one per file in step 10's `files` never downlinked (no `data`, zero
+    downlinks) -- newest downlink first, then newest mentioned. See
+    `_FILES_SCHEMA`. Downlinks with a `rejected_reason` (see
+    `reject_inconsistent_downlinks`) are left out.
     """
-    if attributed.is_empty():
-        return pl.DataFrame(schema=_FILES_SCHEMA)
-    if "rejected_reason" not in attributed.columns:
-        attributed = attributed.with_columns(rejected_reason=pl.lit(None, pl.String))
+    rows: list[dict[str, Any]] = []
+    attributed = _named(attributed)
+    if not attributed.is_empty():
+        if "rejected_reason" not in attributed.columns:
+            attributed = attributed.with_columns(
+                rejected_reason=pl.lit(None, pl.String)
+            )
+        known = {row["file_path"]: row for row in files.iter_rows(named=True)}
+        rows = [
+            _reassemble_one(cast("str", file_key), group, known)
+            for (file_key,), group in attributed.group_by("file_key")
+            # A file all of whose downlinks were rejected has nothing to show.
+            if group["rejected_reason"].is_null().any()
+        ]
+    downlinked = pl.DataFrame(rows, schema=_FILES_SCHEMA).drop(
+        _SATELLITE_FILE_COLUMNS.values()
+    )
+    if files.is_empty():
+        return downlinked.with_columns(
+            pl.lit(None, _FILES_SCHEMA[name]).alias(name)
+            for name in _SATELLITE_FILE_COLUMNS.values()
+        ).select(*_FILES_SCHEMA)
 
-    known = {row["file_path"]: row for row in files.iter_rows(named=True)}
-    rows = [
-        _reassemble_one(cast("str", file_key), group, known)
-        for (file_key,), group in attributed.group_by("file_key")
-        # A file all of whose downlinks were rejected has nothing to show.
-        if group["rejected_reason"].is_null().any()
-    ]
-    return pl.DataFrame(rows, schema=_FILES_SCHEMA).sort(
-        "last_downlinked_at", descending=True
+    satellite = files.select(
+        "file_path",
+        *(pl.col(src).alias(dst) for src, dst in _SATELLITE_FILE_COLUMNS.items()),
+        _file_size=pl.col("file_size"),
+        _prefix=pl.col("path_sha256_prefix"),
+        _sha256s=pl.col("sha256s_seen"),
+    )
+    never = pl.col("file_key").is_null()  # in step 10, but never downlinked
+    return (
+        downlinked.join(satellite, on="file_path", how="full", coalesce=True)
+        .with_columns(
+            file_key=pl.coalesce("file_key", "file_path"),
+            file_size=pl.coalesce("file_size", "_file_size"),
+            path_sha256_prefix=pl.coalesce("path_sha256_prefix", "_prefix"),
+            expected_sha256s=pl.when(never)
+            .then(pl.col("_sha256s").fill_null("[]"))
+            .otherwise("expected_sha256s"),
+            **{
+                name: pl.when(never).then(0).otherwise(name)
+                for name in (
+                    "downlink_count",
+                    "rejected_downlink_count",
+                    "chunk_count",
+                    "rescued_chunk_count",
+                )
+            },
+        )
+        .select(pl.col(name).cast(dtype) for name, dtype in _FILES_SCHEMA.items())
+        .sort("last_downlinked_at", "last_seen_at", descending=True, nulls_last=True)
     )
 
 
@@ -1098,13 +1169,15 @@ def _log_summary(attributed: pl.DataFrame, downlinked: pl.DataFrame) -> None:
         )
         + "."
     )
-    named = downlinked.filter(pl.col("file_path").is_not_null())
+    named = downlinked.filter(pl.col("downlink_count") > 0)
+    unnamed = attributed.filter(pl.col("file_path").is_null()).height
     logger.info(
         f"{named.height:,} named file(s) downlinked: "
         f"{named['is_complete'].sum():,} complete, "
         f"{named['sha256_verified'].sum():,} verified by SHA-256 "
         f"({(named['sha256_verified'] == False).sum():,} mismatched); "  # noqa: E712
-        f"plus {downlinked.height - named.height:,} unidentified downlink(s). "
+        f"{downlinked.height - named.height:,} known file(s) never "
+        f"downlinked; {unnamed:,} chunk(s) of no named file left out. "
         f"{named['rejected_downlink_count'].sum():,} downlink(s) rejected as "
         "not matching the rest of their file; "
         f"{named['rescued_chunk_count'].sum():,} unattributed chunk(s) rescued "
@@ -1113,7 +1186,7 @@ def _log_summary(attributed: pl.DataFrame, downlinked: pl.DataFrame) -> None:
 
 
 def run(*, data_dir: Path = DEFAULT_DATA_DIR) -> None:
-    """Recompute `file_downlinks.parquet` and `downlinked_files.parquet`
+    """Recompute `file_downlink_time_periods.parquet` and `downlinked_files.parquet`
     from steps 3 and 10's outputs, in `data_dir`.
     """
     decoded_path = data_dir / step_3_pipeline.OUTPUT_FILENAME
@@ -1156,7 +1229,7 @@ def run(*, data_dir: Path = DEFAULT_DATA_DIR) -> None:
     downlinks = summarize_downlinks(attributed)
     downlinked = reassemble_downlinked_files(attributed, files)
 
-    _write_parquet_atomic(downlinks, data_dir / DOWNLINKS_OUTPUT_FILENAME)
+    _write_parquet_atomic(downlinks, data_dir / DOWNLINK_TIME_PERIODS_OUTPUT_FILENAME)
     out_path = data_dir / DOWNLINKED_FILES_OUTPUT_FILENAME
     _write_parquet_atomic(downlinked, out_path)
 
