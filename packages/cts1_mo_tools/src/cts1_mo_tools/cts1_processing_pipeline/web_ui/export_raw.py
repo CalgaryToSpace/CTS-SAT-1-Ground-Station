@@ -35,7 +35,7 @@ def raw_export_url(table_key: str) -> str:
 
 
 def register_raw_export_route(app: FastAPI, data_dir: Path) -> None:
-    """Register `GET {RAW_EXPORT_PATH}/{table_key}.parquet` on `app`, streaming
+    """Register `GET`/`HEAD {RAW_EXPORT_PATH}/{table_key}.parquet` on `app`, streaming
     that table's parquet file straight off disk via `FileResponse`.
     """
 
@@ -66,10 +66,11 @@ def register_raw_export_route(app: FastAPI, data_dir: Path) -> None:
             background=BackgroundTask(merged.unlink, missing_ok=True),
         )
 
+    # HEAD so DuckDB's httpfs can size the file up front instead of logging a 405.
     # Registered via `add_api_route` rather than the `@app.get(...)` decorator
     # form so `raw_export` is passed as an argument (visibly "used") instead
     # of a decorated-but-never-called nested function, which pyright's
     # `reportUnusedFunction` otherwise flags.
     app.add_api_route(
-        RAW_EXPORT_PATH + "/{table_key}.parquet", raw_export, methods=["GET"]
+        RAW_EXPORT_PATH + "/{table_key}.parquet", raw_export, methods=["GET", "HEAD"]
     )
