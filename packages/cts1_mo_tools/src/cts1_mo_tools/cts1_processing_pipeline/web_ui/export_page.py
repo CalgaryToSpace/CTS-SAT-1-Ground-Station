@@ -70,6 +70,18 @@ flowchart TD
     %% step 0 -- the layout otherwise pulls it down, right next to step 8.
     huggingface ~~~ step0
     step7 ~~~ raw_observations
+    %% Colours: external sources grey, steps blue, output tables green.
+    classDef source fill:#eceff1,stroke:#607d8b,color:#263238
+    classDef step fill:#bbdefb,stroke:#1565c0,color:#0d47a1,font-weight:bold
+    classDef output fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20
+    class satnogs,huggingface source
+    class step0,step1,step2,step3,step4,step5,step6,step7,step8,step9,step10,step11 step
+    class raw_observations,observation_listing_windows output
+    class observation_listing_history,raw_packets,decoder_runs output
+    class distinct_packets,everything_decoded output
+    class satellite_events,reassembled_tcmd_responses,mpi_frames,tle_history output
+    class mpi_collections,mpi_analyses,mpi_frames_cleaned output
+    class satellite_files,satellite_file_mentions,file_downlinks,downlinked_files output
 """
 
 RANGE_INPUT_MASK = "####-##-## ##:##:##"
