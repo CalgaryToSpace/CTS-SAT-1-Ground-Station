@@ -19,7 +19,7 @@ import polars as pl
 from nicegui import run, ui
 
 from . import export_tables
-from .export_raw import raw_export_url
+from .export_raw import raw_export_url, raw_export_urls
 from .layout import page_shell
 
 # A flowchart of every table the pipeline produces and the step that
@@ -236,11 +236,14 @@ def _time_filter_section(time_state: dict[str, str | None]) -> None:
 
 
 def duckdb_bootstrap_sql(
-    base_url: str, columns_by_table: dict[export_tables.TableSpec, list[str]]
+    base_url: str,
+    columns_by_table: dict[export_tables.TableSpec, list[str]],
+    urls_by_table: dict[str, list[str]],
 ) -> str:
     """DuckDB statements creating a view per table over its raw parquet
-    download URL, then selecting from each, with a `-- <step>` comment above
-    each step's tables. An empty column list selects `*`.
+    download URLs (`urls_by_table`, by table key), then selecting from each,
+    with a `-- <step>` comment above each step's tables. An empty column
+    list selects `*`.
     """
     views: list[str] = []
     selects: list[str] = []
@@ -255,7 +258,11 @@ def duckdb_bootstrap_sql(
             selects.append(f"-- {spec.step}")
         views.append(
             f"CREATE OR REPLACE VIEW {spec.key} AS SELECT * FROM "  # noqa: S608 -- shown, never run
-            f"read_parquet('{base_url.rstrip('/')}{raw_export_url(spec.key)}');"
+            "read_parquet(["
+            + ", ".join(
+                f"'{base_url.rstrip('/')}{url}'" for url in urls_by_table[spec.key]
+            )
+            + "]);"
         )
         selects.append(
             "SELECT "  # noqa: S608 -- shown, never run
@@ -294,6 +301,7 @@ def _duckdb_section(data_dir: Path) -> None:
         for spec in export_tables.TABLE_SPECS
         if (data_dir / spec.filename).exists()
     }
+    urls = {spec.key: raw_export_urls(spec.key, data_dir) for spec in columns}
 
     with ui.card().classes("w-full"), _collapsible("DuckDB Bootstrap"):
         ui.label(
@@ -308,6 +316,7 @@ def _duckdb_section(data_dir: Path) -> None:
                 duckdb_bootstrap_sql(
                     base_url,
                     columns if list_columns.value else {spec: [] for spec in columns},
+                    urls,
                 ),
                 language="sql",
             ).classes("w-full overflow-x-auto")
