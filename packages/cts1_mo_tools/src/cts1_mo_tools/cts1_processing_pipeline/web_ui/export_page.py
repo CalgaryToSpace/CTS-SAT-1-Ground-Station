@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path  # noqa: TC003 -- tyro needs this at runtime elsewhere
 
+import polars as pl
 from nicegui import run, ui
 
 from . import export_tables
@@ -234,6 +235,87 @@ def _time_filter_section(time_state: dict[str, str | None]) -> None:
             )
 
 
+def duckdb_bootstrap_sql(
+    base_url: str, columns_by_table: dict[export_tables.TableSpec, list[str]]
+) -> str:
+    """DuckDB statements creating a view per table over its raw parquet
+    download URL, then selecting from each, with a `-- <step>` comment above
+    each step's tables. An empty column list selects `*`.
+    """
+    views: list[str] = []
+    selects: list[str] = []
+    current_step: str | None = None
+    for spec, columns in columns_by_table.items():
+        if spec.step != current_step:
+            current_step = spec.step
+            if views:  # A blank line between steps' groups.
+                views.append("")
+                selects.append("")
+            views.append(f"-- {spec.step}")
+            selects.append(f"-- {spec.step}")
+        views.append(
+            f"CREATE OR REPLACE VIEW {spec.key} AS SELECT * FROM "  # noqa: S608 -- shown, never run
+            f"read_parquet('{base_url.rstrip('/')}{raw_export_url(spec.key)}');"
+        )
+        selects.append(
+            "SELECT "  # noqa: S608 -- shown, never run
+            + (", ".join(f'"{c}"' for c in columns) if columns else "*")
+            + f" FROM {spec.key};"
+        )
+    return "\n".join([*views, "", *selects])
+
+
+def _collapsible(title: str) -> ui.element:
+    """A collapsed-by-default section, its header styled like the cards' titles.
+
+    A native <details> rather than `ui.expansion`, whose open state lives on
+    the server -- every toggle waited on a websocket round trip.
+    """
+    details = ui.element("details").classes("w-full group")
+    with (
+        details,
+        ui.element("summary").classes(
+            "text-lg font-bold cursor-pointer list-none flex items-center gap-1"
+        ),
+    ):
+        ui.icon("chevron_right").classes("transition-transform group-open:rotate-90")
+        ui.label(title)
+    return details
+
+
+def _duckdb_section(data_dir: Path) -> None:
+    request = ui.context.client.request
+    # Behind a TLS-terminating reverse proxy the app itself only sees http.
+    scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
+    base_url = f"{scheme}://{request.url.netloc}"
+    # Only tables already produced -- the rest would 404. Reads parquet footers only.
+    columns = {
+        spec: pl.scan_parquet(data_dir / spec.filename).collect_schema().names()
+        for spec in export_tables.TABLE_SPECS
+        if (data_dir / spec.filename).exists()
+    }
+
+    with ui.card().classes("w-full"), _collapsible("DuckDB Bootstrap"):
+        ui.label(
+            "Paste into DuckDB to query every table straight from this "
+            "server (reads the ⚡ direct parquet download links)."
+        ).classes("text-caption text-grey")
+        list_columns = ui.checkbox("List all columns instead of *")
+
+        @ui.refreshable
+        def _code() -> None:
+            ui.code(
+                duckdb_bootstrap_sql(
+                    base_url,
+                    columns if list_columns.value else {spec: [] for spec in columns},
+                ),
+                language="sql",
+            ).classes("w-full overflow-x-auto")
+
+        _code()
+        list_columns.on_value_change(_code.refresh)
+
+
 @dataclass
 class _ExportOptions:
     """The (mutable) export-format/zip/drop-nulls/lineage state `_options_section`
@@ -248,8 +330,9 @@ class _ExportOptions:
     include_lineage_columns: bool = False
 
 
-def _options_section(options: _ExportOptions) -> None:
-    with ui.card().classes("w-full"):
+def _options_section(options: _ExportOptions) -> ui.card:
+    """Returns the card, so the caller can put the Export button inside it."""
+    with ui.card().classes("w-full") as card:
         ui.label("Export options").classes("text-lg font-bold")
         with ui.row().classes("items-center gap-6 flex-wrap mt-2"):
             ui.select(
@@ -285,6 +368,7 @@ def _options_section(options: _ExportOptions) -> None:
                 "observation_ids) in distinct_packets_over_time and "
                 "everything_decoded."
             )
+    return card
 
 
 def build_export_page(data_dir: Path) -> None:
@@ -358,13 +442,12 @@ def build_export_page(data_dir: Path) -> None:
 
         _tables_section(selected_tables, selected_packet_types)
         _time_filter_section(time_state)
-        _options_section(options)
-
-        with ui.row().classes("items-center gap-2 mt-2"):
+        with _options_section(options), ui.row().classes("items-center gap-2 mt-2"):
             export_button = ui.button("Export", icon="download", on_click=_run_export)
             export_spinner = ui.spinner(size="md")
             export_spinner.set_visibility(False)
 
-        with ui.card().classes("w-full"):
-            ui.label("Pipeline Overview").classes("text-lg font-bold")
+        _duckdb_section(data_dir)
+
+        with ui.card().classes("w-full"), _collapsible("Pipeline Overview"):
             ui.mermaid(PIPELINE_FLOWCHART).classes("w-full")
