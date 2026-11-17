@@ -66,7 +66,7 @@ flowchart TD
     satellite_files --> step11
     satellite_file_mentions --> step11
     step11 --> file_downlinks[("file_downlinks")]
-    step11 --> downlinked_files[("downlinked_files\\n(see Files page)")]
+    step11 --> downlinked_files[("downlinked_files")]
     %% Invisible links holding step 7 (which only step 8 reads) up top with
     %% step 0 -- the layout otherwise pulls it down, right next to step 8.
     huggingface ~~~ step0
