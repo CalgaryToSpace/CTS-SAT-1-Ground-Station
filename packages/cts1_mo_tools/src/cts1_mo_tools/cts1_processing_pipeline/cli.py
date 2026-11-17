@@ -193,7 +193,7 @@ class Step10Args:
 class Step11Args:
     """Step 11: tie every bulk downlink chunk to its file (by the downlink
     headers and the beacons' path hash), and reassemble each file into
-    file_downlinks and downlinked_files."""
+    file_downlink_time_periods and downlinked_files."""
 
 
 @dataclass(frozen=True, slots=True)

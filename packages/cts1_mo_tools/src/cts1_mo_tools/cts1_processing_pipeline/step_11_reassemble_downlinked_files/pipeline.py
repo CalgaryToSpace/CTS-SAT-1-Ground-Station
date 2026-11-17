@@ -30,7 +30,7 @@ downlink started by a time-tagged telecommand often sent its header before
 any ground station could hear it -- those chunks are unattributed.
 
 Consecutive chunks of one file, with no gap over `DOWNLINK_GAP` and no new
-header in between, are one downlink (`file_downlinks.parquet`).
+header in between, are one downlink (`file_downlink_time_periods.parquet`).
 
 A header doesn't guarantee what follows it is that file: before the
 `bulk_downlink_start_blob` fix (firmware issue #653), starting a downlink
@@ -85,8 +85,8 @@ __all__ = [
     "CONSISTENCY_TOLERANCE_BYTES",
     "DEFAULT_DATA_DIR",
     "DOWNLINKED_FILES_OUTPUT_FILENAME",
-    "DOWNLINKS_OUTPUT_FILENAME",
     "DOWNLINK_GAP",
+    "DOWNLINK_TIME_PERIODS_OUTPUT_FILENAME",
     "HEADER_MARGIN",
     "MIN_DOWNLINK_BYTES_PER_SEC",
     "RESCUE_WINDOW",
@@ -134,7 +134,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 DEFAULT_DATA_DIR = step_10_pipeline.DEFAULT_DATA_DIR
-DOWNLINKS_OUTPUT_FILENAME = "file_downlinks.parquet"
+DOWNLINK_TIME_PERIODS_OUTPUT_FILENAME = "file_downlink_time_periods.parquet"
 DOWNLINKED_FILES_OUTPUT_FILENAME = "downlinked_files.parquet"
 
 # The satellite sends about 800 B/s of file (measured from downlinks
@@ -1113,7 +1113,7 @@ def _log_summary(attributed: pl.DataFrame, downlinked: pl.DataFrame) -> None:
 
 
 def run(*, data_dir: Path = DEFAULT_DATA_DIR) -> None:
-    """Recompute `file_downlinks.parquet` and `downlinked_files.parquet`
+    """Recompute `file_downlink_time_periods.parquet` and `downlinked_files.parquet`
     from steps 3 and 10's outputs, in `data_dir`.
     """
     decoded_path = data_dir / step_3_pipeline.OUTPUT_FILENAME
@@ -1156,7 +1156,7 @@ def run(*, data_dir: Path = DEFAULT_DATA_DIR) -> None:
     downlinks = summarize_downlinks(attributed)
     downlinked = reassemble_downlinked_files(attributed, files)
 
-    _write_parquet_atomic(downlinks, data_dir / DOWNLINKS_OUTPUT_FILENAME)
+    _write_parquet_atomic(downlinks, data_dir / DOWNLINK_TIME_PERIODS_OUTPUT_FILENAME)
     out_path = data_dir / DOWNLINKED_FILES_OUTPUT_FILENAME
     _write_parquet_atomic(downlinked, out_path)
 

@@ -646,7 +646,7 @@ def _load_viewer_data(data_dir: Path, file_key: str) -> _ViewerData:
     """Blocking -- run it via `run.io_bound`."""
     return _ViewerData(
         file=downlinked_files.load_downlinked_file(data_dir, file_key),
-        downlinks=downlinked_files.load_file_downlinks(data_dir, file_key),
+        downlinks=downlinked_files.load_file_downlink_time_periods(data_dir, file_key),
     )
 
 

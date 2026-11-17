@@ -24,7 +24,7 @@ __all__ = [
     "file_preview_url",
     "load_downlinked_file",
     "load_downlinked_files",
-    "load_file_downlinks",
+    "load_file_downlink_time_periods",
     "load_file_mentions",
     "load_satellite_files",
     "register_downlinked_file_routes",
@@ -99,9 +99,9 @@ def load_file_mentions(data_dir: Path, file_path: str) -> pl.DataFrame:
     )
 
 
-def load_file_downlinks(data_dir: Path, file_key: str) -> pl.DataFrame:
+def load_file_downlink_time_periods(data_dir: Path, file_key: str) -> pl.DataFrame:
     """Every downlink of the file `file_key`, newest first."""
-    path = data_dir / step_11_pipeline.DOWNLINKS_OUTPUT_FILENAME
+    path = data_dir / step_11_pipeline.DOWNLINK_TIME_PERIODS_OUTPUT_FILENAME
     if not path.exists():
         return pl.DataFrame()
     return (

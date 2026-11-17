@@ -65,7 +65,7 @@ flowchart TD
     everything_decoded --> step11["Step 11\\nReassemble Downlinked Files"]
     satellite_files --> step11
     satellite_file_mentions --> step11
-    step11 --> file_downlinks[("file_downlinks")]
+    step11 --> file_downlink_time_periods[("file_downlink_time_periods")]
     step11 --> downlinked_files[("downlinked_files")]
     %% Invisible links holding step 7 (which only step 8 reads) up top with
     %% step 0 -- the layout otherwise pulls it down, right next to step 8.
@@ -82,7 +82,8 @@ flowchart TD
     class distinct_packets,everything_decoded output
     class satellite_events,reassembled_tcmd_responses,mpi_frames,tle_history output
     class mpi_collections,mpi_analyses,mpi_frames_cleaned output
-    class satellite_files,satellite_file_mentions,file_downlinks,downlinked_files output
+    class satellite_files,satellite_file_mentions output
+    class file_downlink_time_periods,downlinked_files output
 """
 
 RANGE_INPUT_MASK = "####-##-## ##:##:##"

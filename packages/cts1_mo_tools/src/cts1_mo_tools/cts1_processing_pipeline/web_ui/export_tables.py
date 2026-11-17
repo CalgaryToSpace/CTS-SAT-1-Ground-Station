@@ -311,14 +311,15 @@ TABLE_SPECS: tuple[TableSpec, ...] = (
         has_packet_type=False,
     ),
     TableSpec(
-        key="file_downlinks",
+        key="file_downlink_time_periods",
         step="Step 11 -- Reassemble Downlinked Files",
         description=(
-            "One row per bulk downlink: which file (tied by its header or the "
-            "beacons' path hash), when, the offsets and bytes received, its "
-            "header's fields, and why it was rejected, if it was."
+            "One row per time period a file was being downlinked: which file "
+            "(tied by its header or the beacons' path hash), when, the offsets "
+            "and bytes received, its header's fields, and why it was "
+            "rejected, if it was."
         ),
-        filename=step_11_pipeline.DOWNLINKS_OUTPUT_FILENAME,
+        filename=step_11_pipeline.DOWNLINK_TIME_PERIODS_OUTPUT_FILENAME,
         time_column="started_at",
         has_packet_type=False,
     ),
