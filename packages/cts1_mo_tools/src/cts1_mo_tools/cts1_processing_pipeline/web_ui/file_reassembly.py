@@ -868,9 +868,19 @@ _JSON_PAIR_RE = re.compile(
     r'"([A-Za-z0-9_]+)"\s*:\s*'
     r'("(?:[^"\\]|\\.)*"|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null)'
 )
-# A `sha256` cut off before its closing quote (by a missing frame) is still
-# worth a prefix match, so it gets its own unterminated-string pattern.
-_SHA256_PREFIX_RE = re.compile(r'"sha256"\s*:\s*"([0-9a-fA-F]+)')
+# A whole-file hash cut off before its closing quote (by a missing frame) is
+# still worth a prefix match, so it gets its own unterminated-string pattern.
+# The leading quote keeps it from matching `"chunk_sha256"`.
+_SHA256_PREFIX_RE = re.compile(r'"((?:file_)?sha256)"\s*:\s*"([0-9a-fA-F]+)')
+
+# Keys holding the whole file's hash/CRC, most preferred first. Newer actions
+# (e.g. `bulk_downlink_start_v3_blob`) send `file_sha256`/`file_crc16`
+# alongside `chunk_sha256`/`chunk_crc16` for just the requested
+# `offset`/`length` range. The `chunk_` values describe one piece rather than
+# the reassembled file, so they're left in `properties` only. Older actions
+# send the whole-file values as plain `sha256`/`crc16`.
+_FILE_SHA256_KEYS = ("file_sha256", "sha256")
+_FILE_CRC16_KEYS = ("file_crc16", "crc16")
 
 # The response to this action carries a `datetime` property: the ADCS's own
 # last-modified timestamp for the file (UTC), which the older
@@ -898,13 +908,21 @@ def _parse_properties(text: str) -> tuple[dict[str, Any], bool]:
             properties.setdefault(key, orjson.loads(raw_value))
         except ValueError:
             continue
-    if "sha256" not in properties and (m := _SHA256_PREFIX_RE.search(text)):
-        properties["sha256"] = m.group(1)
+    for m in _SHA256_PREFIX_RE.finditer(text):
+        properties.setdefault(m.group(1), m.group(2))
     return properties, False
 
 
 def _str_or_none(value: object) -> str | None:
     return value if isinstance(value, str) else None
+
+
+def _first_str(properties: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+    """The first of `keys` in `properties` that holds a string, if any."""
+    for key in keys:
+        if (value := _str_or_none(properties.get(key))) is not None:
+            return value
+    return None
 
 
 def _int_or_none(value: object) -> int | None:
@@ -931,6 +949,8 @@ class BulkHeaderCandidate:
     action: str | None
     file: str | None
     file_size: int | None
+    # Whole-file hash/CRC: `file_sha256`/`file_crc16` if sent, else the plain
+    # `sha256`/`crc16` of older actions (never the `chunk_` variants).
     sha256: str | None
     crc16: str | None
     offset: int | None
@@ -988,7 +1008,7 @@ def find_header_candidates(
             continue
 
         action = _str_or_none(properties.get("action"))
-        sha256 = _str_or_none(properties.get("sha256"))
+        sha256 = _first_str(properties, _FILE_SHA256_KEYS)
         candidates.append(
             BulkHeaderCandidate(
                 received_at=received_at,
@@ -997,7 +1017,7 @@ def find_header_candidates(
                 file=_str_or_none(properties.get("file")),
                 file_size=_int_or_none(properties.get("file_size")),
                 sha256=sha256.lower() if sha256 else None,
-                crc16=_str_or_none(properties.get("crc16")),
+                crc16=_first_str(properties, _FILE_CRC16_KEYS),
                 offset=_int_or_none(properties.get("offset")),
                 length=_int_or_none(properties.get("length")),
                 adcs_modified_timestamp_utc=(
