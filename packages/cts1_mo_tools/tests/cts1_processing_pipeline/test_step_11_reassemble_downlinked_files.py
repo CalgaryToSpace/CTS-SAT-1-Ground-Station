@@ -212,21 +212,20 @@ def test_null_beacon_after_header_ends_its_context() -> None:
     assert attributed["attribution"].to_list() == [Attribution.UNATTRIBUTED]
 
 
-def test_unknown_prefix_is_its_own_file_and_unattributed_downlinks_each_theirs() -> (
-    None
-):
+def test_unnamed_chunks_are_grouped_but_left_out_of_the_outputs() -> None:
     data = _content("x", 400)
     attributed, downlinks, downlinked = _run(
         _chunks(data, 10) + _chunks(data, 1000) + _chunks(data, 5000),
         _responses(),
         _beacons((9, "abcdef")),
     )
-    keys = set(downlinked["file_key"])
+    keys = set(attributed["file_key"])
     assert "sha256-prefix:abcdef" in keys
     unidentified = [k for k in keys if k.startswith("unidentified:")]
     assert len(unidentified) == 2
-    assert downlinks.height == 3
     assert set(attributed["file_path"].drop_nulls()) == set()
+    assert downlinks.is_empty()
+    assert downlinked.is_empty()
 
 
 def test_gap_and_new_header_split_downlinks() -> None:
@@ -395,3 +394,22 @@ def test_chunk_near_two_files_is_left_alone() -> None:
     )
     assert _attribution_at(attributed, 780, 150) == Attribution.UNATTRIBUTED
     assert _file(downlinked, "c/a")["rescued_chunk_count"] == 0
+
+
+def test_known_but_never_downlinked_file_gets_a_row_without_bytes() -> None:
+    sent = _content("sent", 400)
+    unsent = _content("unsent", 300)
+    _, _, downlinked = _run(
+        _chunks(sent, 5),
+        _responses((0, _header("a.bin", sent)), (3600, _header("b.bin", unsent))),
+    )
+    assert set(downlinked["file_key"]) == {"a.bin", "b.bin"}
+    got, never = _file(downlinked, "a.bin"), _file(downlinked, "b.bin")
+    assert got["sha256_verified"] is True
+    assert got["mention_count"] == 1
+    assert got["listing_status"] is not None
+    assert never["data"] is None
+    assert never["downlink_count"] == 0
+    assert never["file_size"] == len(unsent)
+    assert never["reported_sha256"] == hashlib.sha256(unsent).hexdigest()
+    assert never["file_path"] == "b.bin"

@@ -327,7 +327,9 @@ TABLE_SPECS: tuple[TableSpec, ...] = (
         key="downlinked_files",
         step="Step 11 -- Reassemble Downlinked Files",
         description=(
-            "One row per file reassembled from bulk downlinks: its size, "
+            "One row per file -- every one known to be on the satellite, "
+            "downlinked or not: its listing and "
+            "mention details, and for a downlinked one its "
             "good/missing/conflicting byte counts, SHA-256 check against what "
             "the satellite reported, and the reassembled bytes themselves."
         ),

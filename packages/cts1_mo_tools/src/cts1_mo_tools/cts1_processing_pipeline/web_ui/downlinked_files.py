@@ -1,6 +1,7 @@
-"""Loading steps 10 and 11's outputs -- the files on the satellite, and the
-ones reassembled from bulk downlinks -- for the web UI's Satellite Files
-page, and serving a reassembled file's bytes and preview image over HTTP.
+"""Loading step 11's `downlinked_files` -- every file on the satellite, and
+what's been reassembled of it from bulk downlinks -- and step 10's mentions,
+for the web UI's Satellite Files and Image Gallery pages; and serving a
+reassembled file's bytes and preview image over HTTP.
 
 The bytes are served by plain FastAPI routes (`register_downlinked_file_routes`)
 reading straight from `downlinked_files.parquet`, rather than pushed over the
@@ -18,7 +19,6 @@ __all__ = [
     "FILE_DOWNLOAD_PATH",
     "FILE_PREVIEW_PATH",
     "DownlinkedFile",
-    "display_name",
     "download_filename",
     "file_download_url",
     "file_preview_url",
@@ -26,7 +26,6 @@ __all__ = [
     "load_downlinked_files",
     "load_file_downlink_time_periods",
     "load_file_mentions",
-    "load_satellite_files",
     "register_downlinked_file_routes",
     "status_text",
 ]
@@ -67,23 +66,14 @@ def _files_path(data_dir: Path) -> Path:
 
 
 def load_downlinked_files(data_dir: Path) -> pl.DataFrame:
-    """Every reassembled file, newest downlink first, without its bytes --
-    empty if step 11 hasn't run yet.
+    """Every file -- reassembled, or known of but never downlinked --
+    newest downlink first, without its bytes; empty if step 11 hasn't run
+    yet.
     """
     path = _files_path(data_dir)
     if not path.exists():
         return pl.DataFrame()
     return pl.scan_parquet(path).drop(_BULKY_COLUMNS).collect()
-
-
-def load_satellite_files(data_dir: Path) -> pl.DataFrame:
-    """Every file known on the satellite (step 10), newest-mentioned first
-    -- empty if step 10 hasn't run yet.
-    """
-    path = data_dir / step_10_pipeline.OUTPUT_FILENAME
-    if not path.exists():
-        return pl.DataFrame()
-    return pl.read_parquet(path)
 
 
 def load_file_mentions(data_dir: Path, file_path: str) -> pl.DataFrame:
@@ -122,13 +112,14 @@ class DownlinkedFile:
 
 
 def load_downlinked_file(data_dir: Path, file_key: str) -> DownlinkedFile | None:
-    """The reassembled file `file_key`, or None if there's no such file."""
+    """The reassembled file `file_key`, or None if there's no such file (or
+    it was never downlinked)."""
     path = _files_path(data_dir)
     if not path.exists():
         return None
     rows = (
         pl.scan_parquet(path)
-        .filter(pl.col("file_key") == file_key)
+        .filter((pl.col("file_key") == file_key) & pl.col("data").is_not_null())
         .drop("preview_image")
         .collect()
     )
@@ -151,37 +142,17 @@ def load_downlinked_file(data_dir: Path, file_key: str) -> DownlinkedFile | None
     )
 
 
-def display_name(row: dict[str, Any]) -> str:
-    """How a reassembled file is named on the page: its path, or for one
-    without, what's known about it.
-    """
-    if row.get("file_path"):
-        return row["file_path"]
-    key: str = row["file_key"]
-    if key.startswith(step_11_pipeline.PREFIX_KEY_PREFIX):
-        return f"Unknown file (path SHA-256 {row['path_sha256_prefix']}…)"
-    started = key.removeprefix(step_11_pipeline.UNIDENTIFIED_KEY_PREFIX)
-    return f"Unidentified downlink at {started.replace('T', ' ')}"
-
-
 def _is_partial(row: dict[str, Any]) -> bool:
     return not (row.get("is_complete") and row.get("sha256_verified") is not False)
 
 
 def download_filename(row: dict[str, Any], suffix: str | None = None) -> str:
-    """The name a reassembled file downloads as: its own name, or one made
-    from its key -- with `_partial` on the stem unless it's complete (and
+    """The name a reassembled file downloads as: its own name -- with
+    `_partial` on the stem unless it's complete (and
     not contradicted by the satellite's SHA-256), as on the File
     Reassembler page. `suffix` replaces the extension (a converted image).
     """
-    if row.get("file_path"):
-        name = PurePosixPath(row["file_path"]).name
-    else:
-        name = (
-            "".join(c if c.isalnum() or c in "-_." else "_" for c in row["file_key"])
-            + ".bin"
-        )
-    path = PurePosixPath(name)
+    path = PurePosixPath(PurePosixPath(row["file_path"]).name)
     if suffix is not None:
         path = path.with_suffix(suffix)
     stem = path.stem + (PARTIAL_FILENAME_SUFFIX if _is_partial(row) else "")
@@ -189,7 +160,9 @@ def download_filename(row: dict[str, Any], suffix: str | None = None) -> str:
 
 
 def status_text(row: dict[str, Any]) -> str:
-    """A reassembled file's state in a word or two."""
+    """A file's downlink state in a word or two."""
+    if not row.get("downlink_count"):
+        return "Not downlinked"
     if row.get("sha256_verified") is True:
         return "Verified"
     if row.get("sha256_verified") is False:
@@ -230,7 +203,7 @@ def register_downlinked_file_routes(app: FastAPI, data_dir: Path) -> None:
             raise HTTPException(status_code=404, detail="Run step_11 first.")
         rows = (
             pl.scan_parquet(path)
-            .filter(pl.col("file_key") == key)
+            .filter((pl.col("file_key") == key) & pl.col("data").is_not_null())
             .select("file_key", "file_path", "is_complete", "sha256_verified", *columns)
             .collect()
         )

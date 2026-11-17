@@ -35,7 +35,12 @@ from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate impor
 
 from .beacon_stats_page import build_beacon_stats_page
 from .downlinked_files import register_downlinked_file_routes
-from .downlinked_files_page import SATELLITE_FILES_PATH, build_satellite_files_page
+from .downlinked_files_page import (
+    IMAGE_GALLERY_PATH,
+    SATELLITE_FILES_PATH,
+    build_image_gallery_page,
+    build_satellite_files_page,
+)
 from .export_page import build_export_page
 from .export_raw import register_raw_export_route
 from .file_reassembler_page import build_file_reassembler_page
@@ -65,6 +70,7 @@ NAV_LINKS = (
     ("MPI Data", "/mpi-data"),
     ("MPI Vis", MPI_VIS_PATH),
     ("Files", SATELLITE_FILES_PATH),
+    ("Image Gallery", IMAGE_GALLERY_PATH),
     ("File Reassembler", "/file-reassembler"),
     ("Overpasses", "/overpasses"),
     ("Pipeline Status", "/pipeline-status"),
@@ -102,7 +108,7 @@ def _navigate_to(path: str) -> Callable[[], None]:
     return lambda: ui.navigate.to(path)
 
 
-def _build_pages(args: Args) -> None:  # noqa: C901
+def _build_pages(args: Args) -> None:  # noqa: C901, PLR0915
     def _nav() -> None:
         # Remembered per-browser (see STORAGE_SECRET) so a toggle sticks
         # across page navigations and later visits; defaults to light for a
@@ -186,6 +192,11 @@ def _build_pages(args: Args) -> None:  # noqa: C901
     def satellite_files_page(file: str | None = None) -> None:
         _nav()
         build_satellite_files_page(args.data_dir, file_key=file)
+
+    @ui.page(IMAGE_GALLERY_PATH, title=_page_title(IMAGE_GALLERY_PATH))
+    def image_gallery_page() -> None:
+        _nav()
+        build_image_gallery_page(args.data_dir)
 
     @ui.page("/file-reassembler", title=_page_title("/file-reassembler"))
     def file_reassembler_page() -> None:
