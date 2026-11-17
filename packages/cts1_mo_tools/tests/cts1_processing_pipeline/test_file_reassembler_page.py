@@ -1,11 +1,11 @@
 from datetime import UTC, datetime
 
+from cts1_mo_tools.cts1_processing_pipeline.file_reassembly import (
+    BulkHeaderCandidate,
+)
 from cts1_mo_tools.cts1_processing_pipeline.web_ui.file_reassembler_page import (
     _downlinked_byte_range,  # pyright: ignore[reportPrivateUsage]
     _group_consecutive_candidates,  # pyright: ignore[reportPrivateUsage]
-)
-from cts1_mo_tools.cts1_processing_pipeline.web_ui.file_reassembly import (
-    BulkHeaderCandidate,
 )
 
 

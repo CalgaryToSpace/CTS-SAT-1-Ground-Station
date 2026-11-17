@@ -13,7 +13,7 @@ descriptor headers they're cross-checked against come from step 5's
 
 from __future__ import annotations
 
-__all__ = ["build_file_reassembler_page"]
+__all__ = ["build_file_reassembler_page", "coverage_map"]
 
 import base64
 import json
@@ -25,15 +25,7 @@ from typing import TYPE_CHECKING, Any
 import polars as pl
 from nicegui import ui
 
-from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
-    pipeline as step_3_pipeline,
-)
-from cts1_mo_tools.cts1_processing_pipeline.step_5_reassemble_tcmd_responses import (
-    pipeline as step_5_pipeline,
-)
-
-from . import data as beacon_data
-from .file_reassembly import (
+from cts1_mo_tools.cts1_processing_pipeline.file_reassembly import (
     ADCS_SD_FILE_BLOB_ACTION,
     COVERAGE_PACKETS_PER_ROW,
     COVERAGE_ROW_WIDTH_BYTES,
@@ -52,6 +44,14 @@ from .file_reassembly import (
     reassemble_bulk_chunks,
     render_coverage_png,
 )
+from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
+    pipeline as step_3_pipeline,
+)
+from cts1_mo_tools.cts1_processing_pipeline.step_5_reassemble_tcmd_responses import (
+    pipeline as step_5_pipeline,
+)
+
+from . import data as beacon_data
 from .layout import page_shell
 from .preview_image_route import preview_image_url
 
@@ -378,7 +378,7 @@ def _build_segments_table(result: ReassemblyResult) -> Callable[[], None]:
 # immediately spends. `image-rendering: pixelated` stays on so a browser
 # zoom (or a HiDPI display's own scaling) shows hard block edges instead of
 # blurring bytes into each other.
-def _coverage_map(result: ReassemblyResult) -> None:
+def coverage_map(result: ReassemblyResult) -> None:
     """A byte-coverage map: one pixel per byte, green if good, red if
     missing, yellow if conflicting (received with multiple disagreeing
     values), `COVERAGE_ROW_WIDTH_BYTES` bytes per row.
@@ -1042,7 +1042,7 @@ def _reassembler_results(
         ).classes("text-caption text-grey")
 
         _assessment_summary(result)
-        _coverage_map(result)
+        coverage_map(result)
         _build_segments_table(result)()
         _duplicates_note(result)
         ui.separator()

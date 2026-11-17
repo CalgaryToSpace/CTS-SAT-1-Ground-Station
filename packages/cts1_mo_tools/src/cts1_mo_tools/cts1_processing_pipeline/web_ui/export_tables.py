@@ -64,6 +64,12 @@ from cts1_mo_tools.cts1_processing_pipeline.step_8_summarize_mpi_collections imp
 from cts1_mo_tools.cts1_processing_pipeline.step_9_clean_mpi_frames import (
     pipeline as step_9_pipeline,
 )
+from cts1_mo_tools.cts1_processing_pipeline.step_10_list_satellite_files import (
+    pipeline as step_10_pipeline,
+)
+from cts1_mo_tools.cts1_processing_pipeline.step_11_reassemble_downlinked_files import (
+    pipeline as step_11_pipeline,
+)
 
 from . import pipeline_status
 
@@ -277,6 +283,44 @@ TABLE_SPECS: tuple[TableSpec, ...] = (
         time_column="collected_at",
         has_packet_type=False,
         lineage_columns=("packet_ids",),
+    ),
+    TableSpec(
+        key="satellite_files",
+        step="Step 10 -- List Satellite Files",
+        description=(
+            "Every file known to be on the satellite, one row per path, from "
+            "the directory listings, downlink headers, file maps and MPI "
+            "analyses in the telecommand responses: its latest size and "
+            "SHA-256, where it was seen, and whether the latest listing of "
+            "its directory still has it."
+        ),
+        filename=step_10_pipeline.OUTPUT_FILENAME,
+        time_column="last_seen_at",
+        has_packet_type=False,
+    ),
+    TableSpec(
+        key="satellite_file_mentions",
+        step="Step 10 -- List Satellite Files",
+        description=(
+            "One row per telecommand response naming a file on the "
+            "satellite: which kind of response, the path as given, and the "
+            "size/SHA-256/byte range it reported."
+        ),
+        filename=step_10_pipeline.MENTIONS_OUTPUT_FILENAME,
+        time_column="seen_at",
+        has_packet_type=False,
+    ),
+    TableSpec(
+        key="file_downlinks",
+        step="Step 11 -- Reassemble Downlinked Files",
+        description=(
+            "One row per bulk downlink: which file (tied by its header or the "
+            "beacons' path hash), when, the offsets and bytes received, its "
+            "header's fields, and why it was rejected, if it was."
+        ),
+        filename=step_11_pipeline.DOWNLINKS_OUTPUT_FILENAME,
+        time_column="started_at",
+        has_packet_type=False,
     ),
 )
 

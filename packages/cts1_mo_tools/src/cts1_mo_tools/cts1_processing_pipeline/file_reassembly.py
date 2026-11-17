@@ -5,9 +5,11 @@ a byte offset into the file (`bulk_file_offset`) and up to 195 bytes of that
 file's content (`bulk_data_hex`) -- see
 `cts1_decode_satnogs_packets.decode_bulk_file_downlink_packet`. There's no
 "file id" in the packet itself, so nothing in this module decides *which*
-file a chunk belongs to -- that's the web UI's job, by letting the user pick
-one or more `received_at` time ranges that isolate a single download. What
-this module does is:
+file a chunk belongs to -- that's the caller's job: the web UI's File
+Reassembler lets the user pick one or more `received_at` time ranges that
+isolate a single download, and step 11
+(`step_11_reassemble_downlinked_files`) attributes chunks to files from the
+download headers and beacons around them. What this module does is:
 
   - `reassemble_bulk_chunks()`: given whatever chunks the caller selected,
     assemble them into one byte string ordered by offset. The assessment of
@@ -79,6 +81,7 @@ __all__ = [
     "detect_image",
     "detect_picam_image",
     "find_header_candidates",
+    "parse_response_properties",
     "reassemble_bulk_chunks",
     "render_coverage_png",
 ]
@@ -888,10 +891,10 @@ _FILE_CRC16_KEYS = ("file_crc16", "crc16")
 ADCS_SD_FILE_BLOB_ACTION = "adcs_get_latest_sd_file_blob"
 
 
-def _parse_properties(text: str) -> tuple[dict[str, Any], bool]:
+def parse_response_properties(text: str) -> tuple[dict[str, Any], bool]:
     """Every property in one `TCMD_RESPONSE` body, and whether the body
     parsed as a whole JSON object (as opposed to being salvaged pair by pair
-    from broken JSON).
+    from broken JSON) -- see `_JSON_PAIR_RE` for what survives a gap.
     """
     try:
         parsed = orjson.loads(text)
@@ -1003,7 +1006,7 @@ def find_header_candidates(
     ):
         if not text:
             continue
-        properties, parsed_whole = _parse_properties(text)
+        properties, parsed_whole = parse_response_properties(text)
         if not _looks_like_file_descriptor(properties):
             continue
 

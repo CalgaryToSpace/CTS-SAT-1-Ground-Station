@@ -4,7 +4,8 @@ A NiceGUI dashboard over `everything_decoded.parquet` (step 3's output):
 recent beacon(s) at a glance, plus line/scatter charts for every field in
 the basic and extended beacon packets, grouped by subsystem -- see
 `beacon_stats_page`, `packet_browser_page`, `satellite_events_page`,
-`mpi_data_page`, `mpi_strip_view`, `file_reassembler_page`, `overpasses_page`,
+`mpi_data_page`, `mpi_strip_view`, `downlinked_files_page`,
+`file_reassembler_page`, `overpasses_page`,
 `pipeline_status_page`, and `export_page` for the individual pages, and
 `nav_pipeline_indicator` for the navbar's live pipeline progress.
 
@@ -33,6 +34,8 @@ from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate impor
 )
 
 from .beacon_stats_page import build_beacon_stats_page
+from .downlinked_files import register_downlinked_file_routes
+from .downlinked_files_page import SATELLITE_FILES_PATH, build_satellite_files_page
 from .export_page import build_export_page
 from .export_raw import register_raw_export_route
 from .file_reassembler_page import build_file_reassembler_page
@@ -61,6 +64,7 @@ NAV_LINKS = (
     ("Satellite Events", "/satellite-events"),
     ("MPI Data", "/mpi-data"),
     ("MPI Vis", MPI_VIS_PATH),
+    ("Files", SATELLITE_FILES_PATH),
     ("File Reassembler", "/file-reassembler"),
     ("Overpasses", "/overpasses"),
     ("Pipeline Status", "/pipeline-status"),
@@ -178,6 +182,11 @@ def _build_pages(args: Args) -> None:  # noqa: C901
         _nav()
         build_mpi_vis_page(args.data_dir, collection=collection)
 
+    @ui.page(SATELLITE_FILES_PATH, title=_page_title(SATELLITE_FILES_PATH))
+    def satellite_files_page(file: str | None = None) -> None:
+        _nav()
+        build_satellite_files_page(args.data_dir, file_key=file)
+
     @ui.page("/file-reassembler", title=_page_title("/file-reassembler"))
     def file_reassembler_page() -> None:
         _nav()
@@ -200,6 +209,7 @@ def _build_pages(args: Args) -> None:  # noqa: C901
 
     register_raw_export_route(app, args.data_dir)
     register_preview_image_route(app)
+    register_downlinked_file_routes(app, args.data_dir)
 
 
 def main() -> None:
