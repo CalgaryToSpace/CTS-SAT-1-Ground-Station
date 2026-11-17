@@ -1,7 +1,7 @@
-"""The "Export Data" page: a flow chart of every table the pipeline
-produces, a picker for which of them to export, common filters (packet
-type, received-at range), and a choice of output format -- see
-`export_tables` for the actual filtering/export logic.
+"""The "Export Data" page: a picker for which of the pipeline's tables to
+export, common filters (packet type, received-at range), a choice of output
+format, and (at the bottom) a flow chart of every table the pipeline
+produces -- see `export_tables` for the actual filtering/export logic.
 """
 
 # pyright: standard
@@ -22,12 +22,14 @@ from .export_raw import raw_export_url
 from .layout import page_shell
 
 # A flowchart of every table the pipeline produces and the step that
-# produces it -- kept in sync with `export_tables.TABLE_SPECS` by hand
-# (there are only 6 steps/9 tables total, and the step boundaries rarely
-# change), rather than generated from it, since the diagram also needs to
-# show the SatNOGS API as the ultimate source, which isn't a table at all.
+# produces it -- kept in sync with `export_tables.TABLE_SPECS` and
+# `daemon.STEP_NAMES` by hand (checked by `test_export_page`), rather than
+# generated from them, since the diagram also needs to show each step's
+# inputs and the external sources (SatNOGS, Hugging Face), which aren't
+# tables at all. Laid out top-to-bottom: there are too many steps for a
+# left-to-right layout to stay readable at page width.
 PIPELINE_FLOWCHART = """
-flowchart LR
+flowchart TD
     satnogs[("SatNOGS API")] --> step0["Step 0\\nList Observations"]
     step0 --> raw_observations[("raw_observations")]
     step0 --> observation_listing_windows[("observation_listing_windows")]
@@ -56,10 +58,30 @@ flowchart LR
     step8 --> mpi_analyses[("mpi_analyses")]
     mpi_frames --> step9["Step 9\\nClean MPI Frames"]
     step9 --> mpi_frames_cleaned[("mpi_frames_cleaned")]
-    %% Invisible links holding step 7 (which only step 8 reads) at the far
-    %% left with step 0 -- the layout otherwise pulls it right, next to step 8.
+    reassembled_tcmd_responses --> step10["Step 10\\nList Satellite Files"]
+    step10 --> satellite_files[("satellite_files")]
+    step10 --> satellite_file_mentions[("satellite_file_mentions")]
+    everything_decoded --> step11["Step 11\\nReassemble Downlinked Files"]
+    satellite_files --> step11
+    satellite_file_mentions --> step11
+    step11 --> file_downlinks[("file_downlinks")]
+    step11 --> downlinked_files[("downlinked_files\\n(see Files page)")]
+    %% Invisible links holding step 7 (which only step 8 reads) up top with
+    %% step 0 -- the layout otherwise pulls it down, right next to step 8.
     huggingface ~~~ step0
     step7 ~~~ raw_observations
+    %% Colours: external sources grey, steps blue, output tables green.
+    classDef source fill:#eceff1,stroke:#607d8b,color:#263238
+    classDef step fill:#bbdefb,stroke:#1565c0,color:#0d47a1,font-weight:bold
+    classDef output fill:#c8e6c9,stroke:#2e7d32,color:#1b5e20
+    class satnogs,huggingface source
+    class step0,step1,step2,step3,step4,step5,step6,step7,step8,step9,step10,step11 step
+    class raw_observations,observation_listing_windows output
+    class observation_listing_history,raw_packets,decoder_runs output
+    class distinct_packets,everything_decoded output
+    class satellite_events,reassembled_tcmd_responses,mpi_frames,tle_history output
+    class mpi_collections,mpi_analyses,mpi_frames_cleaned output
+    class satellite_files,satellite_file_mentions,file_downlinks,downlinked_files output
 """
 
 RANGE_INPUT_MASK = "####-##-## ##:##:##"
@@ -334,10 +356,6 @@ def build_export_page(data_dir: Path) -> None:
             "time-range and packet-type filtering."
         ).classes("text-caption text-grey")
 
-        with ui.card().classes("w-full"):
-            ui.label("Pipeline Overview").classes("text-lg font-bold")
-            ui.mermaid(PIPELINE_FLOWCHART).classes("w-full")
-
         _tables_section(selected_tables, selected_packet_types)
         _time_filter_section(time_state)
         _options_section(options)
@@ -346,3 +364,7 @@ def build_export_page(data_dir: Path) -> None:
             export_button = ui.button("Export", icon="download", on_click=_run_export)
             export_spinner = ui.spinner(size="md")
             export_spinner.set_visibility(False)
+
+        with ui.card().classes("w-full"):
+            ui.label("Pipeline Overview").classes("text-lg font-bold")
+            ui.mermaid(PIPELINE_FLOWCHART).classes("w-full")
