@@ -1,4 +1,4 @@
-"""Daemon: run steps 0-9 continuously.
+"""Daemon: run steps 0-11 continuously.
 
 Runs steps 0 through 6 once as a backfill of `start` (a duration like "24
 hours" or an ISO 8601 date/datetime -- same syntax as step 0/1's own
@@ -63,6 +63,8 @@ from .step_6_extract_mpi_frames import pipeline as step_6_pipeline
 from .step_7_fetch_tle_history import pipeline as step_7_pipeline
 from .step_8_summarize_mpi_collections import pipeline as step_8_pipeline
 from .step_9_clean_mpi_frames import pipeline as step_9_pipeline
+from .step_10_list_satellite_files import pipeline as step_10_pipeline
+from .step_11_reassemble_downlinked_files import pipeline as step_11_pipeline
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -83,6 +85,8 @@ STEP_NAMES = {
     7: "fetch TLE history",
     8: "summarize MPI collections",
     9: "clean MPI frames",
+    10: "list satellite files",
+    11: "reassemble downlinked files",
 }
 LAST_STEP = max(STEP_NAMES)
 
@@ -106,7 +110,7 @@ def run_all_steps(  # noqa: PLR0913
     run_label: str,
     incremental: bool = False,
 ) -> None:
-    """Run steps 0-9 once, publishing which step is in flight as it goes.
+    """Run steps 0-11 once, publishing which step is in flight as it goes.
 
     `incremental` makes steps 2 and 3 only reprocess what changed since
     their last run (see `partitions`), rather than everything.
@@ -152,7 +156,8 @@ def run_all_steps(  # noqa: PLR0913
     # Steps 4, 5 and 6 are independent (all only read step 3's output); they
     # just run one after the other here to keep the daemon single-threaded.
     # Step 7 (fetching the TLE history) doesn't depend on any other step;
-    # step 8 reads the output of steps 5-7; step 9 only reads step 6's.
+    # step 8 reads the output of steps 5-7; step 9 only reads step 6's;
+    # step 10 reads step 5's, and step 11 steps 3 and 10's.
     announce(5)
     step_5_pipeline.run(data_dir=data_dir)
     announce(6)
@@ -163,6 +168,10 @@ def run_all_steps(  # noqa: PLR0913
     step_8_pipeline.run(data_dir=data_dir)
     announce(9)
     step_9_pipeline.run(data_dir=data_dir)
+    announce(10)
+    step_10_pipeline.run(data_dir=data_dir)
+    announce(11)
+    step_11_pipeline.run(data_dir=data_dir)
 
     logger.info(f"Finished steps 0-{LAST_STEP} -- {run_label}.")
 
@@ -231,7 +240,7 @@ def run(  # noqa: PLR0913
     tools: tuple[str, ...] | None = None,
     idle_backfill: bool = False,
 ) -> None:
-    """Run steps 0-9 forever: one backfill of `start`, then a rerun every
+    """Run steps 0-11 forever: one backfill of `start`, then a rerun every
     `interval` minutes covering the same span (plus whatever's new).
 
     Args:

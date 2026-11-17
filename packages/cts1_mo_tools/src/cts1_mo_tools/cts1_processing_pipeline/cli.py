@@ -20,6 +20,8 @@ Usage (uv):
     uv run cts1_processing_pipeline step_7
     uv run cts1_processing_pipeline step_8
     uv run cts1_processing_pipeline step_9
+    uv run cts1_processing_pipeline step_10
+    uv run cts1_processing_pipeline step_11
     uv run cts1_processing_pipeline parquet_steps
     uv run cts1_processing_pipeline daemon
     uv run cts1_processing_pipeline daemon --start "3 days" --interval 5
@@ -63,6 +65,10 @@ from .step_8_summarize_mpi_collections import (
     pipeline as step_8_summarize_mpi_collections,
 )
 from .step_9_clean_mpi_frames import pipeline as step_9_clean_mpi_frames
+from .step_10_list_satellite_files import pipeline as step_10_list_satellite_files
+from .step_11_reassemble_downlinked_files import (
+    pipeline as step_11_reassemble_downlinked_files,
+)
 
 DEFAULT_DATA_DIR = step_0_list_observations.DEFAULT_DATA_DIR
 
@@ -177,8 +183,22 @@ class Step9Args:
 
 
 @dataclass(frozen=True, slots=True)
+class Step10Args:
+    """Step 10: list every file known to be on the satellite, from the
+    directory listings, downlink headers, file maps and MPI analyses in
+    reassembled_tcmd_responses, into satellite_files."""
+
+
+@dataclass(frozen=True, slots=True)
+class Step11Args:
+    """Step 11: tie every bulk downlink chunk to its file (by the downlink
+    headers and the beacons' path hash), and reassemble each file into
+    file_downlinks and downlinked_files."""
+
+
+@dataclass(frozen=True, slots=True)
 class ParquetStepsArgs:
-    """Run every parquet-in-parquet-out step (2-6, 8 and 9) once, in order --
+    """Run every parquet-in-parquet-out step (2-6 and 8-11) once, in order --
     e.g. to regenerate their outputs after changing one of them. Unlike the
     daemon, this doesn't list, download or fetch anything (steps 0, 1 and
     7): step 8 uses whatever tle_history is already in --data-dir."""
@@ -186,8 +206,8 @@ class ParquetStepsArgs:
 
 @dataclass(frozen=True, slots=True)
 class DaemonArgs:
-    """Daemon: run steps 0-9 continuously -- an initial backfill of
-    `--start`, then a full steps 0-9 rerun every `--interval` minutes."""
+    """Daemon: run steps 0-11 continuously -- an initial backfill of
+    `--start`, then a full steps 0-11 rerun every `--interval` minutes."""
 
     norad_id: Annotated[str, tyro.conf.Positional] = "69015"
     """NORAD catalog ID of the satellite (default: 69015, CTS-SAT-1)."""
@@ -240,6 +260,8 @@ Command = (
     | Annotated[Step7Args, tyro.conf.subcommand(name="step_7", prefix_name=False)]
     | Annotated[Step8Args, tyro.conf.subcommand(name="step_8", prefix_name=False)]
     | Annotated[Step9Args, tyro.conf.subcommand(name="step_9", prefix_name=False)]
+    | Annotated[Step10Args, tyro.conf.subcommand(name="step_10", prefix_name=False)]
+    | Annotated[Step11Args, tyro.conf.subcommand(name="step_11", prefix_name=False)]
     | Annotated[
         ParquetStepsArgs,
         tyro.conf.subcommand(name="parquet_steps", prefix_name=False),
@@ -260,6 +282,8 @@ _DATA_DIR_ONLY_STEPS: dict[
         | Step6Args
         | Step8Args
         | Step9Args
+        | Step10Args
+        | Step11Args
     ],
     tuple[int, Callable[..., None]],
 ] = {
@@ -270,6 +294,8 @@ _DATA_DIR_ONLY_STEPS: dict[
     Step6Args: (6, step_6_extract_mpi_frames.run),
     Step8Args: (8, step_8_summarize_mpi_collections.run),
     Step9Args: (9, step_9_clean_mpi_frames.run),
+    Step10Args: (10, step_10_list_satellite_files.run),
+    Step11Args: (11, step_11_reassemble_downlinked_files.run),
 }
 
 
@@ -355,6 +381,8 @@ def main() -> None:
                 Step6Args,
                 Step8Args,
                 Step9Args,
+                Step10Args,
+                Step11Args,
             ),
         ):
             _, run = _DATA_DIR_ONLY_STEPS[type(args.command)]
