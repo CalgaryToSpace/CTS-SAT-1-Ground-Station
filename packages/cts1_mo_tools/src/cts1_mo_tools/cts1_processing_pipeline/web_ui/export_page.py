@@ -248,6 +248,9 @@ def duckdb_bootstrap_sql(
     for spec, columns in columns_by_table.items():
         if spec.step != current_step:
             current_step = spec.step
+            if views:  # A blank line between steps' groups.
+                views.append("")
+                selects.append("")
             views.append(f"-- {spec.step}")
             selects.append(f"-- {spec.step}")
         views.append(
@@ -262,6 +265,24 @@ def duckdb_bootstrap_sql(
     return "\n".join([*views, "", *selects])
 
 
+def _collapsible(title: str) -> ui.element:
+    """A collapsed-by-default section, its header styled like the cards' titles.
+
+    A native <details> rather than `ui.expansion`, whose open state lives on
+    the server -- every toggle waited on a websocket round trip.
+    """
+    details = ui.element("details").classes("w-full group")
+    with (
+        details,
+        ui.element("summary").classes(
+            "text-lg font-bold cursor-pointer list-none flex items-center gap-1"
+        ),
+    ):
+        ui.icon("chevron_right").classes("transition-transform group-open:rotate-90")
+        ui.label(title)
+    return details
+
+
 def _duckdb_section(data_dir: Path) -> None:
     request = ui.context.client.request
     # Behind a TLS-terminating reverse proxy the app itself only sees http.
@@ -274,8 +295,7 @@ def _duckdb_section(data_dir: Path) -> None:
         if (data_dir / spec.filename).exists()
     }
 
-    with ui.card().classes("w-full"):
-        ui.label("DuckDB Bootstrap").classes("text-lg font-bold")
+    with ui.card().classes("w-full"), _collapsible("DuckDB Bootstrap"):
         ui.label(
             "Paste into DuckDB to query every table straight from this "
             "server (reads the ⚡ direct parquet download links)."
@@ -290,7 +310,7 @@ def _duckdb_section(data_dir: Path) -> None:
                     columns if list_columns.value else {spec: [] for spec in columns},
                 ),
                 language="sql",
-            ).classes("w-full")
+            ).classes("w-full overflow-x-auto")
 
         _code()
         list_columns.on_value_change(_code.refresh)
@@ -310,8 +330,9 @@ class _ExportOptions:
     include_lineage_columns: bool = False
 
 
-def _options_section(options: _ExportOptions) -> None:
-    with ui.card().classes("w-full"):
+def _options_section(options: _ExportOptions) -> ui.card:
+    """Returns the card, so the caller can put the Export button inside it."""
+    with ui.card().classes("w-full") as card:
         ui.label("Export options").classes("text-lg font-bold")
         with ui.row().classes("items-center gap-6 flex-wrap mt-2"):
             ui.select(
@@ -347,6 +368,7 @@ def _options_section(options: _ExportOptions) -> None:
                 "observation_ids) in distinct_packets_over_time and "
                 "everything_decoded."
             )
+    return card
 
 
 def build_export_page(data_dir: Path) -> None:
@@ -420,15 +442,12 @@ def build_export_page(data_dir: Path) -> None:
 
         _tables_section(selected_tables, selected_packet_types)
         _time_filter_section(time_state)
-        _options_section(options)
-
-        with ui.row().classes("items-center gap-2 mt-2"):
+        with _options_section(options), ui.row().classes("items-center gap-2 mt-2"):
             export_button = ui.button("Export", icon="download", on_click=_run_export)
             export_spinner = ui.spinner(size="md")
             export_spinner.set_visibility(False)
 
         _duckdb_section(data_dir)
 
-        with ui.card().classes("w-full"):
-            ui.label("Pipeline Overview").classes("text-lg font-bold")
+        with ui.card().classes("w-full"), _collapsible("Pipeline Overview"):
             ui.mermaid(PIPELINE_FLOWCHART).classes("w-full")
