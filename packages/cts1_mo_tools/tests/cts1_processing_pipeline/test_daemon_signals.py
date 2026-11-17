@@ -50,6 +50,9 @@ from cts1_mo_tools.cts1_processing_pipeline.step_10_list_satellite_files import 
 from cts1_mo_tools.cts1_processing_pipeline.step_11_reassemble_downlinked_files import (
     pipeline as step_11_pipeline,
 )
+from cts1_mo_tools.cts1_processing_pipeline.step_12_fetch_satnogs_schedule import (
+    pipeline as step_12_pipeline,
+)
 from loguru import logger
 
 # ---------------------------------------------------------------------------
@@ -398,6 +401,7 @@ def test_every_step_announces_itself(
         step_9_pipeline,
         step_10_pipeline,
         step_11_pipeline,
+        step_12_pipeline,
     ):
         monkeypatch.setattr(module, "run", do_nothing)
 

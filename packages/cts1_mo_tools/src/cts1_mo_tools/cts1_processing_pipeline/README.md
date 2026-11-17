@@ -102,10 +102,16 @@ web UI as two containers sharing that directory.
 * Output: `file_downlink_time_periods.parquet` -- one row per time period a file was being downlinked (a new one after a gap over 2 min or a new header): file, attribution(s), start/end, chunks, offsets, bytes received, its header's fields, and `rejected_reason`.
 * Output: `downlinked_files.parquet` -- one row per file: size, good/missing/conflicting byte counts, `is_complete`, `sha256` vs `expected_sha256s` (`sha256_verified`), downlink counts, `segments` (JSON), `content_kind`, an image preview where one is detected (a PiCAM image converted to JPG), the reassembled bytes (`data`), and step 10's listing/mention columns. Also has a row (without bytes) for every file step 10 knows of that was never downlinked. The web UI's Files page reads this file.
 
+### Step 12: Fetch SatNOGS schedule
+
+* Fetch every SatNOGS observation of the satellite scheduled over the next 3 days (status `future`). Doesn't depend on any other step.
+* Refetched at most every 30 minutes. A failed fetch keeps the previous file and only logs a warning.
+* Output: `satnogs_schedule.parquet` -- one row per scheduled observation: `observation_id`, `ground_station_id`, `start`, `end` (UTC), and `fetched_at`. The web UI's Plan page plans downlinks for when stations are listening from this file.
+
 ### Parquet steps
 
 * `cts1_processing_pipeline parquet_steps` runs every parquet-in-parquet-out step (2-6 and 8-11) once, in order -- e.g. to regenerate their outputs after changing one of them.
-* Unlike the daemon, it doesn't list, download or fetch anything (steps 0, 1 and 7), and runs once rather than continuously. Step 8 uses whatever `tle_history.parquet` is already in `--data-dir`.
+* Unlike the daemon, it doesn't list, download or fetch anything (steps 0, 1, 7 and 12), and runs once rather than continuously. Step 8 uses whatever `tle_history.parquet` is already in `--data-dir`.
 
 ### Partitioned outputs and incremental runs
 
@@ -116,7 +122,7 @@ web UI as two containers sharing that directory.
 
 ### Daemon
 
-* Runs steps 0-11 continuously instead of one-off: an initial backfill of `--start` (default: 24h), then a rerun of steps 0 through 11 every `--interval` minutes (default: 15).
+* Runs steps 0-12 continuously instead of one-off: an initial backfill of `--start` (default: 24h), then a rerun of steps 0 through 12 every `--interval` minutes (default: 15).
 * `--start` is resolved to an absolute time once, at startup, and every run covers the same span: step 0 only re-lists the tail of the listing windows that haven't settled yet (about the last hour of observations), and step 1 only decodes observations not already recorded in `decoder_runs`. So a SatNOGS observation that was still uploading during one run is picked up by the next.
 * With `--idle-backfill` (or `CTS1_IDLE_BACKFILL=1`), the time between runs is spent backfilling steps 0 and 1 for the history before `--start`, back to the satellite's first observations: one 12h listing window at a time, newest first, picking only windows step 0 hasn't listed or with observations step 1 hasn't decoded. A trigger request or the next scheduled run is honoured between windows. Steps 2-6 pick up the backfilled packets on the next run.
 * Runs until interrupted (Ctrl+C).

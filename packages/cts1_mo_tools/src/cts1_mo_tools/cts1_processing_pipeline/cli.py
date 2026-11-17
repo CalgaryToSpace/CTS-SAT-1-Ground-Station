@@ -22,6 +22,7 @@ Usage (uv):
     uv run cts1_processing_pipeline step_9
     uv run cts1_processing_pipeline step_10
     uv run cts1_processing_pipeline step_11
+    uv run cts1_processing_pipeline step_12
     uv run cts1_processing_pipeline parquet_steps
     uv run cts1_processing_pipeline daemon
     uv run cts1_processing_pipeline daemon --start "3 days" --interval 5
@@ -69,6 +70,7 @@ from .step_10_list_satellite_files import pipeline as step_10_list_satellite_fil
 from .step_11_reassemble_downlinked_files import (
     pipeline as step_11_reassemble_downlinked_files,
 )
+from .step_12_fetch_satnogs_schedule import pipeline as step_12_fetch_satnogs_schedule
 
 DEFAULT_DATA_DIR = step_0_list_observations.DEFAULT_DATA_DIR
 
@@ -197,6 +199,15 @@ class Step11Args:
 
 
 @dataclass(frozen=True, slots=True)
+class Step12Args:
+    """Step 12: fetch the SatNOGS observations scheduled over the next 3
+    days into satnogs_schedule -- at most every 30 minutes."""
+
+    norad_id: Annotated[str, tyro.conf.Positional] = "69015"
+    """NORAD catalog ID of the satellite (default: 69015, CTS-SAT-1)."""
+
+
+@dataclass(frozen=True, slots=True)
 class ParquetStepsArgs:
     """Run every parquet-in-parquet-out step (2-6 and 8-11) once, in order --
     e.g. to regenerate their outputs after changing one of them. Unlike the
@@ -206,8 +217,8 @@ class ParquetStepsArgs:
 
 @dataclass(frozen=True, slots=True)
 class DaemonArgs:
-    """Daemon: run steps 0-11 continuously -- an initial backfill of
-    `--start`, then a full steps 0-11 rerun every `--interval` minutes."""
+    """Daemon: run steps 0-12 continuously -- an initial backfill of
+    `--start`, then a full steps 0-12 rerun every `--interval` minutes."""
 
     norad_id: Annotated[str, tyro.conf.Positional] = "69015"
     """NORAD catalog ID of the satellite (default: 69015, CTS-SAT-1)."""
@@ -262,6 +273,7 @@ Command = (
     | Annotated[Step9Args, tyro.conf.subcommand(name="step_9", prefix_name=False)]
     | Annotated[Step10Args, tyro.conf.subcommand(name="step_10", prefix_name=False)]
     | Annotated[Step11Args, tyro.conf.subcommand(name="step_11", prefix_name=False)]
+    | Annotated[Step12Args, tyro.conf.subcommand(name="step_12", prefix_name=False)]
     | Annotated[
         ParquetStepsArgs,
         tyro.conf.subcommand(name="parquet_steps", prefix_name=False),
@@ -389,6 +401,10 @@ def main() -> None:
             run(data_dir=args.data_dir)
         elif isinstance(args.command, Step7Args):
             step_7_fetch_tle_history.run(
+                norad_id=args.command.norad_id, data_dir=args.data_dir
+            )
+        elif isinstance(args.command, Step12Args):
+            step_12_fetch_satnogs_schedule.run(
                 norad_id=args.command.norad_id, data_dir=args.data_dir
             )
         elif isinstance(args.command, ParquetStepsArgs):

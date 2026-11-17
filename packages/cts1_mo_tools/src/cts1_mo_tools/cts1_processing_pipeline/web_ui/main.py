@@ -50,13 +50,15 @@ from .nav_pipeline_indicator import build_nav_pipeline_indicator
 from .overpasses_page import build_overpasses_page
 from .packet_browser_page import build_packet_browser_page
 from .pipeline_status_page import build_pipeline_status_page
+from .plan_ops import USERS_FILENAME
+from .plan_ops_page import PLAN_OPS_PATH, build_plan_ops_page
 from .preview_image_route import register_preview_image_route
 from .satellite_events_page import build_satellite_events_page
 
-# Signs the cookie `app.storage.user` uses to remember each browser's dark
-# mode preference across visits -- not protecting anything sensitive (this
-# dashboard has no login), so a fixed fallback is fine; override via env if
-# you'd rather every deployment use its own.
+# Signs the cookie `app.storage.user` uses to remember each browser (its dark
+# mode preference, and who's signed in to Plan). The signed-in name
+# lives server-side, keyed by a random per-browser ID, so the fixed fallback
+# doesn't let anyone sign in -- but set your own in production regardless.
 STORAGE_SECRET = os.environ.get(
     "CTS1_WEB_STORAGE_SECRET", "cts1-processing-pipeline-web-ui"
 )
@@ -75,6 +77,7 @@ NAV_LINKS = (
     ("Overpasses", "/overpasses"),
     ("Pipeline Status", "/pipeline-status"),
     ("Export Data", "/export"),
+    ("Plan", PLAN_OPS_PATH),
 )
 
 # Tailwind's `xl` breakpoint: below it, the navbar collapses its links into a
@@ -101,6 +104,11 @@ class Args:
 
     port: int = 8089
     """Port to serve the dashboard on."""
+
+    plan_ops_users_file: Path | None = None
+    """JSON file of `{"name": "password", ...}` allowed into the Plan
+    page, re-read on every check. Default: `plan_ops_users.json` in
+    `data_dir`."""
 
 
 def _navigate_to(path: str) -> Callable[[], None]:
@@ -217,6 +225,14 @@ def _build_pages(args: Args) -> None:  # noqa: C901, PLR0915
     def export_page() -> None:
         _nav()
         build_export_page(args.data_dir)
+
+    @ui.page(PLAN_OPS_PATH, title=_page_title(PLAN_OPS_PATH))
+    def plan_ops_page() -> None:
+        _nav()
+        build_plan_ops_page(
+            args.data_dir,
+            args.plan_ops_users_file or args.data_dir / USERS_FILENAME,
+        )
 
     register_raw_export_route(app, args.data_dir)
     register_preview_image_route(app)

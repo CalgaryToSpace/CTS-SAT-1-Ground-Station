@@ -70,6 +70,9 @@ from cts1_mo_tools.cts1_processing_pipeline.step_10_list_satellite_files import 
 from cts1_mo_tools.cts1_processing_pipeline.step_11_reassemble_downlinked_files import (
     pipeline as step_11_pipeline,
 )
+from cts1_mo_tools.cts1_processing_pipeline.step_12_fetch_satnogs_schedule import (
+    pipeline as step_12_pipeline,
+)
 
 from . import pipeline_status
 
@@ -335,6 +338,18 @@ TABLE_SPECS: tuple[TableSpec, ...] = (
         ),
         filename=step_11_pipeline.DOWNLINKED_FILES_OUTPUT_FILENAME,
         time_column="last_downlinked_at",
+        has_packet_type=False,
+    ),
+    TableSpec(
+        key="satnogs_schedule",
+        step="Step 12 -- Fetch SatNOGS Schedule",
+        description=(
+            "Every SatNOGS observation of the satellite scheduled over the "
+            "next 3 days, one row per observation: its ground station and "
+            "start/end."
+        ),
+        filename=step_12_pipeline.OUTPUT_FILENAME,
+        time_column="start",
         has_packet_type=False,
     ),
 )
