@@ -85,25 +85,27 @@ def _build_login(users_file: Path) -> None:
 
 _SHEET_COLUMNS: list[dict[str, Any]] = [
     {"name": "id", "type": "hidden"},
-    {"name": "uplink", "title": "Uplink pass", "width": 290, "readOnly": True},
+    {"name": "uplink", "title": "Uplink pass", "width": 130, "readOnly": True},
+    {"name": "check", "title": "Check", "width": 260, "readOnly": True},
     {
         "name": "mode",
         "title": "Mode",
-        "width": 90,
+        "width": 110,
         "type": "dropdown",
         "source": ["Single", "Interval"],
     },
-    {"name": "tsexec_start", "title": "tsexec Start (UTC)", "width": 170},
-    {"name": "tsexec_end", "title": "tsexec End (UTC)", "width": 170},
-    {"name": "interval", "title": "Interval", "width": 80},
-    {"name": "telecommand", "title": "Telecommand", "width": 560},
-    {"name": "resp_fname", "title": "resp_fname", "width": 140},
-    {"name": "repeat", "title": "Repeat", "width": 70},
-    {"name": "random", "title": "Random", "width": 70},
-    {"name": "notes", "title": "Notes", "width": 300},
-    {"name": "updated", "title": "Last edit", "width": 220, "readOnly": True},
+    {"name": "tsexec_start", "title": "tsexec Start (UTC)", "width": 180},
+    {"name": "tsexec_end", "title": "tsexec End (UTC)", "width": 180},
+    {"name": "interval", "title": "Interval", "width": 100},
+    {"name": "telecommand", "title": "Telecommand", "width": 520},
+    {"name": "resp_fname", "title": "resp_fname", "width": 200},
+    {"name": "repeat", "title": "Repeat", "width": 80},
+    {"name": "random", "title": "Random", "width": 80},
+    {"name": "notes", "title": "Notes", "width": 360},
+    {"name": "updated", "title": "Last edit", "width": 260, "readOnly": True},
 ]
-"""The sheet's columns (Jspreadsheet column options), by command field."""
+"""The sheet's columns (Jspreadsheet column options), by command field. Each
+`width` is the most the sheet sizes it to fit its contents (see `plan_sheet.js`)."""
 
 
 def _pass_label(p: overpasses.Overpass) -> str:
@@ -172,6 +174,13 @@ def _build_planner(  # noqa: C901, PLR0915
                 options[c["uplink_aos"]] = f"{c['uplink_aos']}Z"
         return dict(sorted(options.items()))
 
+    def _uplink_los(aos: str | None) -> datetime | None:
+        """The pass's predicted LOS -- or its AOS, if it's no longer predicted."""
+        if aos is None:
+            return None
+        p = passes.get(aos)
+        return p.los if p else plan_ops.parse_stored_time(aos)
+
     def _reload(*, force: bool = False) -> None:
         nonlocal seen_revision
         revision = store.revision()
@@ -184,7 +193,8 @@ def _build_planner(  # noqa: C901, PLR0915
         shown[:] = [
             c
             | {
-                "uplink": options.get(c["uplink_aos"] or "", "Later"),
+                "uplink": f"{c['uplink_aos'][5:16]}Z" if c["uplink_aos"] else "Later",
+                "check": plan_ops.check_command(c, _uplink_los(c["uplink_aos"])),
                 "updated": f"{c['updated_by']} @ {c['updated_at']}",
             }
             for c in store.list_commands()

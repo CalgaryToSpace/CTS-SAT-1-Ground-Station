@@ -26,6 +26,8 @@ _CSS = """
 .plan-sheet .jss_worksheet { font-family: ui-monospace, Consolas, monospace; }
 .plan-sheet .jss_content { box-shadow: none !important; }
 .body--dark .plan-sheet .jss_worksheet td.readonly { color: #999; }
+.plan-sheet .jss_worksheet td.plan-check { color: #c62828; font-weight: 600; }
+.body--dark .plan-sheet .jss_worksheet td.plan-check { color: #ef9a9a; }
 .body--dark .plan-sheet {
     --border_color: #555;
     --header_background: #2a2a2a;

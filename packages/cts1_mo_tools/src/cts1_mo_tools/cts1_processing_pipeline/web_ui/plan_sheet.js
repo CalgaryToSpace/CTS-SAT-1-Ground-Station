@@ -22,7 +22,14 @@ export default {
       worksheets: [
         {
           data: sheetData(this.rows, this.columns.length),
-          columns: this.columns.map((c) => ({ align: "left", ...c })),
+          columns: this.columns.map((c) => ({
+            align: "left",
+            ...c,
+            // Warnings (`check`) in red.
+            ...(c.name === "check" && {
+              render: (td, value) => td.classList.toggle("plan-check", !!value),
+            }),
+          })),
           minSpareRows: 1, // Typing in the last, blank row adds a command.
           allowInsertColumn: false,
           allowDeleteColumn: false,
@@ -61,6 +68,8 @@ export default {
         if (out.length) this.$emit("cells_changed", out);
       },
     })[0];
+    this.widths = [];
+    this.autosize();
   },
 
   unmounted() {
@@ -76,6 +85,22 @@ export default {
   },
 
   methods: {
+    // Widen each column to fit its widest cell (or header), up to its
+    // `width` -- never narrowing it, so it doesn't jump about as rows change.
+    autosize() {
+      const data = this.ws.options.data;
+      const ctx = document.createElement("canvas").getContext("2d");
+      ctx.font = getComputedStyle(this.$el.querySelector(".jss_worksheet tbody td") ?? this.$el).font;
+      const textWidth = (text) => ctx.measureText(String(text ?? "")).width;
+      this.columns.forEach((col, x) => {
+        if (col.type === "hidden") return;
+        const widest = Math.max(textWidth(col.title), ...data.map((r) => textWidth(r[x])));
+        const padding = col.type === "dropdown" ? 40 : 16; // Room for its arrow.
+        const fit = Math.round(Math.min(Math.max(widest + padding, 50), col.width));
+        if (fit > (this.widths[x] ?? 0)) this.ws.setWidth(x, (this.widths[x] = fit));
+      });
+    },
+
     applyPending() {
       const rows = this.pendingRows;
       if (!rows || this.ws.edition) return;
@@ -102,6 +127,7 @@ export default {
         );
       } finally {
         ws.parent.ignoreEvents = false;
+        this.autosize();
       }
     },
 

@@ -18,6 +18,7 @@ __all__ = [
     "USERS_FILENAME",
     "PlanOpsStore",
     "build_pass_agenda",
+    "check_command",
     "check_login",
     "dark_region_photo_rows",
     "load_incomplete_files",
@@ -238,6 +239,23 @@ def _sheet_time(text: str, pass_start: datetime, label: str) -> str:
         msg = f"{label} {text} isn't within 24 h after the uplink pass's AOS."
         raise ValueError(msg)
     return dt.strftime("%H:%M:%S")
+
+
+def check_command(command: dict[str, Any], uplink_los: datetime | None) -> str:
+    """A warning for a command that would run before its uplink pass's LOS
+    (so before it's even been uplinked), or with an unreadable tsexec;
+    "" if none. A blank or "0" tsexec (run at once) is deliberate.
+    """
+    text = command["tsexec_start"].strip()
+    if text in {"", "0", "past"}:
+        return ""
+    try:
+        tsexec = parse_stored_time(text)
+    except ValueError:
+        return "⚠ unreadable tsexec start"
+    if uplink_los is not None and tsexec < uplink_los:
+        return f"⚠ runs before LOS ({uplink_los:%H:%M:%S}Z)"
+    return ""
 
 
 def build_pass_agenda(commands: list[dict[str, Any]], pass_aos: datetime) -> str:

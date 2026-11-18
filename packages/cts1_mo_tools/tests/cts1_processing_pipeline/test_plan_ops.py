@@ -284,3 +284,16 @@ def test_autopopulate_time_range() -> None:
             _time_range(start, end)
     with pytest.raises(ValueError, match="isoformat"):
         _time_range("soon", "2026-10-25 17:10")
+
+
+def test_check_command() -> None:
+    los = AOS + timedelta(minutes=10)
+
+    def check(tsexec: str, uplink_los: datetime | None = los) -> str:
+        return plan_ops.check_command({"tsexec_start": tsexec}, uplink_los)
+
+    assert check("2026-10-25 17:19:59") == "⚠ runs before LOS (17:20:00Z)"
+    assert check("2026-10-25 17:20:00") == ""  # Right at LOS is fine.
+    assert check("") == check("0") == ""  # "Run at once" is deliberate.
+    assert check("2026-10-25 17:00:00", None) == ""  # Not on a pass yet.
+    assert check("tomorrow-ish", None) == "⚠ unreadable tsexec start"
