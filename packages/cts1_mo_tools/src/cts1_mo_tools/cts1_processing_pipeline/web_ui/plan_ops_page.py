@@ -16,7 +16,6 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
-import polars as pl
 from nicegui import app, run, ui
 
 from cts1_mo_tools.cts1_spreadsheet_to_agenda import default_agenda_filename
@@ -40,7 +39,6 @@ _POLL_SEC = 2.0
 _PASSES_BACK = timedelta(hours=12)
 _PASSES_AHEAD = timedelta(days=3)
 _PLAN_HORIZON = timedelta(days=1)  # agendas only reach 24 h past their AOS
-_RECENT_FILES = timedelta(days=7)
 
 
 def _signed_in_user(users_file: Path) -> str | None:
@@ -311,6 +309,10 @@ def _build_planner(  # noqa: C901, PLR0915
             found = []
         passes.update({_pass_key(p): p for p in found or []})
         _reload(force=True)
+        # Default to planning the next pass (setting it reloads the sheet).
+        upcoming = [key for key, p in sorted(passes.items()) if p.aos > now]
+        if upcoming and view.value == _ALL:
+            view.value = upcoming[0]
 
     ui.timer(0, _load_passes, once=True)
     ui.timer(_POLL_SEC, _reload)
@@ -330,7 +332,29 @@ def _plan_window(
     return (p.los if p else aos), aos + _PLAN_HORIZON
 
 
-def _open_autopopulate(
+_MAX_RANGE = timedelta(days=7)
+"""Longest auto-populate time range -- the photo search samples every second."""
+
+
+def _time_range(start_text: str, end_text: str) -> tuple[datetime, datetime]:
+    """The auto-populate dialog's From/To, as UTC datetimes.
+
+    Raises:
+        ValueError: If either isn't a date and time, or they're out of order
+            or over `_MAX_RANGE` apart.
+    """
+    start, end = (datetime.fromisoformat(t.strip()) for t in (start_text, end_text))
+    # Naive means UTC; a typed offset is converted.
+    start, end = (
+        (t if t.tzinfo else t.replace(tzinfo=UTC)).astimezone(UTC) for t in (start, end)
+    )
+    if not start < end <= start + _MAX_RANGE:
+        msg = f"'To' must be after 'From', by at most {_MAX_RANGE.days} days."
+        raise ValueError(msg)
+    return start, end
+
+
+def _open_autopopulate(  # noqa: C901, PLR0915
     data_dir: Path,
     store: plan_ops.PlanOpsStore,
     who: Callable[[], str | None],
@@ -339,98 +363,151 @@ def _open_autopopulate(
 ) -> None:
     start, end = _plan_window(uplink_aos, passes)
     files = plan_ops.load_incomplete_files(data_dir)
-    recent = datetime.now(UTC) - _RECENT_FILES
+    generation = 0  # Of the row count shown, so a stale count can't land last.
 
     with ui.dialog() as dialog, ui.card().classes("w-[48rem] max-w-full"):
         ui.label(
-            f"Add commands to {uplink_aos + 'Z' if uplink_aos else 'Uplink later'}, "
-            f"to run {start:%Y-%m-%d %H:%M}Z to {end:%Y-%m-%d %H:%M}Z"
+            f"Add commands to {uplink_aos + 'Z' if uplink_aos else 'Uplink later'}"
         ).classes("font-bold")
+        # Defaults to after the pass, within its agenda's reach.
+        with ui.row().classes("w-full gap-4 no-wrap"):
+            range_from = ui.input(
+                "From (UTC)", value=f"{start:%Y-%m-%d %H:%M}"
+            ).classes("flex-1")
+            range_to = ui.input("To (UTC)", value=f"{end:%Y-%m-%d %H:%M}").classes(
+                "flex-1"
+            )
         with ui.tabs() as tabs:
-            satnogs_tab = ui.tab("Downlink during SatNOGS passes")
+            windows_tab = ui.tab("SatNOGS windows")
+            downlink_tab = ui.tab("Downlink a missing chunk")
             photo_tab = ui.tab("Photos over dark region")
-        with ui.tab_panels(tabs, value=satnogs_tab).classes("w-full") as panels:
-            with ui.tab_panel(satnogs_tab):
+        with ui.tab_panels(tabs, value=windows_tab).classes("w-full") as panels:
+            with ui.tab_panel(windows_tab):
                 ui.label(
-                    "Each SatNOGS coverage window (from step 12's schedule) "
-                    "downlinks one target, repeatedly; targets take turns across "
-                    "windows. Missing chunks go down at least "
-                    f"{plan_ops.MIN_DOWNLINK_BYTES:,} B at a time."
+                    "An Interval row per SatNOGS window (from step 12's "
+                    "schedule) in the time range, with only its times filled in."
                 ).classes("text-sm")
-                file_select = (
-                    ui.select(
-                        {
-                            r[
-                                "file_path"
-                            ]: f"{r['file_path']} ({r['missing_bytes']:,} B missing)"
-                            for r in files.iter_rows(named=True)
-                        },
-                        label="Missing chunks of files",
-                        multiple=True,
-                        value=files.filter(pl.col("last_downlinked_at") >= recent)[
-                            "file_path"
-                        ].to_list(),
-                    )
-                    .props("use-chips")
-                    .classes("w-full")
+            with ui.tab_panel(downlink_tab):
+                ui.label(
+                    "Downlinks one chunk over and over during every SatNOGS "
+                    "window in the time range, every chunk length / "
+                    f"{plan_ops.DOWNLINK_BYTES_PER_SEC} B/s."
+                ).classes("text-sm")
+                chunk_bytes = ui.number(
+                    "Chunk size (B)",
+                    value=plan_ops.DEFAULT_CHUNK_BYTES,
+                    min=1,
+                    step=1000,
+                    precision=0,
                 )
-                extra_targets = ui.textarea(
-                    "More targets, one per line: path;start_offset;length"
-                ).classes("w-full")
-                every = ui.input("Every", value="2 min")
+                chunk = ui.select({}, label="Missing chunk").classes("w-full")
             with ui.tab_panel(photo_tab):
-                lat = ui.input("Latitude range", value="55 to 65")
-                lon = ui.input("Longitude range (blank = any)", value="")
-                photo_every = ui.number("Every (s)", value=30, min=1)
+                ui.label("Each capture in the time range with its own setup.").classes(
+                    "text-sm"
+                )
+                lat = ui.input("Latitude range", value="55 to 65").classes("w-full")
+                lon = ui.input("Longitude range (blank = any)", value="").classes(
+                    "w-full"
+                )
+                photo_every = ui.number("Every (s)", value=30, min=1).classes("w-full")
                 eclipse = ui.select(
                     ["penumbra", "umbra"], value="penumbra", label="Dark from"
-                )
+                ).classes("w-full")
+        count = ui.label().classes("text-sm")
 
-        async def _generate() -> None:
+        def _on(tab: ui.tab) -> bool:
+            return panels.value in {tab, tab.props["name"]}
+
+        def _refresh_chunks() -> None:
+            """The chunk options for the chunk size, most recent file first."""
+            try:
+                targets = plan_ops.missing_chunk_targets(
+                    files, int(chunk_bytes.value or 0)
+                )
+            except ValueError:
+                targets = []
+            options = {}
+            for t in targets:
+                path, offset, length = t.rsplit(";", 2)
+                options[t] = f"{path}, bytes {int(offset):,} + {int(length):,}"
+            chunk.set_options(options)
+            if chunk.value not in options:
+                chunk.value = next(iter(options), None)
+
+        async def _build() -> list[dict[str, Any]]:
+            """The rows Populate adds, for the current tab and inputs."""
+            start, end = _time_range(range_from.value or "", range_to.value or "")
+            if _on(windows_tab):
+                return plan_ops.satnogs_window_rows(
+                    plan_ops.load_satnogs_windows(data_dir, start, end)
+                )
+            if _on(downlink_tab):
+                if not chunk.value:
+                    return []
+                return plan_ops.satnogs_downlink_rows(
+                    plan_ops.load_satnogs_windows(data_dir, start, end), chunk.value
+                )
+            tle = overpasses.load_latest_tle(data_dir, overpasses.DEFAULT_NORAD_ID)
+            rows = await run.io_bound(
+                plan_ops.dark_region_photo_rows,
+                tle.to_satkit(),
+                start,
+                end,
+                latitude_range=lat.value or None,
+                longitude_range=lon.value or None,
+                every_sec=float(photo_every.value or 30),
+                eclipse_start=eclipse.value,
+            )
+            return rows or []
+
+        async def _count() -> None:
+            nonlocal generation
+            generation += 1
+            mine = generation
+            await asyncio.sleep(0.3)  # Wait out a burst of keystrokes.
+            if mine != generation:
+                return
+            count.text = "Counting rows..."
+            try:
+                text = f"Populate will add {len(await _build())} row(s)."
+            except Exception as exc:  # noqa: BLE001 -- show any failure to the operator
+                text = f"Can't populate: {exc}"
+            if mine == generation:
+                count.text = text
+
+        async def _populate() -> None:
             if (user := who()) is None:
                 return
             try:
-                if panels.value not in {photo_tab, photo_tab.props["name"]}:
-                    targets = plan_ops.missing_chunk_targets(
-                        files.filter(pl.col("file_path").is_in(file_select.value or []))
-                    ) + [
-                        t.strip()
-                        for t in (extra_targets.value or "").splitlines()
-                        if t.strip()
-                    ]
-                    if not targets:
-                        ui.notify("Pick some files or targets.")
-                        return
-                    windows = plan_ops.load_satnogs_windows(data_dir, start, end)
-                    rows = plan_ops.satnogs_downlink_rows(
-                        windows, targets, every.value or "2 min"
-                    )
-                else:
-                    tle = overpasses.load_latest_tle(
-                        data_dir, overpasses.DEFAULT_NORAD_ID
-                    )
-                    rows = await run.io_bound(
-                        plan_ops.dark_region_photo_rows,
-                        tle.to_satkit(),
-                        start,
-                        end,
-                        latitude_range=lat.value or None,
-                        longitude_range=lon.value or None,
-                        every_sec=float(photo_every.value or 30),
-                        eclipse_start=eclipse.value,
-                    )
+                rows = await _build()  # Afresh: the count shown may be stale.
             except Exception as exc:  # noqa: BLE001 -- show any failure to the operator
-                ui.notify(f"Couldn't generate: {exc}", type="negative", multi_line=True)
+                ui.notify(f"Couldn't populate: {exc}", type="negative", multi_line=True)
                 return
             if not rows:
-                ui.notify("Nothing to add in that window.", type="warning")
+                ui.notify("Nothing to add.", type="warning")
                 return
             store.add([r | {"uplink_aos": uplink_aos} for r in rows], user)
-            ui.notify(f"Added {len(rows)} command(s).", type="positive")
+            ui.notify(f"Added {len(rows)} row(s).", type="positive")
             dialog.delete()
+
+        _refresh_chunks()
+        chunk_bytes.on_value_change(_refresh_chunks)
+        for element in (
+            panels,
+            range_from,
+            range_to,
+            chunk_bytes,
+            chunk,
+            lat,
+            lon,
+            photo_every,
+            eclipse,
+        ):
+            element.on_value_change(_count)
+        ui.timer(0, _count, once=True)
 
         with ui.row():
             ui.button("Cancel", on_click=dialog.delete).props("flat")
-            ui.button("Add commands", on_click=_generate)
+            ui.button("Populate", on_click=_populate)
     dialog.on("hide", dialog.delete)
     dialog.open()

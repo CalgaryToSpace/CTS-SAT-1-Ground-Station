@@ -20,9 +20,13 @@ from cts1_mo_tools.cts1_processing_pipeline.web_ui.plan_ops import (
     missing_chunk_targets,
     parse_stored_time,
     satnogs_downlink_rows,
+    satnogs_window_rows,
     table_rows,
     to_tsv,
     to_xlsx,
+)
+from cts1_mo_tools.cts1_processing_pipeline.web_ui.plan_ops_page import (
+    _time_range,  # pyright: ignore[reportPrivateUsage]
 )
 
 from .test_overpasses import TLE, TLE_EPOCH
@@ -92,18 +96,27 @@ def test_build_pass_agenda() -> None:
 
 
 def test_downlink_ranges() -> None:
-    size = 100_000
-    # Small gaps close together share one >= 30 KB downlink.
-    assert downlink_ranges([(0, 10), (20, 40)], size) == [(0, 30_000)]
-    # A big gap stays whole; one near the end is pulled back inside the file.
-    assert downlink_ranges([(1000, 50_000), (99_990, 100_000)], size) == [
-        (1000, 49_000),
+    size, chunk = 100_000, 30_000
+    # Small gaps close together share one chunk.
+    assert downlink_ranges([(0, 10), (20, 40)], size, chunk) == [(0, 30_000)]
+    # A big gap is split into chunks; one near the end is pulled back inside.
+    assert downlink_ranges([(1000, 50_000), (99_990, 100_000)], size, chunk) == [
+        (1000, 30_000),
+        (31_000, 30_000),
         (70_000, 30_000),
     ]
-    # A gap starting inside the previous downlink extends it.
-    assert downlink_ranges([(0, 10), (29_999, 40_000)], size) == [(0, 40_000)]
-    # A file under 30 KB goes down whole.
-    assert downlink_ranges([(5, 6)], 1000) == [(0, 1000)]
+    # A gap starting inside the previous chunk continues after it.
+    assert downlink_ranges([(0, 10), (29_999, 40_000)], size, chunk) == [
+        (0, 30_000),
+        (30_000, 30_000),
+    ]
+    # A file under one chunk goes down whole; a reconfigured chunk size is used.
+    assert downlink_ranges([(5, 6)], 1000, chunk) == [(0, 1000)]
+    assert downlink_ranges([(0, 25)], size, 10) == [(0, 10), (10, 10), (20, 10)]
+    # A gap past the file's end (bad data) can't loop forever.
+    assert downlink_ranges([(990, 2000)], 1000, 100) == [(900, 100)]
+    with pytest.raises(ValueError, match="positive"):
+        downlink_ranges([(0, 1)], size, 0)
 
 
 def test_missing_chunk_targets() -> None:
@@ -118,21 +131,28 @@ def test_missing_chunk_targets() -> None:
             ],
         }
     )
-    assert missing_chunk_targets(files) == ["a.img;0;30000"]
+    assert missing_chunk_targets(files, 30_000) == ["a.img;0;30000"]
+    assert missing_chunk_targets(files, 20) == ["a.img;0;20", "a.img;20;20"]
 
 
-def test_satnogs_downlink_rows_round_robin() -> None:
+def test_satnogs_rows() -> None:
     windows = [
-        (AOS + timedelta(hours=i), AOS + timedelta(hours=i, minutes=9), "")
-        for i in range(3)
+        (AOS + timedelta(hours=i), AOS + timedelta(hours=i, minutes=9), "2 station(s)")
+        for i in range(2)
     ]
-    rows = satnogs_downlink_rows(windows, ["x;0;30000", "y;0;30000"], "2 min")
-    assert [r["telecommand"] for r in rows] == [
-        "CTS1+exec_blob_from_fs(blobs/bulk_downlink_start_v3.blob,0,x;0;30000)",
-        "CTS1+exec_blob_from_fs(blobs/bulk_downlink_start_v3.blob,0,y;0;30000)",
-        "CTS1+exec_blob_from_fs(blobs/bulk_downlink_start_v3.blob,0,x;0;30000)",
+    times_only = satnogs_window_rows(windows)
+    assert [(r["mode"], r["tsexec_start"], r["tsexec_end"]) for r in times_only] == [
+        ("Interval", "2026-10-25 17:10:00", "2026-10-25 17:19:00"),
+        ("Interval", "2026-10-25 18:10:00", "2026-10-25 18:19:00"),
     ]
-    assert satnogs_downlink_rows(windows, [], "2 min") == []
+    assert all("telecommand" not in r for r in times_only)
+
+    rows = satnogs_downlink_rows(windows, "x.mpi;468000;30000")
+    assert {r["telecommand"] for r in rows} == {
+        "CTS1+exec_blob_from_fs(blobs/bulk_downlink_start_v3.blob,0,x.mpi;468000;30000)"
+    }
+    assert {r["interval"] for r in rows} == {"40 sec"}  # 30000 B / 750 B/s
+    assert satnogs_downlink_rows(windows, "x;0;1000")[0]["interval"] == "2 sec"
 
 
 def test_load_satnogs_windows(tmp_path: Path) -> None:
@@ -249,3 +269,18 @@ def test_load_incomplete_files(tmp_path: Path) -> None:
         }
     ).write_parquet(tmp_path / "downlinked_files.parquet")
     assert plan_ops.load_incomplete_files(tmp_path)["file_path"].to_list() == ["a"]
+
+
+def test_autopopulate_time_range() -> None:
+    assert _time_range("2026-10-25 17:10", "2026-10-25T19:10+01:00") == (
+        AOS,
+        AOS + timedelta(hours=1),  # An offset is converted, naive is UTC.
+    )
+    for start, end in [
+        ("2026-10-25 17:10", "2026-10-25 17:10"),  # Not after.
+        ("2026-10-25 17:10", "2026-11-25 17:10"),  # Over 7 days.
+    ]:
+        with pytest.raises(ValueError, match="after"):
+            _time_range(start, end)
+    with pytest.raises(ValueError, match="isoformat"):
+        _time_range("soon", "2026-10-25 17:10")

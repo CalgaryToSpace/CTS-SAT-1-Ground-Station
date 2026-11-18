@@ -25,6 +25,7 @@ __all__ = [
     "load_users",
     "missing_chunk_targets",
     "satnogs_downlink_rows",
+    "satnogs_window_rows",
     "table_rows",
     "to_tsv",
     "to_xlsx",
@@ -34,6 +35,7 @@ import csv
 import hmac
 import io
 import json
+import math
 import sqlite3
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
@@ -331,8 +333,11 @@ BULK_DOWNLINK_COMMAND: Final = (
 )
 """`target` is "<path>;<start_offset>;<length>"."""
 
-MIN_DOWNLINK_BYTES: Final = 30_000
-"""Never downlink less than this at once (but no more than the file)."""
+DEFAULT_CHUNK_BYTES: Final = 30_000
+"""How much a missing-chunk downlink sends, unless reconfigured."""
+
+DOWNLINK_BYTES_PER_SEC: Final = 750
+"""Bulk downlink rate: a downlink's repeat interval is its length over this."""
 
 CAMERA_SETUP_COMMAND: Final = "CTS1+camera_setup()"
 CAMERA_CAPTURE_COMMAND: Final = (
@@ -363,27 +368,31 @@ def load_incomplete_files(data_dir: Path) -> pl.DataFrame:
 
 
 def downlink_ranges(
-    missing: list[tuple[int, int]], file_size: int
+    missing: list[tuple[int, int]], file_size: int, chunk_bytes: int
 ) -> list[tuple[int, int]]:
-    """`(start, length)` ranges covering every `(start, end)` missing range,
-    each at least `MIN_DOWNLINK_BYTES` long (unless the file's shorter) --
-    so neighbouring small gaps share one downlink.
+    """`(start, length)` chunks of `chunk_bytes` (or the whole file, if it's
+    smaller) covering every `(start, end)` missing range -- so neighbouring
+    small gaps share a chunk, and big ones are split into several.
     """
-    ranges: list[tuple[int, int]] = []
+    if chunk_bytes <= 0:
+        msg = f"Chunk size must be positive, not {chunk_bytes}."
+        raise ValueError(msg)
+    chunks: list[tuple[int, int]] = []
+    covered = 0  # Everything before this is in a chunk already.
     for gap_start, gap_end in sorted(missing):
-        if ranges and gap_start < sum(ranges[-1]):  # Starts in the last range.
-            prev_start, prev_len = ranges[-1]
-            ranges[-1] = (prev_start, max(prev_len, gap_end - prev_start))
-            continue
-        end = min(max(gap_end, gap_start + MIN_DOWNLINK_BYTES), file_size)
-        start = max(0, min(gap_start, end - MIN_DOWNLINK_BYTES))
-        ranges.append((start, end - start))
-    return ranges
+        gap_end = min(gap_end, file_size)  # noqa: PLW2901 -- else it never ends.
+        pos = max(gap_start, covered)
+        while pos < gap_end:
+            start = max(0, min(pos, file_size - chunk_bytes))  # Fit inside the file.
+            chunks.append((start, min(chunk_bytes, file_size)))
+            covered = pos = start + chunk_bytes
+    return chunks
 
 
-def missing_chunk_targets(files: pl.DataFrame) -> list[str]:
-    """Bulk downlink targets covering each (partly downlinked) file's missing
-    bytes, from step 11's `downlinked_files` rows, in row order.
+def missing_chunk_targets(files: pl.DataFrame, chunk_bytes: int) -> list[str]:
+    """Bulk downlink targets ("<path>;<start>;<length>") covering each
+    (partly downlinked) file's missing bytes, from step 11's
+    `downlinked_files` rows, in row order.
     """
     targets: list[str] = []
     for row in files.filter(pl.col("missing_bytes") > 0).iter_rows(named=True):
@@ -394,7 +403,9 @@ def missing_chunk_targets(files: pl.DataFrame) -> list[str]:
         ]
         targets.extend(
             f"{row['file_path']};{start};{length}"
-            for start, length in downlink_ranges(missing, row["byte_length"])
+            for start, length in downlink_ranges(
+                missing, row["byte_length"], chunk_bytes
+            )
         )
     return targets
 
@@ -429,31 +440,42 @@ def load_satnogs_windows(
     ]
 
 
-def satnogs_downlink_rows(
+def satnogs_window_rows(
     windows: list[tuple[datetime, datetime, str]],
-    targets: list[str],
-    every: str,
 ) -> list[dict[str, Any]]:
-    """An Interval row per SatNOGS coverage window `(start, end, note)`,
-    downlinking `targets` round-robin, one target per window (so each one's
-    repeated through its window, for SatNOGS's lossy reception).
+    """An Interval row per SatNOGS coverage window `(start, end, note)`, with
+    only its times filled in -- the telecommand is the operator's to write.
     """
-    if not targets:
-        return []
     return [
         {
             "mode": "Interval",
             "tsexec_start": format_time(start),
             "tsexec_end": format_time(end),
-            "interval": every,
-            "telecommand": BULK_DOWNLINK_COMMAND.format(
-                target=targets[i % len(targets)]
-            ),
             "repeat": "",
             "random": "",
-            "notes": f"Downlink during SatNOGS ({note})",
+            "notes": f"SatNOGS window ({note})",
         }
-        for i, (start, end, note) in enumerate(windows)
+        for start, end, note in windows
+    ]
+
+
+def satnogs_downlink_rows(
+    windows: list[tuple[datetime, datetime, str]], target: str
+) -> list[dict[str, Any]]:
+    """`satnogs_window_rows`, each downlinking `target` ("<path>;<start>;
+    <length>") over and over (for SatNOGS's lossy reception), as often as
+    `DOWNLINK_BYTES_PER_SEC` lets one downlink finish before the next.
+    """
+    length = int(target.rsplit(";", 1)[1])
+    interval = f"{math.ceil(length / DOWNLINK_BYTES_PER_SEC)} sec"
+    return [
+        row
+        | {
+            "interval": interval,
+            "telecommand": BULK_DOWNLINK_COMMAND.format(target=target),
+            "notes": f"Downlink {target} during {row['notes']}",
+        }
+        for row in satnogs_window_rows(windows)
     ]
 
 
