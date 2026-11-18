@@ -165,15 +165,21 @@ class PlanOpsStore:
             ),
         )
 
-    def update_field(self, command_id: int, field: str, value: str, user: str) -> None:
-        if field not in EDITABLE_FIELDS:  # It's a column name from the browser.
-            msg = f"Not an editable field: {field!r}"
+    def update_fields(self, changes: list[tuple[int, str, str]], user: str) -> None:
+        """Set each `(command_id, field, value)`, in one write (e.g. a paste)."""
+        # The field names come from the browser.
+        if bad := {field for _, field, _ in changes} - set(EDITABLE_FIELDS):
+            msg = f"Not editable field(s): {sorted(bad)!r}"
             raise ValueError(msg)
-        self._write(
-            f"UPDATE commands SET {field} = ?, updated_by = ?, updated_at = ? "  # noqa: S608
-            "WHERE id = ?",
-            [(value, user, _now(), command_id)],
-        )
+        now = _now()
+        with closing(self._connect()) as conn, conn:
+            for command_id, field, value in changes:
+                conn.execute(
+                    f"UPDATE commands SET {field} = ?, updated_by = ?, "  # noqa: S608
+                    "updated_at = ? WHERE id = ?",
+                    (value, user, now, command_id),
+                )
+            conn.execute("UPDATE revision SET n = n + 1")
 
     def move(self, ids: list[int], uplink_aos: str | None, user: str) -> None:
         now = _now()

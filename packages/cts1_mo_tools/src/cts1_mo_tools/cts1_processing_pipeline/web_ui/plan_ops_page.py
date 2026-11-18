@@ -13,7 +13,7 @@ __all__ = ["PLAN_OPS_PATH", "build_plan_ops_page"]
 
 import asyncio
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 import polars as pl
@@ -23,6 +23,7 @@ from cts1_mo_tools.cts1_spreadsheet_to_agenda import default_agenda_filename
 
 from . import overpasses, plan_ops
 from .layout import page_shell
+from .plan_sheet import PlanSheet
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -84,6 +85,29 @@ def _build_login(users_file: Path) -> None:
             )
 
 
+_SHEET_COLUMNS: list[dict[str, Any]] = [
+    {"name": "id", "type": "hidden"},
+    {"name": "uplink", "title": "Uplink pass", "width": 290, "readOnly": True},
+    {
+        "name": "mode",
+        "title": "Mode",
+        "width": 90,
+        "type": "dropdown",
+        "source": ["Single", "Interval"],
+    },
+    {"name": "tsexec_start", "title": "tsexec Start (UTC)", "width": 170},
+    {"name": "tsexec_end", "title": "tsexec End (UTC)", "width": 170},
+    {"name": "interval", "title": "Interval", "width": 80},
+    {"name": "telecommand", "title": "Telecommand", "width": 560},
+    {"name": "resp_fname", "title": "resp_fname", "width": 140},
+    {"name": "repeat", "title": "Repeat", "width": 70},
+    {"name": "random", "title": "Random", "width": 70},
+    {"name": "notes", "title": "Notes", "width": 300},
+    {"name": "updated", "title": "Last edit", "width": 220, "readOnly": True},
+]
+"""The sheet's columns (Jspreadsheet column options), by command field."""
+
+
 def _pass_label(p: overpasses.Overpass) -> str:
     local = p.aos.astimezone(ZoneInfo(overpasses.RAO.timezone))
     return (
@@ -130,53 +154,13 @@ def _build_planner(  # noqa: C901, PLR0915
         copy = ui.button("Copy table", icon="content_copy").props("outline")
         excel = ui.button("Download Excel", icon="grid_on").props("outline")
         ui.space()
-        add = ui.button("Add command", icon="add")
         autopop = ui.button("Auto-populate…", icon="auto_fix_high")
 
-    grid = ui.aggrid(
-        {
-            "columnDefs": [
-                {"field": "uplink", "headerName": "Uplink pass", "editable": False},
-                {
-                    "field": "mode",
-                    "headerName": "Mode",
-                    "cellEditor": "agSelectCellEditor",
-                    "cellEditorParams": {"values": ["Single", "Interval"]},
-                    "width": 100,
-                },
-                {"field": "tsexec_start", "headerName": "tsexec Start (UTC)"},
-                {"field": "tsexec_end", "headerName": "tsexec End (UTC)"},
-                {"field": "interval", "headerName": "Interval", "width": 100},
-                {
-                    "field": "telecommand",
-                    "headerName": "Telecommand",
-                    "flex": 3,
-                    "cellClass": "font-mono",
-                },
-                {"field": "resp_fname", "headerName": "resp_fname"},
-                {"field": "repeat", "headerName": "Repeat", "width": 90},
-                {"field": "random", "headerName": "Random", "width": 90},
-                {"field": "notes", "headerName": "Notes", "flex": 2},
-                {"field": "updated", "headerName": "Last edit", "editable": False},
-            ],
-            "defaultColDef": {"editable": True, "resizable": True, "minWidth": 80},
-            "rowSelection": {"mode": "multiRow"},
-            ":getRowId": "(params) => String(params.data.id)",
-            "stopEditingWhenCellsLoseFocus": True,
-            "rowData": [],
-        }
-    ).classes("w-full h-[65vh] plan-ops-grid")
-    # Spreadsheet-style vertical lines between columns. Recoloring the
-    # cell's own (transparent) right border keeps AG Grid's focus outline.
-    ui.add_css("""
-        .plan-ops-grid .ag-cell { border-right-color: var(--ag-border-color); }
-        .plan-ops-grid .ag-header-cell {
-            box-shadow: inset -1px 0 0 var(--ag-border-color);
-        }
-    """)
+    sheet = PlanSheet(_SHEET_COLUMNS)
+    shown: list[dict[str, Any]] = []  # The commands in the sheet, in order.
 
     with ui.row().classes("w-full items-center gap-4"):
-        ui.label("Selected:")
+        ui.label("Rows with a selected cell:")
         move_to = ui.select(
             {_LATER: "Uplink later"}, label="Move to", value=_LATER
         ).classes("w-96")
@@ -199,7 +183,7 @@ def _build_planner(  # noqa: C901, PLR0915
         options = _options()
         view.set_options({_ALL: "All commands", _LATER: "Uplink later"} | options)
         move_to.set_options({_LATER: "Uplink later"} | options)
-        grid.options["rowData"] = [
+        shown[:] = [
             c
             | {
                 "uplink": options.get(c["uplink_aos"] or "", "Later"),
@@ -208,37 +192,49 @@ def _build_planner(  # noqa: C901, PLR0915
             for c in store.list_commands()
             if view.value == _ALL or (c["uplink_aos"] or _LATER) == view.value
         ]
-        grid.update()
+        sheet.set_rows([[c[col["name"]] for col in _SHEET_COLUMNS] for c in shown])
         download.set_enabled(view.value not in {_ALL, _LATER})
 
     view.on_value_change(lambda: _reload(force=True))
 
-    def _on_edit(e: GenericEventArguments) -> None:
-        if (who := _who()) is not None:
-            value = e.args["newValue"]
-            store.update_field(
-                e.args["data"]["id"],
-                e.args["colId"],
-                "" if value is None else str(value),
-                who,
-            )
-
-    grid.on("cellValueChanged", _on_edit)
-
     def _selected_aos() -> str | None:
         return None if view.value in {_ALL, _LATER} else view.value
 
-    def _add() -> None:
-        if (who := _who()) is not None:
-            store.add([{"uplink_aos": _selected_aos()}], who)
+    def _on_cells_changed(e: GenericEventArguments) -> None:
+        """A typed, pasted or filled edit -- new rows (no id) become commands."""
+        if (who := _who()) is None:
+            return
+        new_rows: dict[int, dict[str, Any]] = {}
+        updates: list[tuple[int, str, str]] = []
+        for c in e.args:
+            if c["id"] is None:
+                new_rows.setdefault(c["row"], {})[c["field"]] = c["value"]
+            else:
+                updates.append((int(c["id"]), c["field"], c["value"]))
+        try:
+            if updates:
+                store.update_fields(updates, who)
+            if new_rows:
+                store.add(
+                    [
+                        # Unpasted columns get defaults; read-only ones are ignored.
+                        {k: v for k, v in r.items() if k in plan_ops.EDITABLE_FIELDS}
+                        | {"uplink_aos": _selected_aos()}
+                        for _, r in sorted(new_rows.items())
+                    ],
+                    who,
+                )
+        except ValueError as exc:
+            ui.notify(str(exc), type="negative")
+        _reload(force=True)  # Also undoes edits to read-only columns.
 
-    add.on_click(_add)
+    sheet.on("cells_changed", _on_cells_changed)
 
     async def _selected_ids() -> list[int]:
-        rows = await grid.get_selected_rows()
-        if not rows:
-            ui.notify("Tick some rows first.")
-        return [r["id"] for r in rows]
+        ids = await sheet.selected_ids()
+        if not ids:
+            ui.notify("Select a cell in each row first.")
+        return ids
 
     async def _move() -> None:
         if (ids := await _selected_ids()) and (who := _who()) is not None:
@@ -277,7 +273,7 @@ def _build_planner(  # noqa: C901, PLR0915
     download.on_click(_download)
 
     def _table() -> list[list[str]]:
-        return plan_ops.table_rows(grid.options["rowData"])
+        return plan_ops.table_rows(shown)
 
     def _copy() -> None:
         ui.clipboard.write(plan_ops.to_tsv(_table()))

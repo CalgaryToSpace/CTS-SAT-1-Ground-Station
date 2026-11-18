@@ -38,17 +38,20 @@ def test_store_round_trip(tmp_path: Path) -> None:
     a, b = store.list_commands()
     assert (a["uplink_aos"], a["repeat"], a["random"]) == (None, "1", "5")
 
-    store.update_field(a["id"], "notes", "hi", "bob")
+    store.update_fields(
+        [(a["id"], "notes", "hi"), (a["id"], "mode", "Interval")], "bob"
+    )
     store.move([a["id"]], "2026-10-25 17:10:00", "bob")
     store.delete([b["id"]])
     (a,) = PlanOpsStore(tmp_path / "ops.sqlite").list_commands()
-    assert (a["notes"], a["uplink_aos"], a["updated_by"]) == (
+    assert (a["notes"], a["mode"], a["uplink_aos"], a["updated_by"]) == (
         "hi",
+        "Interval",
         "2026-10-25 17:10:00",
         "bob",
     )
     with pytest.raises(ValueError, match="editable"):
-        store.update_field(a["id"], "id = 0; --", "x", "eve")
+        store.update_fields([(a["id"], "id = 0; --", "x")], "eve")
 
 
 def test_check_login(tmp_path: Path) -> None:
