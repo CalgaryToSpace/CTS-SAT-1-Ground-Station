@@ -22,7 +22,7 @@ FRONTIERSAT
 """.strip()
 
     expected_output = """
-CTS1+adcs_set_sgp4_orbit_params(97.3985,0.0007979,80.8620,5.6312,0.0004583,15.21937754,354.5013,26183.24927377)!
+CTS1+adcs_set_sgp4_orbit_params(97.3985,0.0007979,80.8620,5.6312,0.0004583,15.21937754,354.5013,26183.24927377)
 """.strip()
 
     assert convert_3le_to_telecommand(input_tle) == expected_output
@@ -40,7 +40,7 @@ FRONTIERSAT
 """.strip()
 
     expected_output = """
-CTS1+adcs_set_sgp4_orbit_params(97.3894,0.0009241,138.3421,135.1447,0.00039482,15.22729231,225.0538,26241.68356825)!
+CTS1+adcs_set_sgp4_orbit_params(97.3894,0.0009241,138.3421,135.1447,0.00039482,15.22729231,225.0538,26241.68356825)
 """.strip()
 
     assert convert_3le_to_telecommand(input_tle) == expected_output
@@ -49,6 +49,8 @@ CTS1+adcs_set_sgp4_orbit_params(97.3894,0.0009241,138.3421,135.1447,0.00039482,1
 # ---------------------------------------------------------------------
 # fetch_tle() tests
 # ---------------------------------------------------------------------
+
+DEFAULT_NORAD_ID = 69015
 
 
 @patch("cts1_mo_tools.cts1_tle_formatter.requests.get")
@@ -60,7 +62,7 @@ def test_fetch_tle_no_data(mock_get: Mock) -> None:
 
     mock_get.return_value = mock_response
 
-    assert fetch_tle() is None
+    assert fetch_tle(DEFAULT_NORAD_ID) is None
 
 
 @patch("cts1_mo_tools.cts1_tle_formatter.requests.get")
@@ -72,7 +74,7 @@ def test_fetch_tle_empty_response(mock_get: Mock) -> None:
 
     mock_get.return_value = mock_response
 
-    assert fetch_tle() is None
+    assert fetch_tle(DEFAULT_NORAD_ID) is None
 
 
 @patch("cts1_mo_tools.cts1_tle_formatter.requests.get")
@@ -83,7 +85,7 @@ def test_fetch_tle_http_error(mock_get: Mock) -> None:
 
     mock_get.return_value = mock_response
 
-    assert fetch_tle() is None
+    assert fetch_tle(DEFAULT_NORAD_ID) is None
 
 
 # ---------------------------------------------------------------------

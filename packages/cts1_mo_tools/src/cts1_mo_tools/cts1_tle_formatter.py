@@ -1,13 +1,19 @@
 """
-Script to fetch FrontierSat TLE from CelesTrak, and format it into the
-CTS1+adcs_set_sgp4_orbit_params telecommand.
+Script to fetch a TLE from CelesTrak (or read one from a file), and format it
+into the CTS1+adcs_set_sgp4_orbit_params telecommand.
 """
 
+import sys
 from dataclasses import dataclass
 from decimal import Decimal
+from pathlib import Path
 
 import requests
+import tyro
 from loguru import logger
+
+DEFAULT_NORAD_ID = 69015
+"""NORAD ID of CTS-SAT-1 (FrontierSat)."""
 
 
 @dataclass
@@ -42,12 +48,12 @@ class TelecommandParams:
         ]
 
 
-def fetch_tle() -> str | None:
-    """Fetch the latest FrontierSat TLE from CelesTrak."""
+def fetch_tle(norad_id: int) -> str | None:
+    """Fetch the latest TLE for the given NORAD ID from CelesTrak."""
 
     url = "https://celestrak.org/NORAD/elements/gp.php"
     params = {
-        "CATNR": "69015",
+        "CATNR": str(norad_id),
         "FORMAT": "tle",
     }
 
@@ -64,7 +70,7 @@ def fetch_tle() -> str | None:
             tle_data = response.text.strip()
 
             if "No GP data found" in tle_data or not tle_data:
-                logger.error("Error: No orbital data found for FrontierSat.")
+                logger.error(f"Error: No orbital data found for NORAD ID {norad_id}.")
                 return None
 
             return tle_data
@@ -130,19 +136,45 @@ def format_telecommand(params: TelecommandParams) -> str:
     """Format the final CTS telecommand."""
     args_str = ",".join(params.to_args_list())
 
-    return f"CTS1+adcs_set_sgp4_orbit_params({args_str})!"
+    return f"CTS1+adcs_set_sgp4_orbit_params({args_str})"
 
 
-def main() -> None:
-    tle_text = fetch_tle()
+def run(
+    *,
+    norad_id: int | None = None,
+    tle_file: Path | None = None,
+) -> None:
+    """Format a TLE into the CTS1+adcs_set_sgp4_orbit_params telecommand.
 
-    if tle_text is None:
-        return
+    At most one of --norad-id or --tle-file may be given. If neither is given,
+    the TLE for CTS-SAT-1 (NORAD ID 69015) is fetched from CelesTrak.
 
-    logger.info(f"\n--- TLE RETURNED FROM CELESTRAK ---\n{tle_text}\n")
+    Args:
+        norad_id: NORAD ID to fetch the TLE for from CelesTrak. Defaults to 69015.
+        tle_file: Path to a file containing a 3-line TLE (name line + 2 lines).
+    """
+    if norad_id is not None and tle_file is not None:
+        logger.error("Specify only one of --norad-id or --tle-file, not both.")
+        sys.exit(2)
+
+    if tle_file is None:
+        if norad_id is None:
+            norad_id = DEFAULT_NORAD_ID
+        tle_text = fetch_tle(norad_id)
+        if tle_text is None:
+            sys.exit(1)
+        logger.info(f"\n--- TLE RETURNED FROM CELESTRAK ---\n{tle_text}\n")
+    else:
+        tle_text = tle_file.read_text().strip()
+        logger.info(f"\n--- TLE READ FROM {tle_file} ---\n{tle_text}\n")
 
     telecommand = convert_3le_to_telecommand(tle_text)
     logger.success(f"\n--- FINAL FORMATTED TELECOMMAND ---\n{telecommand}\n")
+
+
+def main() -> None:
+    """Entry point."""
+    tyro.cli(run)
 
 
 if __name__ == "__main__":
