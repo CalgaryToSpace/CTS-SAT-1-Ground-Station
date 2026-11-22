@@ -38,6 +38,7 @@ if TYPE_CHECKING:
 
 SATELLITE_FILES_PATH = "/satellite-files"
 IMAGE_GALLERY_PATH = "/image-gallery"
+GLOBE_VIEWER_URL = "https://jonathe0.github.io/Sat-1-Photos/globe/"
 
 # How much of a file the viewer shows as text or hex.
 TEXT_PREVIEW_BYTES = 64 * 1024
@@ -143,24 +144,21 @@ def _status_cell_slot() -> str:
 # -- Gallery -------------------------------------------------------------------
 
 
-def _gallery_card(files: pl.DataFrame | None) -> None:
+def _gallery_card(images: pl.DataFrame | None, order: str, *, descending: bool) -> None:
     with ui.card().classes("w-full"):
-        if files is None:
+        if images is None:
             _loading()
             return
-        images = (
-            files.filter(files["preview_media_type"].is_not_null()).to_dicts()
-            if not files.is_empty()
-            else []
-        )
-        if not images:
+        if images.is_empty():
             _not_run_yet("step_11")
             return
 
         with ui.element("div").classes(
             "w-full grid gap-3 grid-cols-[repeat(auto-fill,minmax(180px,1fr))]"
         ):
-            for row in images:
+            for row in downlinked_files.sort_gallery_images(
+                images, order, descending=descending
+            ).to_dicts():
                 _gallery_tile(row)
         ui.label(f"{len(images):,} image(s).").classes("text-caption text-grey")
 
@@ -596,18 +594,34 @@ def build_image_gallery_page(data_dir: Path) -> None:
     """Every image among the reassembled files, linking to each one's viewer."""
 
     @ui.refreshable
-    def content(files: pl.DataFrame | None) -> None:
-        _gallery_card(files)
+    def content(images: pl.DataFrame | None) -> None:
+        _gallery_card(images, sort_select.value, descending=direction_select.value)
 
     async def _reload() -> None:
-        files = await run.io_bound(downlinked_files.load_downlinked_files, data_dir)
-        if files is not None:
-            content.refresh(files)
+        images = await run.io_bound(downlinked_files.load_gallery_images, data_dir)
+        if images is not None:
+            content.refresh(images)
 
     with page_shell():
         with ui.row().classes("w-full items-center justify-between"):
             ui.label("Image Gallery").classes("text-2xl font-bold")
-            ui.button("Refresh", icon="refresh", on_click=_reload)
+            with ui.row().classes("items-center gap-2"):
+                sort_select = ui.select(
+                    list(downlinked_files.GALLERY_SORTS),
+                    value=next(iter(downlinked_files.GALLERY_SORTS)),
+                    label="Sort by",
+                    on_change=lambda _: content.refresh(),
+                ).classes("w-48")
+                direction_select = ui.select(
+                    {True: "Descending", False: "Ascending"},
+                    value=True,
+                    label="Direction",
+                    on_change=lambda _: content.refresh(),
+                ).classes("w-36")
+                ui.button("View on Globe", icon="open_in_new").props(
+                    f'type=a href="{GLOBE_VIEWER_URL}" target=_blank flat'
+                )
+                ui.button("Refresh", icon="refresh", on_click=_reload)
         content(None)
 
     ui.timer(0, _reload, once=True)
