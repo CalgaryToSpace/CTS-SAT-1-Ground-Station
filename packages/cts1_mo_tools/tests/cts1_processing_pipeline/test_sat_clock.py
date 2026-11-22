@@ -431,11 +431,39 @@ def test_each_recording_counts_once_however_many_decoders() -> None:
         _decode(0, _beacon_hex(1_000)),
         _decode(5_000, packet),
         _decode(5_000, packet, decoder="sso_rx_replay"),
-        _decode(0, _beacon_hex(1_200), observation_id=2),
+        _decode(0, _beacon_hex(900), observation_id=2),
         _decode(5_000, packet, observation_id=2),
+        _decode(0, _beacon_hex(800), observation_id=3),
+        _decode(5_000, packet, observation_id=3),
     )
 
-    assert result[packet] == 6_100
+    assert result[packet] == 5_900
+
+
+def test_repeats_of_a_packet_never_average_to_a_time_nothing_was_sent() -> None:
+    packet = _other_hex()
+
+    result = _sat_ms(
+        _decode(0, _beacon_hex(1_000)),
+        _decode(5_000, packet),
+        _decode(55_000, packet),
+    )
+
+    assert result[packet] == 56_000
+
+
+def test_late_anchor_just_after_a_clock_step_still_marks_the_step() -> None:
+    sync_log = _log_hex(40_000, synced_ms=39_975)
+
+    result = _sat_ms(
+        _decode(0, _log_hex(0)),
+        _decode(20_000, _log_hex(20_000)),
+        # Set forward 19s, then this waited 150ms to be sent.
+        _decode(21_150, sync_log),
+        _decode(60_000, _log_hex(79_000, synced_ms=39_975)),
+    )
+
+    assert result[sync_log] == 40_000
 
 
 def test_recording_with_only_the_other_baseline_decoder_counts() -> None:

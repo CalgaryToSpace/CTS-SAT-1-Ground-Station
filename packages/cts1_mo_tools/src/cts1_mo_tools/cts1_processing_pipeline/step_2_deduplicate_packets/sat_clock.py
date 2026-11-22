@@ -225,15 +225,20 @@ def _clock_anchors(decodes: pl.LazyFrame) -> pl.LazyFrame:
         > LATE_ANCHOR_TOLERANCE_MS
     )
     # A dip needs an anchor on each side, so the first and last are instead
-    # compared with their one neighbour.
+    # compared with their one neighbour. Only at the ends of the recording:
+    # next to a clock step, they're what says where the step was.
     previous = offset.shift(1).over(segment)
     following = offset.shift(-1).over(segment)
     late_at_either_end = (
-        (previous.is_null() & (following - offset > LATE_ANCHOR_TOLERANCE_MS))
-        | (following.is_null() & (previous - offset > LATE_ANCHOR_TOLERANCE_MS))
+        (pl.col("_is_first") & (following - offset > LATE_ANCHOR_TOLERANCE_MS))
+        | (pl.col("_is_last") & (previous - offset > LATE_ANCHOR_TOLERANCE_MS))
     ).fill_null(value=False)
     return (
         _number_segments(anchors)
+        .with_columns(
+            _is_first=offset.shift(1).over("observation_id").is_null(),
+            _is_last=offset.shift(-1).over("observation_id").is_null(),
+        )
         .filter(~in_dip)
         .filter(~late_at_either_end)
         .select("observation_id", "_t", "_offset", "_segment")

@@ -430,13 +430,25 @@ def _median_transmit_times(
     takes about twice as long as this does.
     """
     cluster = ["_is_leftover", "_cluster"]
+    # The upper middle one (waiting to be sent only makes an estimate early),
+    # never a mean of two: a cluster can hold repeats of one packet, and
+    # halfway between those nothing was transmitted.
+    median = pl.col("_transmitted_at").dt.timestamp("us").quantile(0.5, "higher")
     return (
         estimates.filter(pl.col("_transmitted_at").is_not_null())
         .join(clusters, on="_row_id", how="inner")
         .group_by(*cluster, "observation_id")
-        .agg(pl.col("_transmitted_at").median())
+        .agg(
+            median.cast(pl.Int64)
+            .cast(pl.Datetime("us", "UTC"))
+            .alias("_transmitted_at")
+        )
         .group_by(cluster)
-        .agg(transmitted_at_sat_clock=pl.col("_transmitted_at").median())
+        .agg(
+            transmitted_at_sat_clock=median.cast(pl.Int64).cast(
+                pl.Datetime("us", "UTC")
+            )
+        )
     )
 
 
