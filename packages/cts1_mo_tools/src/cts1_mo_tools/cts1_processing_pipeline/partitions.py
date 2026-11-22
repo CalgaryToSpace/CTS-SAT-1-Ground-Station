@@ -6,7 +6,8 @@ used to have (e.g. `everything_decoded.parquet/`), holding one parquet file
 per UTC month of `received_at` (`2026-11.parquet`). Polars reads a directory
 like that exactly as it reads a single file -- `pl.scan_parquet(path)` -- so
 readers don't need to know, while writers only rewrite the months that
-changed.
+changed. When partitioning another output, also exclude it from the looser
+raw-export rate limit in `nginx/nginx.conf`.
 
 Polars only reads such a directory if:
   - it holds nothing but the partition files (no temp files: they're written
