@@ -10,12 +10,16 @@ cleaning steps (see `cleaning.py` for what each does), as JSON arrays like
 * `pixels_clean_step_2`: ...and detrended across the frame's strip.
 * `pixels_clean_step_3`: ...and a local, sliding background subtracted --
   fully cleaned.
+* `pixels_clean_night_reference`: the other cleaning (`night_reference.py`),
+  against a background measured in the dark in place of steps 2 and 3. Null
+  for a pixel range or integration period with no such background.
 
 Each is null for a frame that has no value at that step. A frame's cleaned
 values depend on its neighbours (back to its range's background estimate, up
 to 256 frames before it, and the sweeps either side), so they can change as
 more of a recording is downlinked: the whole file is recomputed every run,
-like step 6's.
+like step 6's. The night reference's also change if more of the recordings
+it's measured on is downlinked.
 
 Each frame collection (`collection_started_at`, from step 6) is cleaned on
 its own, as the frame counter restarts with every recording.
@@ -26,6 +30,7 @@ from __future__ import annotations
 __all__ = [
     "CLEANED_PIXEL_COLUMNS",
     "DEFAULT_DATA_DIR",
+    "NIGHT_REFERENCE_COLUMN",
     "OUTPUT_FILENAME",
     "add_cleaned_pixels",
     "pixel_matrix",
@@ -43,7 +48,7 @@ from cts1_mo_tools.cts1_processing_pipeline.step_6_extract_mpi_frames import (
     pipeline as step_6_pipeline,
 )
 
-from . import cleaning
+from . import cleaning, night_reference
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -59,6 +64,9 @@ CLEANED_PIXEL_COLUMNS = (
     "pixels_clean_step_2",
     "pixels_clean_step_3",
 )
+# The column the night reference cleaning adds: an alternative to steps 2
+# and 3, so not one of the steps above.
+NIGHT_REFERENCE_COLUMN = "pixels_clean_night_reference"
 # Cleaned values are written to this many decimal places (raw ones are whole
 # DN, so this is well under their precision).
 _DECIMALS = 1
@@ -131,31 +139,75 @@ def _to_json(
     return out
 
 
+def _night_reference_pixels(
+    frames: pl.DataFrame,
+    pixels: npt.NDArray[np.float64],
+    first_pixel: int,
+    recording: npt.NDArray[np.int64],
+) -> npt.NDArray[np.float64]:
+    """`pixels` cleaned against the night reference, laid out likewise --
+    NaN for frames not on exactly the pixels it covers.
+    """
+    out = np.full_like(pixels, np.nan)
+    covered = (
+        (frames["first_pixel_index"] == night_reference.FIRST_PIXEL)
+        & (_pixel_lists(frames, "pixels").list.len() == night_reference.PIXEL_COUNT)
+        & frames["board_temperature_c"].is_not_null()
+        & frames["integration_period"].is_not_null()
+    ).to_numpy()
+    if not covered.any():
+        return out
+    start = night_reference.FIRST_PIXEL - first_pixel
+    strip = slice(start, start + night_reference.PIXEL_COUNT)
+    used = frames.filter(covered)
+    out[covered, strip] = night_reference.clean_with_night_reference(
+        night_reference.ReferenceFrames(
+            pixels=pixels[covered, strip],
+            counter=used["frame_counter"].to_numpy().astype(np.int64),
+            target_voltage=(
+                used["inner_dome_voltage_setting"].fill_null(-1).to_numpy()
+            ).astype(np.int64),
+            recording=recording[covered],
+            collected_at_us=used["collected_at"].dt.timestamp("us").to_numpy(),
+            temperature=(
+                used["board_temperature_c"].to_numpy()
+                * step_6_pipeline.BOARD_TEMPERATURE_COUNTS_PER_C
+            ),
+            integration_period=used["integration_period"].to_numpy().astype(np.int64),
+        )
+    )
+    return out
+
+
 def add_cleaned_pixels(frames: pl.DataFrame) -> pl.DataFrame:
     """`frames` (`mpi_frames.parquet`'s rows) sorted by recording then frame
-    counter, with `CLEANED_PIXEL_COLUMNS` added -- see the module docstring.
+    counter, with `CLEANED_PIXEL_COLUMNS` and `NIGHT_REFERENCE_COLUMN` added --
+    see the module docstring.
     """
     frames = frames.sort(*_SORT_COLUMNS)
     if frames.is_empty():
         return frames.with_columns(
-            pl.lit(None, dtype=pl.String).alias(c) for c in CLEANED_PIXEL_COLUMNS
+            pl.lit(None, dtype=pl.String).alias(c)
+            for c in (*CLEANED_PIXEL_COLUMNS, NIGHT_REFERENCE_COLUMN)
         )
     first_pixel, pixels = pixel_matrix(frames)
+    recording = (
+        frames["collection_started_at"].rank("dense").to_numpy().astype(np.int64)
+    )
     cleaned = cleaning.clean_pixels(
         pixels,
         counter=frames["frame_counter"].to_numpy().astype(np.int64),
         target_voltage=(
             frames["inner_dome_voltage_setting"].fill_null(-1).to_numpy()
         ).astype(np.int64),
-        recording=(
-            frames["collection_started_at"].rank("dense").to_numpy().astype(np.int64)
-        ),
+        recording=recording,
     )
+    by_night_reference = _night_reference_pixels(frames, pixels, first_pixel, recording)
     return frames.with_columns(
         pl.Series(name, _to_json(values, frames, first_pixel), dtype=pl.String)
         for name, values in zip(
-            CLEANED_PIXEL_COLUMNS,
-            (cleaned.step_1, cleaned.step_2, cleaned.step_3),
+            (*CLEANED_PIXEL_COLUMNS, NIGHT_REFERENCE_COLUMN),
+            (cleaned.step_1, cleaned.step_2, cleaned.step_3, by_night_reference),
             strict=True,
         )
     )
@@ -192,5 +244,6 @@ def run(*, data_dir: Path = DEFAULT_DATA_DIR) -> None:
     )
     logger.info(
         f"Done. {result.height:,} MPI frame(s) written to {out_path}, with "
-        f"cleaned pixels for {counts}."
+        f"cleaned pixels for {counts}, night reference: "
+        f"{result[NIGHT_REFERENCE_COLUMN].is_not_null().sum():,}."
     )

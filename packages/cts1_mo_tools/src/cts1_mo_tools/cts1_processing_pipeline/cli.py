@@ -179,7 +179,8 @@ class Step8Args:
 @dataclass(frozen=True, slots=True)
 class Step9Args:
     """Step 9: clean mpi_frames' pixels as simple_sat_ops' MPI viewer does
-    (each cleaning step's result a column) into mpi_frames_cleaned."""
+    (each cleaning step's result a column, plus one for its night reference
+    cleaning) into mpi_frames_cleaned."""
 
 
 @dataclass(frozen=True, slots=True)

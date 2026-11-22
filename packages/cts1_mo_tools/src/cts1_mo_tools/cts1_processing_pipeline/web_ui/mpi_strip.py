@@ -59,16 +59,25 @@ if TYPE_CHECKING:
 # What each pixel's colour shows: its raw value; how far it is above (or
 # below) that pixel's median over the collection -- which takes out each
 # pixel's own baseline, so a signal stands out from the background; or its
-# value after step 1, 2 or 3 of simple_sat_ops' cleaning (from step 9 -- see
-# `step_9_clean_mpi_frames.cleaning`).
+# value after step 1, 2 or 3 of simple_sat_ops' cleaning, or after its night
+# reference cleaning (from step 9 -- see `step_9_clean_mpi_frames.cleaning`
+# and `.night_reference`).
 IntensityMode = Literal[
-    "raw", "minus_median", "clean_step_1", "clean_step_2", "clean_step_3"
+    "raw",
+    "minus_median",
+    "clean_step_1",
+    "clean_step_2",
+    "clean_step_3",
+    "clean_night_reference",
 ]
 # The step 9 column each cleaned mode shows.
 CLEANED_MODE_COLUMNS: dict[IntensityMode, str] = dict(
     zip(
-        ("clean_step_1", "clean_step_2", "clean_step_3"),
-        step_9_pipeline.CLEANED_PIXEL_COLUMNS,
+        ("clean_step_1", "clean_step_2", "clean_step_3", "clean_night_reference"),
+        (
+            *step_9_pipeline.CLEANED_PIXEL_COLUMNS,
+            step_9_pipeline.NIGHT_REFERENCE_COLUMN,
+        ),
         strict=True,
     )
 )

@@ -125,6 +125,7 @@ from __future__ import annotations
 
 __all__ = [
     "BLOCK_DURATION_TOLERANCE",
+    "BOARD_TEMPERATURE_COUNTS_PER_C",
     "COUNTER_LINK_MAX_GAP_BYTES",
     "DEFAULT_DATA_DIR",
     "MAX_BRIDGED_CHUNKS",
@@ -244,7 +245,7 @@ _MAX_OUT_OF_ORDER_TIME = timedelta(seconds=2)
 _INNER_DOME_ADC_MASK = 0x3FF
 _INNER_DOME_VOLTS_PER_COUNT = 0.105361
 _INNER_DOME_VOLTS_OFFSET = -101.808
-_BOARD_TEMPERATURE_COUNTS_PER_C = 128.0
+BOARD_TEMPERATURE_COUNTS_PER_C = 128.0
 
 # The firmware's JSON markers never contain braces. The `\Z` alternative
 # also catches one cut off at the end of the buffer (only used when
@@ -338,7 +339,7 @@ def _parse_frame(frame: bytes) -> dict[str, Any]:
         "frame_counter": u16(4),
         "board_temperature_c": (
             int.from_bytes(frame[6:8], "big", signed=True)
-            / _BOARD_TEMPERATURE_COUNTS_PER_C
+            / BOARD_TEMPERATURE_COUNTS_PER_C
         ),
         "firmware_version": frame[8],
         "detector_status": u16(9),
