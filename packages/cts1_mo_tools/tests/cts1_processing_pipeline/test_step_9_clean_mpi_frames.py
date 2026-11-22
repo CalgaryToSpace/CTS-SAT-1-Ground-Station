@@ -135,6 +135,8 @@ def _frames_df(n: int, bump_frame: int, *, first_pixel_index: int = 0) -> pl.Dat
             "first_pixel_index": [first_pixel_index] * n,
             "pixels": [json.dumps([int(v) for v in row]) for row in sent],
             "inner_dome_voltage_setting": tv,
+            "board_temperature_c": [10.0] * n,
+            "integration_period": [260] * n,
         }
     )
 
@@ -148,7 +150,11 @@ def test_run_writes_frames_with_each_steps_pixels(tmp_path: Path) -> None:
     step_9_pipeline.run(data_dir=tmp_path)
 
     out = pl.read_parquet(tmp_path / step_9_pipeline.OUTPUT_FILENAME)
-    assert out.columns == [*frames.columns, *step_9_pipeline.CLEANED_PIXEL_COLUMNS]
+    assert out.columns == [
+        *frames.columns,
+        *step_9_pipeline.CLEANED_PIXEL_COLUMNS,
+        step_9_pipeline.NIGHT_REFERENCE_COLUMN,
+    ]
     assert out["frame_counter"].to_list() == list(range(n))
     assert out["pixels"].to_list() == frames["pixels"].to_list()
     step_3 = json.loads(out["pixels_clean_step_3"][300])
@@ -190,3 +196,158 @@ def test_mpi_vis_without_step_9_has_no_cleaned_values() -> None:
     strip = mpi_strip.render_strip(_frames_df(64, bump_frame=10), mode="clean_step_2")
     assert strip is not None
     assert not strip.has_pixel_values
+
+
+# Inside two of the night reference's dark windows, and outside all of them.
+_DARK_AT = (_T0, datetime(2026, 10, 29, 18, 0, tzinfo=UTC))
+_LIT_AT = datetime(2026, 11, 14, 8, 33, tzinfo=UTC)
+
+
+def _night_frames(  # noqa: PLR0913
+    started_at: datetime,
+    temperature: float,
+    *,
+    n: int = 4 * _KEY_EVERY,
+    first_counter: int = 0,
+    signal: float = 0.0,
+    drift: float = 0.0,
+) -> pl.DataFrame:
+    """A recording as step 6 writes it: a dark pattern that's linear in
+    temperature (and flat over the pixels its level is set on), a level that
+    jumps at every estimate, and a steady ion `signal` on pixels 30-34.
+    """
+    counter = np.arange(first_counter, first_counter + n)
+    pattern = np.zeros(_NPIX)
+    pattern[10:-10] = 8 * (np.arange(_NPIX - 20) % 7) * (1 + temperature / 1000)
+    pattern[30:35] += signal
+    level = 18_000 + 100 * (counter // _KEY_EVERY) + drift * counter
+    raw = level[:, None] + pattern
+    sent = raw.copy()
+    for k, ctr in enumerate(counter.tolist()):
+        key = ctr - ctr % _KEY_EVERY - first_counter
+        if key != k:
+            # A range starting before the recording has one we never received.
+            estimate = raw[key] if key >= 0 else 17_000
+            sent[k] = raw[k] - estimate + cleaning.PEDESTAL
+    return pl.DataFrame(
+        {
+            "collection_started_at": [started_at] * n,
+            "collected_at": [
+                started_at + timedelta(milliseconds=31 * k) for k in range(n)
+            ],
+            "frame_counter": counter,
+            "first_pixel_index": [48] * n,
+            "pixels": [json.dumps(row) for row in sent.tolist()],
+            "inner_dome_voltage_setting": _target_voltages(n, first_counter),
+            "board_temperature_c": [temperature / 128] * n,
+            "integration_period": [260] * n,
+        }
+    )
+
+
+def _night_reference_values(frames: pl.DataFrame, started_at: datetime) -> np.ndarray:
+    """The night reference column for one recording of `frames`."""
+    cleaned = step_9_pipeline.add_cleaned_pixels(frames).filter(
+        pl.col("collection_started_at") == started_at
+    )
+    return np.array(
+        [
+            json.loads(v) if v else [np.nan] * _NPIX
+            for v in cleaned[step_9_pipeline.NIGHT_REFERENCE_COLUMN]
+        ],
+        dtype=float,
+    )
+
+
+def _dark_recordings() -> list[pl.DataFrame]:
+    return [_night_frames(_DARK_AT[0], 1000), _night_frames(_DARK_AT[1], 2000)]
+
+
+def test_night_reference_keeps_a_steady_signal() -> None:
+    lit = _night_frames(_LIT_AT, 1500, signal=500)
+    frames = pl.concat([*_dark_recordings(), lit])
+
+    expected = np.full(_NPIX, cleaning.PEDESTAL)
+    expected[30:35] += 500
+    night = _night_reference_values(frames, _LIT_AT)
+    np.testing.assert_allclose(night, np.tile(expected, (lit.height, 1)), atol=0.2)
+    # Which the local background takes away.
+    local = step_9_pipeline.add_cleaned_pixels(lit)["pixels_clean_step_3"][600]
+    assert abs(json.loads(local)[32] - cleaning.PEDESTAL) < 20
+
+
+@pytest.mark.parametrize(
+    ("first_counter", "not_received"),
+    [
+        (200, []),  # Starts ahead of the first estimate.
+        (0, [512]),  # An estimate lost.
+        (0, [512, 768]),  # Two in a row.
+        (0, [511]),  # The frame before an estimate lost, so it has no column.
+    ],
+)
+def test_night_reference_puts_back_ranges(
+    first_counter: int, not_received: list[int]
+) -> None:
+    lit = _night_frames(_LIT_AT, 1500, first_counter=first_counter, n=1600, signal=500)
+    lit = lit.filter(~pl.col("frame_counter").is_in(not_received))
+    night = _night_reference_values(pl.concat([*_dark_recordings(), lit]), _LIT_AT)
+    assert len(night) == lit.height
+    np.testing.assert_allclose(night[:, 0], cleaning.PEDESTAL, atol=0.2)
+    np.testing.assert_allclose(night[:, 32], cleaning.PEDESTAL + 500, atol=0.2)
+
+
+def test_night_reference_hides_a_range_it_cannot_match() -> None:
+    # Nothing at all of the range between, to match the last one's level by.
+    lit = _night_frames(_LIT_AT, 1500, n=1600).filter(
+        ~pl.col("frame_counter").is_between(512, 768)
+    )
+    night = _night_reference_values(pl.concat([*_dark_recordings(), lit]), _LIT_AT)
+    unmatched = lit["frame_counter"].is_between(769, 1023).to_numpy()
+    assert np.isnan(night[unmatched]).all()
+    assert np.isfinite(night[~unmatched]).all()
+
+
+def test_night_reference_takes_off_the_drift() -> None:
+    frames = pl.concat(
+        [
+            _night_frames(_DARK_AT[0], 1000, n=200, drift=0.5),
+            _night_frames(_LIT_AT, 1000, n=200, drift=0.5),
+        ]
+    )
+    night = _night_reference_values(frames, _LIT_AT)
+    np.testing.assert_allclose(night, cleaning.PEDESTAL, atol=0.2)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        pl.lit(1000).cast(pl.Int64).alias("integration_period"),
+        pl.lit(40).cast(pl.Int64).alias("first_pixel_index"),
+        pl.lit(None).cast(pl.Float64).alias("board_temperature_c"),
+    ],
+)
+def test_night_reference_leaves_what_it_does_not_cover(change: pl.Expr) -> None:
+    lit = _night_frames(_LIT_AT, 1500).with_columns(change)
+    night = _night_reference_values(pl.concat([*_dark_recordings(), lit]), _LIT_AT)
+    assert np.isnan(night).all()
+
+
+def test_night_reference_needs_its_dark_recordings() -> None:
+    night = _night_reference_values(_night_frames(_LIT_AT, 1500), _LIT_AT)
+    assert np.isnan(night).all()
+
+
+def test_no_frames_still_get_the_night_reference_column() -> None:
+    out = step_9_pipeline.add_cleaned_pixels(_night_frames(_LIT_AT, 1500).clear())
+    assert step_9_pipeline.NIGHT_REFERENCE_COLUMN in out.columns
+
+
+def test_mpi_vis_shows_the_night_reference() -> None:
+    frames = step_9_pipeline.add_cleaned_pixels(
+        pl.concat([*_dark_recordings(), _night_frames(_LIT_AT, 1500, signal=500)])
+    ).filter(pl.col("collection_started_at") == _LIT_AT)
+    strip = mpi_strip.render_strip(frames, mode="clean_night_reference")
+    assert strip is not None
+    value = strip.pixel_value(300, 48 + 32)
+    assert value is not None
+    assert abs(value - 2500) < 0.2

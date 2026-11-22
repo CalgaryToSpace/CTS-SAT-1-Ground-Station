@@ -277,7 +277,9 @@ TABLE_SPECS: tuple[TableSpec, ...] = (
             "MPI cleaning steps (JSON arrays): pixels_clean_step_1 (the "
             "instrument's background subtraction undone), pixels_clean_step_2 "
             "(also detrended across the strip) and pixels_clean_step_3 (also "
-            "a local, sliding background subtracted -- fully cleaned)."
+            "a local, sliding background subtracted -- fully cleaned). "
+            "pixels_clean_night_reference is the alternative cleaning, against "
+            "a background measured in the dark instead of steps 2 and 3."
         ),
         filename=step_9_pipeline.OUTPUT_FILENAME,
         time_column="collected_at",

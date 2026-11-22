@@ -43,6 +43,9 @@ from nicegui import run, ui
 from cts1_mo_tools.cts1_processing_pipeline.step_9_clean_mpi_frames import (
     cleaning as step_9_cleaning,
 )
+from cts1_mo_tools.cts1_processing_pipeline.step_9_clean_mpi_frames import (
+    night_reference as step_9_night_reference,
+)
 
 from . import mpi_collections, mpi_strip
 from .layout import page_shell
@@ -81,12 +84,15 @@ _ScrollAnchor = tuple[float, float]
 # skipped, so they don't overlap.
 _MIN_TICK_GAP_FRACTION = 0.7
 # "Value Processing" choices. `_CLEANED` shows the frames as cleaned by
-# step 9, as far as the "Cleaning Steps Applied" choice (`_CLEAN_STEPS`) says.
+# step 9, as far as the "Cleaning Steps Applied" choice (`_CLEAN_STEPS`) says;
+# `_NIGHT_REFERENCE`, as cleaned by its other method, which has no such choice.
 _CLEANED = "cleaned"
+_NIGHT_REFERENCE: mpi_strip.IntensityMode = "clean_night_reference"
 _PROCESSING: dict[str, str] = {
     "raw": "Raw DN",
     "minus_median": "Minus each pixel's median",
     _CLEANED: "Cleaned",
+    _NIGHT_REFERENCE: "Cleaned (night reference)",
 }
 # The cleaning steps are cumulative, so each choice is a run of them.
 _CLEAN_STEPS: dict[mpi_strip.IntensityMode, str] = {
@@ -126,6 +132,32 @@ _CLEANING_STEP_TEXTS: tuple[tuple[str, str], ...] = (
         "offset is put back on. The result reads on the scale the frames "
         "arrived on, against a background measured a few sweeps away "
         "instead of one up to 255 frames old.",
+    ),
+)
+_NIGHT_REFERENCE_PIXELS_TEXT = (
+    f"{step_9_night_reference.FIRST_PIXEL}-"
+    f"{step_9_night_reference.FIRST_PIXEL + step_9_night_reference.PIXEL_COUNT - 1}"
+)
+# The night reference's steps, likewise.
+_NIGHT_REFERENCE_STEP_TEXTS: tuple[tuple[str, str], ...] = (
+    (
+        "Undo the instrument's subtraction",
+        "As in the other cleaning, but a block whose background frame never "
+        "came down, including the one before the first, gets it back by "
+        "matching the frames either side of where it fell.",
+    ),
+    (
+        "Subtract the night reference",
+        "A background measured where there are no ions and no sunlight is "
+        "taken off: one for each integration period, following the board "
+        "temperature pixel by pixel, with a slow drift of the whole strip "
+        "over the recording.",
+    ),
+    (
+        "Match the levels",
+        "The strip's level jumps at every background frame, so each block is "
+        "matched to the one before it. The recording's median level at its "
+        f"ten pixels at each end is then set to {_PEDESTAL_TEXT}.",
     ),
 )
 _RANGES: dict[mpi_strip.IntensityRange, str] = {
@@ -192,6 +224,8 @@ def _readout_lines(
             text = f"Pixel {pixel}: none"
         elif mode == "minus_median":
             text = f"Pixel {pixel}: {value:+.0f} DN vs its median"
+        elif mode == _NIGHT_REFERENCE:
+            text = f"Pixel {pixel}: {value:.1f} DN (cleaned, night reference)"
         elif mode in _CLEAN_STEPS:
             text = f"Pixel {pixel}: {value:.1f} DN (cleaned, {_CLEAN_STEPS[mode]})"
         else:
@@ -582,6 +616,19 @@ def _paragraph(text: str) -> None:
     ui.label(text).classes("text-sm")
 
 
+def _step_cards(steps: tuple[tuple[str, str], ...]) -> None:
+    with ui.grid(columns="repeat(auto-fit, minmax(16rem, 1fr))").classes(
+        "w-full gap-2"
+    ):
+        for number, (name, text) in enumerate(steps, start=1):
+            with ui.card().props("flat bordered").classes("gap-1 p-3"):
+                ui.label(f"Step {number}").classes(
+                    "text-caption text-grey text-uppercase"
+                )
+                ui.label(name).classes("text-sm font-bold")
+                _paragraph(text)
+
+
 def _cleaning_explanation() -> None:
     """What the Cleaned views show, and how each cleaning step works."""
     with ui.column().classes("w-full gap-3 p-2"):
@@ -605,16 +652,7 @@ def _cleaning_explanation() -> None:
         )
 
         ui.label("The cleaning steps").classes("text-sm font-bold")
-        with ui.grid(columns="repeat(auto-fit, minmax(16rem, 1fr))").classes(
-            "w-full gap-2"
-        ):
-            for number, (name, text) in enumerate(_CLEANING_STEP_TEXTS, start=1):
-                with ui.card().props("flat bordered").classes("gap-1 p-3"):
-                    ui.label(f"Step {number}").classes(
-                        "text-caption text-grey text-uppercase"
-                    )
-                    ui.label(name).classes("text-sm font-bold")
-                    _paragraph(text)
+        _step_cards(_CLEANING_STEP_TEXTS)
 
         ui.label("Blank frames").classes("text-sm font-bold")
         _paragraph(
@@ -624,6 +662,31 @@ def _cleaning_explanation() -> None:
             "previous frame's inner dome target voltage, as a frame's pixels "
             "were collected during the previous frame's slot. So a frame "
             "whose previous frame is missing can't be placed in its sweep."
+        )
+
+
+def _night_reference_explanation() -> None:
+    """What the night reference view shows, and what it can't be trusted on."""
+    with ui.column().classes("w-full gap-3 p-2"):
+        _paragraph(
+            "The inner dome doesn't sweep in flight, so the instrument's "
+            "background frames, and the local background of the other "
+            "cleaning, hold any steady ion signal and subtract it away. This "
+            "cleaning, also from simple_sat_ops' MPI viewer and pipeline step "
+            "9, uses a background measured in the dark instead, so a steady "
+            "signal stays."
+        )
+        _step_cards(_NIGHT_REFERENCE_STEP_TEXTS)
+
+        ui.label("Limits").classes("text-sm font-bold")
+        _paragraph(
+            "There are backgrounds only for pixels "
+            f"{_NIGHT_REFERENCE_PIXELS_TEXT} at integration periods 260 and "
+            "1000. They were measured at board temperatures of about 4-22 °C "
+            "(260) and 16-32 °C (1000): outside those, the cleaning is an "
+            "extrapolation (see the Board temperature band). At 260 the "
+            "reference frames were taken at any attitude, on nights that "
+            "showed no ions. A block that can't be matched is left blank."
         )
 
 
@@ -779,6 +842,17 @@ class _MpiStripView:
                     .bind_visibility_from(processing_toggle, "value", value=_CLEANED)
                 ):
                     _cleaning_explanation()
+                with (
+                    ui.expansion(
+                        "How the night reference works", icon="info", value=False
+                    )
+                    .props("dense")
+                    .classes("w-full border rounded")
+                    .bind_visibility_from(
+                        processing_toggle, "value", value=_NIGHT_REFERENCE
+                    )
+                ):
+                    _night_reference_explanation()
                 self._body = ui.column().classes("w-full gap-2")
         self._viewer = _StripViewer(
             body=self._body,
@@ -1034,9 +1108,16 @@ class _StripViewer:
         self._body.clear()
         with self._body:
             if mode in mpi_strip.CLEANED_MODE_COLUMNS and not strip.has_pixel_values:
+                why = (
+                    "the night reference needs pixels "
+                    f"{_NIGHT_REFERENCE_PIXELS_TEXT}, integration period 260 or "
+                    "1000, and a background frame in the recording. Otherwise, "
+                    if mode == _NIGHT_REFERENCE
+                    else ""
+                )
                 ui.label(
-                    "No cleaned values for this collection -- run pipeline step 9 "
-                    "(cts1_processing_pipeline step_9)."
+                    f"No cleaned values for this collection -- {why}run pipeline "
+                    "step 9 (cts1_processing_pipeline step_9)."
                 ).classes("text-caption text-warning")
             self._scroller = _strip_body(
                 strip,
