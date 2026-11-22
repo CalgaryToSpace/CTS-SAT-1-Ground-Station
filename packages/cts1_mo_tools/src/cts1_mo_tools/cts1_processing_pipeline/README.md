@@ -33,6 +33,7 @@ web UI as two containers sharing that directory.
 * Read the `raw_observations` and `raw_packets` tables (from parquets) from step 1.
 * Reprocess into a table with one row per packet.
 * Logic: De-duplicate across decoding tools. Deduplicate within time windows across observations.
+* `transmitted_at_sat_clock`: when the packet was transmitted, by the satellite's clock (which can be wrong: it was 32 days behind in early May 2026). Within each recording, it's interpolated over `time_in_file_ms` (askew and sso decodes only) between the timestamps of live beacons, or extended from the nearest beacon for packets with one on just one side. Historical beacons, and beacons that waited to be sent after being stamped, aren't used, and nothing is interpolated across the clock being set. Median over the recordings that caught the packet; null if none had a usable beacon. See `step_2_deduplicate_packets/sat_clock.py`.
 * Output: `distinct_packets_over_time.parquet`
 
 ### Step 3: Decode packets

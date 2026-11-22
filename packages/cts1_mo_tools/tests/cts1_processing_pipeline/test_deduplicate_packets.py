@@ -712,6 +712,7 @@ def test_output_schema_and_json_columns() -> None:
         "csp_crc_source",
         "received_at",
         "received_at_source",
+        "transmitted_at_sat_clock",
         "rssi_db",
         "rs_corrected_error_count",
         "rs_correctable",

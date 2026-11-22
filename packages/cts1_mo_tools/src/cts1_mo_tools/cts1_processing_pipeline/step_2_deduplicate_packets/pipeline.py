@@ -38,6 +38,12 @@ Trust model:
     itself using the same wide, low-trust tolerance and reported with its
     earliest contributing decode as a best-effort `received_at`.
 
+`transmitted_at_sat_clock` is separate from all of that: it's when the packet
+was sent according to the satellite's clock, interpolated within each
+recording between live beacons' timestamps (see `sat_clock`). It's the median
+over the recordings that caught the packet, and null if none of those had
+both a baseline decode of it and a usable beacon.
+
 Unlike step 1 -- which appends to a DuckDB database as its source of truth,
 since it's cheap to run incrementally against new SatNOGS observations --
 this step and every step after it are parquet-in-parquet-out: it reads
@@ -51,9 +57,12 @@ daemon run after its first) only the packets whose raw decodes could have
 changed: no distinct packet ever spans two contents, so every distinct
 packet whose content appears in a raw month that changed since the last run
 is recomputed -- from all of that content's decodes, whatever their month --
-and every other one is left as it was. The result is the same as a full
-run's (as long as `raw_packets` is only ever appended to, which step 1
-guarantees, and `raw_observations` windows don't change after the fact).
+and every other one is left as it was. As `transmitted_at_sat_clock` also
+depends on a recording's beacons, so is every packet of a recording with a
+beacon in a changed month (one can straddle two months), and recomputing a
+packet reads the beacons of every recording it's in. The result is the same
+as a full run's (as long as `raw_packets` is only ever appended to, which step
+1 guarantees, and `raw_observations` windows don't change after the fact).
 """
 
 __all__ = [
@@ -71,10 +80,13 @@ import polars as pl
 import polars_hash
 from loguru import logger
 
-from cts1_mo_tools.cts1_decode_satnogs_packets import CSP_CRC32C_SIZE
+from cts1_mo_tools.cts1_decode_satnogs_packets import CSP_CRC32C_SIZE, CSP_HEADER_SIZE
 from cts1_mo_tools.cts1_processing_pipeline import partitions
 from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate import (
     pipeline as step_1_pipeline,
+)
+from cts1_mo_tools.cts1_processing_pipeline.step_2_deduplicate_packets import (
+    sat_clock,
 )
 
 DEFAULT_DATA_DIR = step_1_pipeline.DEFAULT_DATA_DIR
@@ -105,6 +117,19 @@ BASELINE_DEDUPE_TOLERANCE = timedelta(minutes=1)
 # Everything else gets a much wider berth, since e.g. gr_satellites_pdu
 # reports the observation's end time for every single frame.
 OTHER_DECODER_TOLERANCE = timedelta(minutes=15)
+
+_RAW_FIELDS: Sequence[str] = (
+    "observation_id",
+    "decoder",
+    "received_at",
+    "time_in_file_ms",
+    "data_hex",
+    "data_length_bytes",
+    "rssi_db",
+    "rs_corrected_error_count",
+    "rs_correctable",
+    "csp_crc_valid",
+)
 
 _SOURCE_FIELDS: Sequence[str] = (
     "observation_id",
@@ -191,18 +216,7 @@ def _prepare_rows(packets: pl.LazyFrame, observations: pl.LazyFrame) -> pl.LazyF
         obs_start=pl.col("start").dt.replace_time_zone("UTC"),
         obs_end=pl.col("end").dt.replace_time_zone("UTC"),
     )
-    packets = packets.select(
-        "observation_id",
-        "decoder",
-        "received_at",
-        "time_in_file_ms",
-        "data_hex",
-        "data_length_bytes",
-        "rssi_db",
-        "rs_corrected_error_count",
-        "rs_correctable",
-        "csp_crc_valid",
-    ).filter(
+    packets = packets.select(_RAW_FIELDS).filter(
         pl.col("data_hex").is_not_null()
         & (pl.col("data_hex") != "")
         & pl.col("rs_correctable")
@@ -405,6 +419,26 @@ def _aggregate_clusters(rows: pl.LazyFrame) -> pl.LazyFrame:
     )
 
 
+def _median_transmit_times(
+    estimates: pl.LazyFrame, clusters: pl.LazyFrame
+) -> pl.LazyFrame:
+    """Each cluster's `transmitted_at_sat_clock`: the median over recordings,
+    each counting once however many decoders decoded the packet in it.
+
+    Apart from `_aggregate_clusters`, as a filtered median in that group-by
+    takes about twice as long as this does.
+    """
+    cluster = ["_is_leftover", "_cluster"]
+    return (
+        estimates.filter(pl.col("_transmitted_at").is_not_null())
+        .join(clusters, on="_row_id", how="inner")
+        .group_by(*cluster, "observation_id")
+        .agg(pl.col("_transmitted_at").median())
+        .group_by(cluster)
+        .agg(transmitted_at_sat_clock=pl.col("_transmitted_at").median())
+    )
+
+
 def _finalize(df: pl.LazyFrame) -> pl.LazyFrame:
     """Encode the traceability columns to JSON and add id/bookkeeping columns."""
     quoted_decoders = pl.col("decoders").list.eval(pl.format('"{}"', pl.element()))
@@ -451,6 +485,7 @@ def _finalize(df: pl.LazyFrame) -> pl.LazyFrame:
         "csp_crc_source",
         "received_at",
         "received_at_source",
+        "transmitted_at_sat_clock",
         "rssi_db",
         "rs_corrected_error_count",
         "rs_correctable",
@@ -485,22 +520,64 @@ def compute_distinct_packets(
         .collect(engine="streaming")
         .lazy()
     )
-    clusters = _assign_clusters(rows)
+    # Materialized too, as both aggregations below need it.
+    clusters = _assign_clusters(rows).collect(engine="streaming").lazy()
     clustered_rows = rows.join(clusters, on="_row_id", how="inner")
-    return _finalize(_aggregate_clusters(clustered_rows)).collect(engine="streaming")
+    transmit_times = _median_transmit_times(
+        sat_clock.estimate_transmit_times(rows), clusters
+    )
+    packets_out = _aggregate_clusters(clustered_rows).join(
+        transmit_times, on=["_is_leftover", "_cluster"], how="left"
+    )
+    return _finalize(packets_out).collect(engine="streaming")
+
+
+def _observation_ids(packets: pl.LazyFrame) -> pl.Series:
+    """The distinct observations in `packets`, ready to pass to `is_in`."""
+    return (
+        packets.select("observation_id")
+        .unique()
+        .collect(engine="streaming")["observation_id"]
+        .implode()
+    )
 
 
 def _recompute_contents(
     packets_path: Path, observations: pl.LazyFrame, changed_months: set[str]
 ) -> tuple[pl.Series, pl.DataFrame]:
     """The incremental run's work: every content (as `data_hex`) with a
-    decode in `changed_months` of `raw_packets`, and its distinct packets
-    recomputed from every one of its decodes."""
+    decode in `changed_months` of `raw_packets`, or in a recording with a
+    beacon there, and its distinct packets recomputed from every one of its
+    decodes plus the beacons of their recordings."""
     files = partitions.month_files(packets_path)
+    is_baseline = pl.col("decoder").is_in(BASELINE_DECODERS)
+    is_beacon = is_baseline & pl.col("data_hex").str.slice(
+        2 * CSP_HEADER_SIZE, 2
+    ).str.to_lowercase().is_in(sat_clock.BEACON_TYPE_HEX)
     changed_rows = pl.scan_parquet([files[month] for month in sorted(changed_months)])
+    to_recompute = [changed_rows]
+    if unchanged := [files[month] for month in files if month not in changed_months]:
+        # A recording straddling a month boundary: a beacon landing on one
+        # side changes the times of the packets on the other.
+        beacon_recordings = _observation_ids(changed_rows.filter(is_beacon))
+        straddling = (
+            pl.scan_parquet(unchanged)
+            .select(_RAW_FIELDS)
+            .filter(is_baseline & pl.col("observation_id").is_in(beacon_recordings))
+            .collect(engine="streaming")
+        )
+        # Nearly always empty, and each input here costs a pass of its own.
+        if not straddling.is_empty():
+            to_recompute.append(straddling.lazy())
     contents = (
-        _prepare_rows(changed_rows, observations)
-        .select(data_hex=pl.col("_data").bin.encode("hex"))
+        pl.concat(
+            [
+                _prepare_rows(rows, observations).select(
+                    data_hex=pl.col("_data").bin.encode("hex")
+                )
+                for rows in to_recompute
+            ]
+        )
         .unique()
         .collect(engine="streaming")["data_hex"]
     )
@@ -511,14 +588,26 @@ def _recompute_contents(
     # back down to `contents` -- those other contents' clusters are
     # incomplete here, and left as they are in the output.
     without_crc = contents.str.head(-2 * CSP_CRC32C_SIZE)
-    candidates = pl.scan_parquet(packets_path).filter(
+    is_candidate = (
         pl.col("data_hex")
         .str.to_lowercase()
         .is_in(pl.concat([contents, without_crc]).implode())
     )
-    recomputed = compute_distinct_packets(candidates, observations).filter(
-        pl.col("data_hex").is_in(contents.implode())
+    all_packets = pl.scan_parquet(packets_path).select(_RAW_FIELDS)
+    # Collected, as matching on content is the expensive part of this scan
+    # and both the beacons' lookup and the recomputation need the result.
+    candidates = all_packets.filter(is_candidate).collect(engine="streaming")
+    # Plus the beacons their times are interpolated between. Those bring in
+    # incomplete clusters of their own, cut back out the same way.
+    recordings = _observation_ids(candidates.lazy().filter(is_baseline))
+    beacons = (
+        all_packets.filter(is_beacon & pl.col("observation_id").is_in(recordings))
+        .collect(engine="streaming")
+        .filter(~is_candidate)
     )
+    recomputed = compute_distinct_packets(
+        pl.concat([candidates, beacons]), observations
+    ).filter(pl.col("data_hex").is_in(contents.implode()))
     return contents, recomputed
 
 
