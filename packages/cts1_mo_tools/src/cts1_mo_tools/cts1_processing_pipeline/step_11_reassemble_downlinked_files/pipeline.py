@@ -194,7 +194,7 @@ _BEACON_STAMP_TO_TRANSMIT_MS = sat_clock.BEACON_STAMP_TO_TRANSMIT_MS[
 # `DOWNLINK_RESTART` -- the same file started again (every 30 s, say)
 # whose header wasn't heard, or another file's.
 DOWNLINK_GAP = timedelta(minutes=2)
-DOWNLINK_RESTART = timedelta(seconds=15)
+DOWNLINK_RESTART = timedelta(seconds=10)
 # How far either side of a file's downlinks `rescue_nearby_chunks` looks for
 # unattributed chunks to fill its gaps. Measured on the data so far: 2 min
 # verifies 6 more files, 5 min 10, 15 min 11 -- while the chunks near more

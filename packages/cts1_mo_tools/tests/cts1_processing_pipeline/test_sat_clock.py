@@ -137,6 +137,41 @@ def test_ignores_received_at() -> None:
     assert result[packet] == 11_000
 
 
+def test_decodes_are_merged_by_when_the_satellite_sent_them() -> None:
+    """A repeat of the same content 25 s later (a file downlinked again) is
+    its own packet, while one transmission caught by a station whose clock
+    is 90 s off is still one -- whatever `received_at` says."""
+    packet, beacon = _other_hex(b"chunk"), _beacon_hex(1_000)
+
+    def late_by_90_s(t_ms: float, data_hex: str) -> dict[str, Any]:
+        return _decode(
+            t_ms,
+            data_hex,
+            observation_id=2,
+            received_at=_START + timedelta(milliseconds=t_ms + 90_000),
+        )
+
+    result = compute_distinct_packets(
+        pl.DataFrame(
+            [
+                _decode(0, beacon),
+                _decode(10_000, packet),
+                _decode(35_000, packet),
+                late_by_90_s(0, beacon),
+                late_by_90_s(10_000, packet),
+            ]
+        ),
+        _observations(),
+    ).filter(pl.col("data_hex") == packet)
+
+    assert sorted(
+        (round((at - _SAT_START).total_seconds() * 1e3), count)
+        for at, count in result.select(
+            "transmitted_at_sat_clock", "packet_count"
+        ).iter_rows()
+    ) == [(11_000, 2), (36_000, 1)]
+
+
 def test_field_offsets_match_the_full_decoder() -> None:
     beacon = _beacon_hex(12_345, _V5)
     decoded = decode_packet_safe(beacon)
