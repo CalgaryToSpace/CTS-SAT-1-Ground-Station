@@ -176,6 +176,8 @@ def _gallery_tile(row: dict[str, Any]) -> None:
         ).classes("w-full bg-grey-2").style(f"height: {GALLERY_THUMBNAIL_HEIGHT_PX}px")
         with ui.column().classes("p-2 gap-0 w-full"):
             ui.label(row["file_path"]).classes("text-sm font-medium break-all")
+            if timestamp := row["file_timestamp"]:
+                ui.label(f"{_when(timestamp)} UTC").classes("text-caption")
             with ui.row().classes("items-center gap-2"):
                 ui.badge(status, color=_STATUS_COLORS.get(status, "grey"))
                 ui.label(f"{row['received_fraction']:.0%}").classes(
@@ -189,6 +191,11 @@ _FILES_COLUMNS: tuple[dict[str, Any], ...] = (
     {"name": "_open", "label": "", "field": "_open"},
     {"name": "file_path", "label": "File", "field": "file_path", "align": "left"},
     {"name": "content_kind", "label": "Kind", "field": "content_kind", "align": "left"},
+    {
+        "name": "file_timestamp",
+        "label": "File Timestamp (UTC)",
+        "field": "file_timestamp",
+    },
     {"name": "status", "label": "Downlinked", "field": "status", "align": "left"},
     {
         "name": "received_fraction",
@@ -234,15 +241,6 @@ _MENTIONS_CELL_SLOT = r"""
 def _files_card(data_dir: Path, files: pl.DataFrame | None) -> None:
     with ui.card().classes("w-full"):
         ui.label("Files").classes("text-lg font-bold")
-        ui.label(
-            "Every file named in a telecommand response (step 10: directory "
-            "listings, downlink headers, file maps and MPI analyses), and "
-            "every file reassembled from bulk downlinks (step 11). A chunk is "
-            "tied to its file by the downlink header before it or the "
-            'beacons\' path hash. "Listing" compares a file with the latest complete '
-            "listing of its directory that covers its name (a listing may be "
-            "just one page)."
-        ).classes("text-caption text-grey")
         if files is None:
             _loading()
             return
@@ -258,6 +256,7 @@ def _files_card(data_dir: Path, files: pl.DataFrame | None) -> None:
                 if row["downlink_count"]
                 else None,
                 "content_kind": row["content_kind"] or "",
+                "file_timestamp": _when(row["file_timestamp"]),
                 "status": downlinked_files.status_text(row),
                 "received_fraction": row["received_fraction"],
                 "size": row["file_size"] or row["byte_length"],
@@ -366,6 +365,7 @@ def _summary_row(row: dict[str, Any]) -> None:
     expected = orjson.loads(row["expected_sha256s"] or "[]")
     facts = [
         ("Size", _size(row["byte_length"])),
+        ("File timestamp (UTC)", _when(row.get("file_timestamp")) or "unknown"),
         (
             "Received",
             f"{row['received_fraction']:.1%} "
@@ -398,6 +398,34 @@ def _summary_row(row: dict[str, Any]) -> None:
         for label, value in facts:
             ui.label(label).classes("text-grey")
             ui.label(value).classes("break-all")
+
+
+def _capture_metadata_card(metadata: str) -> None:
+    with ui.card().classes("w-full"):
+        ui.label("Capture Metadata").classes("text-lg font-bold")
+        ui.label(
+            "Embedded in the file by camera_capture_v2, right before the "
+            "capture: by the OBC's clock, and the ADCS's state then."
+        ).classes("text-caption text-grey")
+        with ui.row().classes("w-full gap-12"):
+            for section, facts in downlinked_files.capture_metadata_sections(
+                metadata
+            ).items():
+                if not facts:
+                    continue
+                with ui.column().classes("gap-1"):
+                    ui.label(section).classes("font-medium")
+                    with ui.grid(columns="auto 1fr").classes("gap-x-4 gap-y-1 text-sm"):
+                        for label, value in facts:
+                            ui.label(label).classes("text-grey")
+                            ui.label(value).classes("break-all")
+        with ui.expansion("Raw JSON").classes("w-full"):
+            ui.code(
+                orjson.dumps(
+                    orjson.loads(metadata), option=orjson.OPT_INDENT_2
+                ).decode(),
+                language="json",
+            ).classes("w-full")
 
 
 def _preview_section(file: downlinked_files.DownlinkedFile) -> None:
@@ -510,6 +538,8 @@ def _file_viewer(
                 f'type=a href="{downlinked_files.file_download_url(row["file_key"])}"'
             )
         _summary_row(row)
+    if metadata := row.get("file_metadata"):
+        _capture_metadata_card(metadata)
     _preview_section(file)
     with ui.card().classes("w-full"):
         ui.label("Byte Coverage").classes("text-lg font-bold")

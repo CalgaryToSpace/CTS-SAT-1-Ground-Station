@@ -20,6 +20,7 @@ __all__ = [
     "FILE_PREVIEW_PATH",
     "GALLERY_SORTS",
     "DownlinkedFile",
+    "capture_metadata_sections",
     "download_filename",
     "file_download_url",
     "file_preview_url",
@@ -36,14 +37,18 @@ __all__ = [
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import quote, urlencode
 
+import orjson
 import polars as pl
 from fastapi import FastAPI, HTTPException, Response
-from loguru import logger
-from PIL import ExifTags, Image
 
+from cts1_mo_tools.cts1_decode_satnogs_packets import (
+    ADCS_CONTROL_MODE_MAP,
+    ADCS_ESTIM_MODE_MAP,
+    e_numbered,
+)
 from cts1_mo_tools.cts1_processing_pipeline.file_reassembly import (
     DEFAULT_CONFLICT_POLICY,
     ReassemblyResult,
@@ -54,6 +59,8 @@ from cts1_mo_tools.cts1_processing_pipeline.step_10_list_satellite_files import 
 from cts1_mo_tools.cts1_processing_pipeline.step_11_reassemble_downlinked_files import (
     pipeline as step_11_pipeline,
 )
+
+from .mpi_collections import time_sync_sources_text
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -68,7 +75,7 @@ PARTIAL_FILENAME_SUFFIX = "_partial"
 
 GALLERY_SORTS = {
     "Last downlinked": ("last_downlinked_at", "file_path"),
-    "Capture date": ("captured_at", "_name_key", "file_path"),
+    "File timestamp": ("file_timestamp", "_name_key", "file_path"),
     "File name": ("_name_key", "file_path"),
     "File path": ("_path_key", "file_path"),
 }
@@ -86,49 +93,20 @@ def load_downlinked_files(data_dir: Path) -> pl.DataFrame:
     path = _files_path(data_dir)
     if not path.exists():
         return pl.DataFrame()
-    return pl.scan_parquet(path).drop(_BULKY_COLUMNS).collect()
-
-
-def _capture_date(image: bytes) -> datetime | None:
-    """EXIF's `DateTimeOriginal`, in UTC (assumed where it gives no offset)."""
-    # Not `Image.open`, which fails on a partial image that still has its EXIF.
-    start = image.find(b"Exif\x00\x00")
-    if start < 0:
-        return None
-    try:
-        exif = Image.Exif()
-        exif.load(image[start:])
-        tags = exif.get_ifd(ExifTags.IFD.Exif)
-        taken = tags.get(ExifTags.Base.DateTimeOriginal)
-        if not taken:
-            return None
-        offset = tags.get(ExifTags.Base.OffsetTimeOriginal) or "+00:00"
-        return datetime.strptime(f"{taken}{offset}", "%Y:%m:%d %H:%M:%S%z").astimezone(
-            UTC
+    files = pl.scan_parquet(path).drop(_BULKY_COLUMNS).collect()
+    if "file_timestamp" not in files.columns:  # until step 11 next runs after a deploy
+        files = files.with_columns(
+            file_timestamp=pl.lit(None, pl.Datetime("us", "UTC"))
         )
-    except Exception as e:  # noqa: BLE001 -- a damaged downlink is just undated
-        logger.debug(f"Unreadable EXIF: {type(e).__name__}: {e}")
-        return None
+    return files
 
 
 def load_gallery_images(data_dir: Path) -> pl.DataFrame:
-    """Every file with a preview image, with its `captured_at` but without its
-    bytes; empty if step 11 hasn't run yet.
-    """
-    path = _files_path(data_dir)
-    if not path.exists():
-        return pl.DataFrame()
-    return (
-        pl.scan_parquet(path)
-        .filter(pl.col("preview_media_type").is_not_null())
-        .with_columns(
-            captured_at=pl.coalesce("preview_image", "data").map_elements(
-                _capture_date, return_dtype=pl.Datetime("us", "UTC")
-            )
-        )
-        .drop(_BULKY_COLUMNS)
-        .collect()
-    )
+    """`load_downlinked_files`' rows that have a preview image."""
+    files = load_downlinked_files(data_dir)
+    if files.is_empty():
+        return files
+    return files.filter(pl.col("preview_media_type").is_not_null())
 
 
 def sort_gallery_images(
@@ -211,6 +189,85 @@ def load_downlinked_file(data_dir: Path, file_key: str) -> DownlinkedFile | None
             policy=DEFAULT_CONFLICT_POLICY,
         ),
     )
+
+
+# `camera_capture_v2`'s lighting mode argument.
+_LIGHTING_MODES = {"d": "daylight", "m": "medium", "n": "night", "s": "solar sail"}
+
+
+def _mode(names: dict[int, str], value: object) -> str:
+    return e_numbered(names, value) if isinstance(value, int) else str(value)
+
+
+def _numbers(values: object, unit: str) -> str:
+    items = cast("list[object]", values) if isinstance(values, list) else [values]
+    return ", ".join(str(v) for v in items) + f" {unit}"
+
+
+def _adcs_rows(adcs: dict[str, Any]) -> list[tuple[str, str]]:
+    if adcs.get("ok") is not True:
+        return [("ADCS", f"no response (error {adcs.get('err')})")]
+    rows = [
+        ("Control mode", _mode(ADCS_CONTROL_MODE_MAP, adcs.get("ctrl_mode"))),
+        ("Estimation mode", _mode(ADCS_ESTIM_MODE_MAP, adcs.get("est_mode"))),
+        (
+            "Attitude (roll, pitch, yaw)",
+            f"error {adcs['att_err']}"
+            if "att_err" in adcs
+            else _numbers(adcs.get("rpy_deg"), "deg"),
+        ),
+    ]
+    # Only queried in a target-tracking control mode.
+    if isinstance(target := adcs.get("target"), dict):
+        target = cast("dict[str, Any]", target)
+        rows.append(
+            (
+                "Target (lat, lon, alt)",
+                f"error {target['err']}"
+                if "err" in target
+                else f"{target.get('lat_deg')}, {target.get('lon_deg')} deg, "
+                f"{target.get('alt_m')} m",
+            )
+        )
+    return rows
+
+
+def capture_metadata_sections(metadata_json: str) -> dict[str, list[tuple[str, str]]]:
+    """A camera image's `file_metadata` as (label, value) rows by section,
+    with its codes named. Fields this doesn't know are left to the raw JSON.
+    """
+    meta = cast("dict[str, Any]", orjson.loads(metadata_json))
+    lighting = meta.get("lighting")
+    epoch_ms = meta.get("epoch_ms")
+    sync_src = meta.get("sync_src")
+    since_sync = meta.get("sec_since_sync")
+    adcs = meta.get("adcs")
+    return {
+        "Capture": [
+            ("Blob", str(meta.get("blob"))),
+            ("Lighting", f"{lighting} - {_LIGHTING_MODES.get(str(lighting), '?')}"),
+            (
+                "Captured (UTC)",
+                f"{datetime.fromtimestamp(epoch_ms / 1000, UTC):%Y-%m-%d %H:%M:%S.%f}"[
+                    :-3
+                ]
+                if isinstance(epoch_ms, int)
+                else str(epoch_ms),
+            ),
+            (
+                "Time sync",
+                time_sync_sources_text(orjson.dumps([sync_src]).decode())
+                + (
+                    f", {since_sync:,} s before"
+                    if isinstance(since_sync, int)
+                    else ", never synced"
+                ),
+            ),
+        ],
+        "ADCS": _adcs_rows(cast("dict[str, Any]", adcs))
+        if isinstance(adcs, dict)
+        else [],
+    }
 
 
 def _is_partial(row: dict[str, Any]) -> bool:

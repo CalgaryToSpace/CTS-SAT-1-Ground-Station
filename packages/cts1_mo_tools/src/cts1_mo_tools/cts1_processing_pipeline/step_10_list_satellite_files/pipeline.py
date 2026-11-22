@@ -13,9 +13,11 @@ that names one:
     its `file_size` and SHA-256.
   - ADCS SD card file copies (`adcs_get_latest_sd_file_blob*`), likewise:
     the copy the OBC makes of the latest ADCS SD card file, and then
-    downlinks.
+    downlinks. From v2 on, also when the ADCS last modified it
+    (`file_timestamp`).
   - File maps (`get_file_map*`): `file`, `size`, SHA-256.
-  - MPI analyses (`analyze_mpi_data*`): `file`, `size`, SHA-256.
+  - MPI analyses (`analyze_mpi_data*`): `file`, `size`, SHA-256, and when
+    the recording started (`earliest`, as `file_timestamp`).
   - Any other response with an `action` and a `file`.
 
 Each such mention is one row of `satellite_file_mentions.parquet`, and
@@ -93,6 +95,10 @@ import orjson
 import polars as pl
 from loguru import logger
 
+from cts1_mo_tools.cts1_processing_pipeline.file_metadata import (
+    parse_adcs_modified_time,
+    parse_mpi_analysis_start_time,
+)
 from cts1_mo_tools.cts1_processing_pipeline.file_reassembly import (
     SHA256_HEX_LEN,
     parse_response_properties,
@@ -176,6 +182,9 @@ _MENTIONS_SCHEMA = {
     "file_size": pl.Int64,
     "sha256": pl.String,  # lowercase; whole-file only, never a chunk's
     "crc16": pl.String,
+    # For an ADCS file header: when the ADCS last modified the file. For an
+    # MPI analysis: when the file's recording started.
+    "file_timestamp": pl.Datetime("us", "UTC"),
     # For a downlink header: the byte range of the file being downlinked
     # (`offset`, and `length` -- or the rest of the file if not given).
     "downlink_offset": pl.Int64,
@@ -203,6 +212,7 @@ _FILES_SCHEMA = {
     "file_sizes_seen": pl.String,  # JSON array, ascending
     "sha256": pl.String,  # from the latest mention with one
     "sha256s_seen": pl.String,  # JSON array
+    "file_timestamp": pl.Datetime("us", "UTC"),  # from the latest mention with one
     "sources": pl.String,  # JSON array of `MentionSource`s
     "mention_count": pl.Int64,
     "first_seen_at": pl.Datetime("us", "UTC"),
@@ -266,6 +276,16 @@ def _source_of(action: str) -> MentionSource:
         if action.startswith(prefix):
             return source
     return MentionSource.OTHER
+
+
+def _file_timestamp(
+    source: MentionSource, properties: dict[str, Any]
+) -> datetime | None:
+    if source is MentionSource.ADCS_FILE_HEADER:
+        return parse_adcs_modified_time(properties.get("datetime"))
+    if source is MentionSource.MPI_ANALYSIS:
+        return parse_mpi_analysis_start_time(properties.get("earliest"))
+    return None
 
 
 def _entry_name(key: str) -> str:
@@ -369,6 +389,7 @@ def _action_mention(text: str, base: dict[str, Any]) -> dict[str, Any] | None:
             "file_size": file_size,
             "sha256": _whole_sha256(properties),
             "crc16": crc16,
+            "file_timestamp": _file_timestamp(source, properties),
         }
     )
 
@@ -494,6 +515,7 @@ def summarize_satellite_files(mentions: pl.DataFrame) -> pl.DataFrame:
         assert isinstance(path, str)
         sizes = group["file_size"].drop_nulls()
         sha256s = group["sha256"].drop_nulls()
+        timestamps = group["file_timestamp"].drop_nulls()
         last_seen_at = group["seen_at"].max()
         directory = _directory_of(path)
         latest = _latest_covering_listing(path, listings.get(directory, []))
@@ -514,6 +536,7 @@ def summarize_satellite_files(mentions: pl.DataFrame) -> pl.DataFrame:
                 "file_sizes_seen": _json_list(sorted(set(sizes.to_list()))),
                 "sha256": sha256s[-1] if len(sha256s) else None,
                 "sha256s_seen": _json_list(list(dict.fromkeys(sha256s.to_list()))),
+                "file_timestamp": timestamps[-1] if len(timestamps) else None,
                 "sources": _json_list(sorted(set(group["source"].to_list()))),
                 "mention_count": group.height,
                 "first_seen_at": group["seen_at"].min(),
