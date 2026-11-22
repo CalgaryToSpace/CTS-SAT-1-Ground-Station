@@ -170,7 +170,9 @@ TABLE_SPECS: tuple[TableSpec, ...] = (
         step="Step 2 -- Deduplicate Packets",
         description=(
             "raw_packets collapsed to one row per distinct received "
-            "packet, each with a single best-guess received_at and "
+            "packet, each with a single best-guess received_at, "
+            "transmitted_at_sat_clock (when it was sent by the satellite's "
+            "own clock, interpolated between beacons and log messages) and "
             "traceability back to every observation/decoder that "
             "contributed to it."
         ),

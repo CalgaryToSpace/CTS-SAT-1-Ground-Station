@@ -19,13 +19,17 @@ Trust model:
     `BASELINE_DECODERS`) are the most trustworthy decoders in both content
     and timing (each reports a within-file offset resolved against the
     observation's own start time). Their packets form the baseline: two
-    baseline-decoder decodes of the same content are merged if received
-    within `BASELINE_DEDUPE_TOLERANCE` of each other -- multiple SatNOGS
-    ground stations time-synced to within about a minute of real time
-    commonly all catch the same overpass. When a merged baseline cluster
-    has an `askew_demod_from_file` decode, its timestamp wins as the
-    cluster's `received_at`; otherwise the earliest `sso_rx_replay` decode
-    is used.
+    baseline-decoder decodes of the same content are merged if their
+    recordings put them within `TRANSMIT_DEDUPE_TOLERANCE` of each other by
+    the satellite's clock (see `transmitted_at_sat_clock` below) -- several
+    SatNOGS ground stations commonly catch the same overpass, their clocks
+    often tens of seconds apart, and the same content is often sent again
+    seconds later (a file downlinked twice). A decode from a recording with
+    no clock anchors joins the same content's nearest packet received within
+    `BASELINE_DEDUPE_TOLERANCE`, else others like it within that. When a
+    merged baseline cluster has an `askew_demod_from_file` decode, its
+    timestamp wins as the cluster's `received_at`; otherwise the earliest
+    `sso_rx_replay` decode is used.
   - Every other decoder is treated as far less trustworthy on timing (some,
     like gr_satellites_pdu, can't localize a frame within its observation at
     all and just report the observation's end time). A same-content packet
@@ -37,6 +41,13 @@ Trust model:
     (a decoder-exclusive packet isn't nothing), so it's clustered against
     itself using the same wide, low-trust tolerance and reported with its
     earliest contributing decode as a best-effort `received_at`.
+
+`transmitted_at_sat_clock` is separate from all of that: it's when the packet
+was sent according to the satellite's clock, interpolated within each
+recording between the timestamps in log messages and live beacons, its
+"anchors" (see `sat_clock`). It's the median over the recordings that caught
+the packet, and null if none of those had both a baseline decode of it and a
+usable anchor.
 
 Unlike step 1 -- which appends to a DuckDB database as its source of truth,
 since it's cheap to run incrementally against new SatNOGS observations --
@@ -51,9 +62,12 @@ daemon run after its first) only the packets whose raw decodes could have
 changed: no distinct packet ever spans two contents, so every distinct
 packet whose content appears in a raw month that changed since the last run
 is recomputed -- from all of that content's decodes, whatever their month --
-and every other one is left as it was. The result is the same as a full
-run's (as long as `raw_packets` is only ever appended to, which step 1
-guarantees, and `raw_observations` windows don't change after the fact).
+and every other one is left as it was. As `transmitted_at_sat_clock` also
+depends on a recording's anchors, so is every packet of a recording with an
+anchor in a changed month (one can straddle two months), and recomputing a
+packet reads the anchors of every recording it's in. The result is the same
+as a full run's (as long as `raw_packets` is only ever appended to, which step
+1 guarantees, and `raw_observations` windows don't change after the fact).
 """
 
 __all__ = [
@@ -71,10 +85,13 @@ import polars as pl
 import polars_hash
 from loguru import logger
 
-from cts1_mo_tools.cts1_decode_satnogs_packets import CSP_CRC32C_SIZE
+from cts1_mo_tools.cts1_decode_satnogs_packets import CSP_CRC32C_SIZE, CSP_HEADER_SIZE
 from cts1_mo_tools.cts1_processing_pipeline import partitions
 from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate import (
     pipeline as step_1_pipeline,
+)
+from cts1_mo_tools.cts1_processing_pipeline.step_2_deduplicate_packets import (
+    sat_clock,
 )
 
 DEFAULT_DATA_DIR = step_1_pipeline.DEFAULT_DATA_DIR
@@ -102,9 +119,31 @@ CTS1_CSP_HEADER_HEX = "c2a28a00"
 # time-synced to within about a minute of real time.
 BASELINE_DEDUPE_TOLERANCE = timedelta(minutes=1)
 
+# Two baseline decodes of the same content are one transmission if their
+# recordings put it within this of each other by the satellite's clock
+# (`sat_clock`). Across ground stations, one transmission's estimates agree
+# to within 2 s 99% of the time (by `received_at`, only to within 133 s),
+# while a repeat of the same content -- a file downlinked again, the same
+# JPEG header in two images -- is sent 20 s or more later. Decodes from a
+# recording with no estimate fall back to `BASELINE_DEDUPE_TOLERANCE`.
+TRANSMIT_DEDUPE_TOLERANCE = timedelta(seconds=10)
+
 # Everything else gets a much wider berth, since e.g. gr_satellites_pdu
 # reports the observation's end time for every single frame.
 OTHER_DECODER_TOLERANCE = timedelta(minutes=15)
+
+_RAW_FIELDS: Sequence[str] = (
+    "observation_id",
+    "decoder",
+    "received_at",
+    "time_in_file_ms",
+    "data_hex",
+    "data_length_bytes",
+    "rssi_db",
+    "rs_corrected_error_count",
+    "rs_correctable",
+    "csp_crc_valid",
+)
 
 _SOURCE_FIELDS: Sequence[str] = (
     "observation_id",
@@ -191,18 +230,7 @@ def _prepare_rows(packets: pl.LazyFrame, observations: pl.LazyFrame) -> pl.LazyF
         obs_start=pl.col("start").dt.replace_time_zone("UTC"),
         obs_end=pl.col("end").dt.replace_time_zone("UTC"),
     )
-    packets = packets.select(
-        "observation_id",
-        "decoder",
-        "received_at",
-        "time_in_file_ms",
-        "data_hex",
-        "data_length_bytes",
-        "rssi_db",
-        "rs_corrected_error_count",
-        "rs_correctable",
-        "csp_crc_valid",
-    ).filter(
+    packets = packets.select(_RAW_FIELDS).filter(
         pl.col("data_hex").is_not_null()
         & (pl.col("data_hex") != "")
         & pl.col("rs_correctable")
@@ -226,10 +254,10 @@ def _prepare_rows(packets: pl.LazyFrame, observations: pl.LazyFrame) -> pl.LazyF
 
 
 def _cluster_by_content_and_time(
-    df: pl.LazyFrame, *, tolerance: timedelta
+    df: pl.LazyFrame, *, tolerance: timedelta, time: str = "received_at"
 ) -> pl.LazyFrame:
     """Assign `_cluster`: rows with the same `_content_id` chained together
-    by consecutive `received_at` gaps no larger than `tolerance`
+    by consecutive `time` gaps no larger than `tolerance`
     (gap-and-island / "sessionization"). Cluster ids are unique across all
     content, not just within one content.
 
@@ -240,21 +268,60 @@ def _cluster_by_content_and_time(
     """
     starts_new_cluster = (
         (pl.col("_content_id") != pl.col("_content_id").shift(1))
-        | ((pl.col("received_at") - pl.col("received_at").shift(1)) > tolerance)
+        | ((pl.col(time) - pl.col(time).shift(1)) > tolerance)
     ).fill_null(value=True)  # the very first row
-    return df.sort(["_content_id", "received_at"]).with_columns(
-        _cluster=starts_new_cluster.cum_sum()
+    return df.sort(["_content_id", time]).with_columns(
+        _cluster=starts_new_cluster.cum_sum().cast(pl.Int64)
     )
 
 
-def _assign_clusters(rows: pl.LazyFrame) -> pl.LazyFrame:
+def _cluster_baseline(baseline: pl.LazyFrame, estimates: pl.LazyFrame) -> pl.LazyFrame:
+    """`_cluster` for each baseline decode in `baseline` -- see
+    `TRANSMIT_DEDUPE_TOLERANCE`. `estimates` is `sat_clock`'s.
+    """
+    with_times = baseline.join(
+        estimates.select("_row_id", "_transmitted_at"), on="_row_id", how="left"
+    )
+    timed = _cluster_by_content_and_time(
+        with_times.filter(pl.col("_transmitted_at").is_not_null()),
+        tolerance=TRANSMIT_DEDUPE_TOLERANCE,
+        time="_transmitted_at",
+    )
+    untimed = with_times.filter(pl.col("_transmitted_at").is_null())
+    # One with no estimate joins the same content's nearest cluster by
+    # `received_at`, as before -- else it's clustered by that among its own.
+    received = timed.group_by("_cluster").agg(
+        pl.col("_content_id").first(), _received=pl.col("received_at").median()
+    )
+    distance = (pl.col("received_at") - pl.col("_received")).abs()
+    joined = (
+        untimed.join(received, on="_content_id", how="inner")
+        .filter(distance <= BASELINE_DEDUPE_TOLERANCE)
+        .group_by("_row_id")
+        .agg(pl.col("_cluster").sort_by(distance, "_cluster").first())
+    )
+    alone = _cluster_by_content_and_time(
+        untimed.join(joined, on="_row_id", how="anti"),
+        tolerance=BASELINE_DEDUPE_TOLERANCE,
+    ).with_columns(_cluster=-pl.col("_cluster"))  # apart from `timed`'s ids
+    return pl.concat(
+        [
+            timed.select("_row_id", "_cluster"),
+            joined.select("_row_id", "_cluster"),
+            alone.select("_row_id", "_cluster"),
+        ]
+    ).join(baseline, on="_row_id")
+
+
+def _assign_clusters(rows: pl.LazyFrame, estimates: pl.LazyFrame) -> pl.LazyFrame:
     """Decide which distinct packet each decode belongs to.
 
     Returns one `(_row_id, _cluster, _is_leftover)` row per input row:
     `(_cluster, _is_leftover)` is the distinct packet's key.
 
-      - Baseline-decoder rows are clustered by content+time with
-        `BASELINE_DEDUPE_TOLERANCE`.
+      - Baseline-decoder rows are clustered by content and when they were
+        transmitted by the satellite's clock (`estimates`, from `sat_clock`),
+        with `TRANSMIT_DEDUPE_TOLERANCE` -- see `_cluster_baseline`.
       - Every other row is matched to its nearest same-content baseline
         cluster: either its `received_at` falls within
         `OTHER_DECODER_TOLERANCE` of the cluster's observation-window span,
@@ -270,9 +337,7 @@ def _assign_clusters(rows: pl.LazyFrame) -> pl.LazyFrame:
     keys = ["_row_id", "_content_id", "received_at", "obs_start", "obs_end"]
     is_baseline = pl.col("_trust_rank").is_not_null()
 
-    baseline = _cluster_by_content_and_time(
-        rows.filter(is_baseline).select(keys), tolerance=BASELINE_DEDUPE_TOLERANCE
-    )
+    baseline = _cluster_baseline(rows.filter(is_baseline).select(keys), estimates)
     others = rows.filter(~is_baseline).select(keys)
 
     cluster_spans = baseline.group_by("_cluster").agg(
@@ -405,6 +470,38 @@ def _aggregate_clusters(rows: pl.LazyFrame) -> pl.LazyFrame:
     )
 
 
+def _median_transmit_times(
+    estimates: pl.LazyFrame, clusters: pl.LazyFrame
+) -> pl.LazyFrame:
+    """Each cluster's `transmitted_at_sat_clock`: the median over recordings,
+    each counting once however many decoders decoded the packet in it.
+
+    Apart from `_aggregate_clusters`, as a filtered median in that group-by
+    takes about twice as long as this does.
+    """
+    cluster = ["_is_leftover", "_cluster"]
+    # The upper middle one (waiting to be sent only makes an estimate early),
+    # never a mean of two: a cluster can hold repeats of one packet, and
+    # halfway between those nothing was transmitted.
+    median = pl.col("_transmitted_at").dt.timestamp("us").quantile(0.5, "higher")
+    return (
+        estimates.filter(pl.col("_transmitted_at").is_not_null())
+        .join(clusters, on="_row_id", how="inner")
+        .group_by(*cluster, "observation_id")
+        .agg(
+            median.cast(pl.Int64)
+            .cast(pl.Datetime("us", "UTC"))
+            .alias("_transmitted_at")
+        )
+        .group_by(cluster)
+        .agg(
+            transmitted_at_sat_clock=median.cast(pl.Int64).cast(
+                pl.Datetime("us", "UTC")
+            )
+        )
+    )
+
+
 def _finalize(df: pl.LazyFrame) -> pl.LazyFrame:
     """Encode the traceability columns to JSON and add id/bookkeeping columns."""
     quoted_decoders = pl.col("decoders").list.eval(pl.format('"{}"', pl.element()))
@@ -451,6 +548,7 @@ def _finalize(df: pl.LazyFrame) -> pl.LazyFrame:
         "csp_crc_source",
         "received_at",
         "received_at_source",
+        "transmitted_at_sat_clock",
         "rssi_db",
         "rs_corrected_error_count",
         "rs_correctable",
@@ -485,22 +583,63 @@ def compute_distinct_packets(
         .collect(engine="streaming")
         .lazy()
     )
-    clusters = _assign_clusters(rows)
+    # Materialized too, as both aggregations below need it.
+    estimates = sat_clock.estimate_transmit_times(rows).collect().lazy()
+    clusters = _assign_clusters(rows, estimates).collect(engine="streaming").lazy()
     clustered_rows = rows.join(clusters, on="_row_id", how="inner")
-    return _finalize(_aggregate_clusters(clustered_rows)).collect(engine="streaming")
+    transmit_times = _median_transmit_times(estimates, clusters)
+    packets_out = _aggregate_clusters(clustered_rows).join(
+        transmit_times, on=["_is_leftover", "_cluster"], how="left"
+    )
+    return _finalize(packets_out).collect(engine="streaming")
+
+
+def _observation_ids(packets: pl.LazyFrame) -> pl.Series:
+    """The distinct observations in `packets`, ready to pass to `is_in`."""
+    return (
+        packets.select("observation_id")
+        .unique()
+        .collect(engine="streaming")["observation_id"]
+        .implode()
+    )
 
 
 def _recompute_contents(
     packets_path: Path, observations: pl.LazyFrame, changed_months: set[str]
 ) -> tuple[pl.Series, pl.DataFrame]:
     """The incremental run's work: every content (as `data_hex`) with a
-    decode in `changed_months` of `raw_packets`, and its distinct packets
-    recomputed from every one of its decodes."""
+    decode in `changed_months` of `raw_packets`, or in a recording with an
+    anchor there, and its distinct packets recomputed from every one of its
+    decodes plus the anchors of their recordings."""
     files = partitions.month_files(packets_path)
+    is_baseline = pl.col("decoder").is_in(BASELINE_DECODERS)
+    is_anchor = is_baseline & pl.col("data_hex").str.slice(
+        2 * CSP_HEADER_SIZE, 2
+    ).str.to_lowercase().is_in(sat_clock.ANCHOR_TYPE_HEX)
     changed_rows = pl.scan_parquet([files[month] for month in sorted(changed_months)])
+    to_recompute = [changed_rows]
+    if unchanged := [files[month] for month in files if month not in changed_months]:
+        # A recording straddling a month boundary: an anchor landing on one
+        # side changes the times of the packets on the other.
+        anchor_recordings = _observation_ids(changed_rows.filter(is_anchor))
+        straddling = (
+            pl.scan_parquet(unchanged)
+            .select(_RAW_FIELDS)
+            .filter(is_baseline & pl.col("observation_id").is_in(anchor_recordings))
+            .collect(engine="streaming")
+        )
+        # Nearly always empty, and each input here costs a pass of its own.
+        if not straddling.is_empty():
+            to_recompute.append(straddling.lazy())
     contents = (
-        _prepare_rows(changed_rows, observations)
-        .select(data_hex=pl.col("_data").bin.encode("hex"))
+        pl.concat(
+            [
+                _prepare_rows(rows, observations).select(
+                    data_hex=pl.col("_data").bin.encode("hex")
+                )
+                for rows in to_recompute
+            ]
+        )
         .unique()
         .collect(engine="streaming")["data_hex"]
     )
@@ -511,14 +650,26 @@ def _recompute_contents(
     # back down to `contents` -- those other contents' clusters are
     # incomplete here, and left as they are in the output.
     without_crc = contents.str.head(-2 * CSP_CRC32C_SIZE)
-    candidates = pl.scan_parquet(packets_path).filter(
+    is_candidate = (
         pl.col("data_hex")
         .str.to_lowercase()
         .is_in(pl.concat([contents, without_crc]).implode())
     )
-    recomputed = compute_distinct_packets(candidates, observations).filter(
-        pl.col("data_hex").is_in(contents.implode())
+    all_packets = pl.scan_parquet(packets_path).select(_RAW_FIELDS)
+    # Collected, as matching on content is the expensive part of this scan
+    # and both the anchors' lookup and the recomputation need the result.
+    candidates = all_packets.filter(is_candidate).collect(engine="streaming")
+    # Plus the anchors their times are interpolated between. Those bring in
+    # incomplete clusters of their own, cut back out the same way.
+    recordings = _observation_ids(candidates.lazy().filter(is_baseline))
+    anchors = (
+        all_packets.filter(is_anchor & pl.col("observation_id").is_in(recordings))
+        .collect(engine="streaming")
+        .filter(~is_candidate)
     )
+    recomputed = compute_distinct_packets(
+        pl.concat([candidates, anchors]), observations
+    ).filter(pl.col("data_hex").is_in(contents.implode()))
     return contents, recomputed
 
 

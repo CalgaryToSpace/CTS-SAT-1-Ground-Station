@@ -2,35 +2,48 @@
 reassemble each file.
 
 A `BULK_FILE_DOWNLINK` packet carries a file offset and up to 195 bytes,
-but nothing naming the file. Two things around it do:
+but nothing naming the file. Everything here is placed on one timeline,
+when it was sent by the satellite's clock (`sent_at`): a packet's
+`transmitted_at_sat_clock` from step 2 if it has one, else its
+`received_at` moved by the offset between the two around it
+(`CLOCK_OFFSET_WINDOW`) -- the recordings' own times are often tens of
+seconds apart. Two things around a chunk name its file:
 
   - Headers: the telecommand that starts a downlink
     (`bulk_downlink_start*`, `adcs_get_latest_sd_file_blob*`) answers with
     the file's path, size, SHA-256 and the `offset`/`length` it's about to
-    send -- and the chunks follow right after it. A header only vouches for
-    chunks inside its byte range, until its downlink should have finished
-    (`length` at `MIN_DOWNLINK_BYTES_PER_SEC`, plus `HEADER_MARGIN`).
-  - Beacons: every live v5+ beacon (not one replayed from the satellite's
-    store, whose contents are old) carries the first 3 bytes of SHA-256 of
-    the path being downlinked (`bulk_downlink_file_path_sha256_prefix`), or
-    nothing when no downlink is running. A beacon vouches for chunks up to
-    `BEACON_CONTEXT` after it. Step 10's `satellite_files.parquet` maps
-    the prefix back to a path.
+    send. The satellite sends that range at about `DOWNLINK_BYTES_PER_SEC`
+    from then, so a header only vouches for a chunk in its range sent when
+    the downlink would have got to that offset (`DOWNLINK_LEAD`,
+    `DOWNLINK_SLACK`, `DOWNLINK_RATE_SLACK`) -- by either clock: `sent_at`,
+    or `received_at` against the header's. A new header ends the one
+    before (starting a downlink closes the last), but its last few chunks
+    can still go out just after it.
+  - Beacons: every v5+ beacon carries the first 3 bytes of SHA-256 of the
+    path being downlinked when it was stamped
+    (`bulk_downlink_file_path_sha256_prefix`), or nothing when no downlink
+    is running. Stored ones too, replayed from the satellite's store long
+    after: each is placed at its own stamp (plus the time a beacon takes to
+    go out), as are live ones. Step 10's `satellite_files.parquet` maps the
+    prefix back to a path.
 
-Each chunk is attributed by whichever of the latest header and the latest
-beacon came last (`header` / `beacon`). Where that is a beacon saying
-nothing is downlinking, or neither applies, the next beacon naming a file
-within `BEACON_CONTEXT` is used (`next_beacon`) -- a downlink whose header
-was never heard, starting between two beacons. Otherwise the chunk is
-`unattributed`. On the data so far, header and beacon never disagree where
-both apply.
+Each chunk is attributed, in order, by the header it fits (`header`); else
+the latest beacon within `BEACON_CONTEXT` naming a file, if the chunk's
+downlink could already have started by then (by its offset) and no header
+came between (`beacon`); else the next one naming a file within
+`BEACON_CONTEXT`, if no header comes first (`next_beacon`) -- a downlink
+whose header was never heard. Else, if no beacon around names a file (as
+before the v5 beacons, 2026-11-03), the latest header still vouches for
+chunks in its range until its downlink would have finished at
+`MIN_DOWNLINK_BYTES_PER_SEC`, plus `HEADER_MARGIN` (`header`): the same file
+sent again by a time-tagged telecommand whose header nobody heard. A beacon
+saying nothing is downlinking doesn't stop that: seen in flight while a
+file's chunks were coming down. Otherwise the chunk is `unattributed`.
 
-Before the v5 beacons (2026-11-03) only headers attribute anything, and a
-downlink started by a time-tagged telecommand often sent its header before
-any ground station could hear it -- those chunks are unattributed.
-
-Consecutive chunks of one file, with no gap over `DOWNLINK_GAP` and no new
-header in between, are one downlink (`file_downlink_time_periods.parquet`).
+Consecutive chunks of one file, with no gap over `DOWNLINK_GAP`, no new
+header in between, and starting within `DOWNLINK_RESTART` of each other
+(going by their offsets), are one downlink
+(`file_downlink_time_periods.parquet`).
 
 A header doesn't guarantee what follows it is that file: before the
 `bulk_downlink_start_blob` fix (firmware issue #653), starting a downlink
@@ -56,7 +69,7 @@ been given), and together they fill at least one missing byte. If that
 completes a file with a SHA-256 on record but the hash doesn't match,
 none of it is taken.
 
-A candidate with a header received between it and the downlink is from
+A candidate with a header sent between it and the downlink is from
 a different downlink -- seen in flight right before nearly every header:
 the tail of whatever was downlinking before -- as is one outside the
 byte range the file's own header said it was sending. The header says
@@ -87,10 +100,16 @@ from __future__ import annotations
 
 __all__ = [
     "BEACON_CONTEXT",
+    "CLOCK_OFFSET_WINDOW",
     "CONSISTENCY_TOLERANCE_BYTES",
     "DEFAULT_DATA_DIR",
     "DOWNLINKED_FILES_OUTPUT_FILENAME",
+    "DOWNLINK_BYTES_PER_SEC",
     "DOWNLINK_GAP",
+    "DOWNLINK_LEAD",
+    "DOWNLINK_RATE_SLACK",
+    "DOWNLINK_RESTART",
+    "DOWNLINK_SLACK",
     "DOWNLINK_TIME_PERIODS_OUTPUT_FILENAME",
     "HEADER_MARGIN",
     "MIN_DOWNLINK_BYTES_PER_SEC",
@@ -119,6 +138,7 @@ import orjson
 import polars as pl
 from loguru import logger
 
+from cts1_mo_tools.cts1_decode_satnogs_packets import MAX_VALID_EPOCH_MS
 from cts1_mo_tools.cts1_picam_to_jpg import parse_picam_ascii_to_jpg_bytes
 from cts1_mo_tools.cts1_processing_pipeline.file_metadata import (
     parse_camera_metadata,
@@ -131,6 +151,9 @@ from cts1_mo_tools.cts1_processing_pipeline.file_reassembly import (
     DetectedImage,
     detect_image,
     reassemble_bulk_chunks,
+)
+from cts1_mo_tools.cts1_processing_pipeline.step_2_deduplicate_packets import (
+    sat_clock,
 )
 from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
     pipeline as step_3_pipeline,
@@ -146,17 +169,39 @@ DEFAULT_DATA_DIR = step_10_pipeline.DEFAULT_DATA_DIR
 DOWNLINK_TIME_PERIODS_OUTPUT_FILENAME = "file_downlink_time_periods.parquet"
 DOWNLINKED_FILES_OUTPUT_FILENAME = "downlinked_files.parquet"
 
-# The satellite sends about 800 B/s of file (measured from downlinks
-# received end to end); a header's downlink is given at least as long as
-# this slower rate would take, plus `HEADER_MARGIN`.
+# The satellite sends 195 B of file every 208 ms (firmware
+# `COMMS_bulk_downlink_delay_per_packet_ms`), which with the beacons and
+# responses sharing the radio comes to about this (measured: 750-850 B/s).
+DOWNLINK_BYTES_PER_SEC = 780
+# A header's chunk at `offset` is sent `(offset - its offset) /
+# DOWNLINK_BYTES_PER_SEC` after it, give or take: up to `DOWNLINK_LEAD`
+# sooner (the first chunks can beat the header out), or later by up to
+# `DOWNLINK_SLACK` plus `DOWNLINK_RATE_SLACK` of that (other packets slow it
+# down). Measured against headers: 98% within -2 s to +4 s.
+DOWNLINK_LEAD = timedelta(seconds=3)
+DOWNLINK_SLACK = timedelta(seconds=5)
+DOWNLINK_RATE_SLACK = 0.25
+# With no beacon around to say otherwise (as before the v5 beacons), a
+# header also vouches for chunks in its byte range until its downlink would
+# have finished at `MIN_DOWNLINK_BYTES_PER_SEC`, plus `HEADER_MARGIN`: the
+# same file sent again by a telecommand whose header was never heard.
 MIN_DOWNLINK_BYTES_PER_SEC = 500
 HEADER_MARGIN = timedelta(minutes=2)
-# How long a header with no usable length vouches for the chunks after it.
-HEADER_WITHOUT_LENGTH_CONTEXT = timedelta(minutes=10)
 # Live beacons come every ~10 s during a pass; this spans a few lost ones.
+# Stored ones fill in between.
 BEACON_CONTEXT = timedelta(minutes=2)
-# A longer gap between two chunks of a file starts a new downlink.
+# Packets with no `transmitted_at_sat_clock` are moved onto the satellite's
+# clock by the median offset between it and `received_at` around them.
+CLOCK_OFFSET_WINDOW = timedelta(minutes=10)
+_BEACON_STAMP_TO_TRANSMIT_MS = sat_clock.BEACON_STAMP_TO_TRANSMIT_MS[
+    "BEACON_EXTENDED_V5PLUS"
+]
+# A longer gap between two chunks of a file starts a new downlink, as does
+# their downlinks' start times (by their offsets) being further apart than
+# `DOWNLINK_RESTART` -- the same file started again (every 30 s, say)
+# whose header wasn't heard, or another file's.
 DOWNLINK_GAP = timedelta(minutes=2)
+DOWNLINK_RESTART = timedelta(seconds=10)
 # How far either side of a file's downlinks `rescue_nearby_chunks` looks for
 # unattributed chunks to fill its gaps. Measured on the data so far: 2 min
 # verifies 6 more files, 5 min 10, 15 min 11 -- while the chunks near more
@@ -291,33 +336,27 @@ _CHUNK_COLUMNS = (
 
 
 def _headers(mentions: pl.DataFrame) -> pl.DataFrame:
-    """Every downlink header in step 10's mentions, oldest first, with when
-    each stops vouching for the chunks after it (`h_until`).
+    """Every downlink header in step 10's mentions, oldest first by when it
+    was sent (`h_at`: `sent_at` if `mentions` has it, else `seen_at`).
     """
     sources = [s.value for s in step_10_pipeline.DOWNLINK_HEADER_SOURCES]
-    length = pl.col("downlink_length")
+    sent_at = "sent_at" if "sent_at" in mentions.columns else "seen_at"
     return (
         mentions.filter(
             pl.col("source").is_in(sources) & pl.col("seen_at").is_not_null()
         )
         .select(
-            h_at=pl.col("seen_at"),
+            h_at=pl.col(sent_at),
+            h_received_at=pl.col("seen_at"),
             h_path=pl.col("file_path"),
             h_prefix=pl.col("raw_path").map_elements(
                 step_10_pipeline.path_sha256_prefix, return_dtype=pl.String
             ),
             h_action=pl.col("action"),
             h_offset=pl.col("downlink_offset").fill_null(0),
-            h_length=length,
+            h_length=pl.col("downlink_length"),
             h_file_size=pl.col("file_size"),
             h_sha256=pl.col("sha256"),
-            h_until=pl.col("seen_at")
-            + pl.when(length.is_not_null())
-            .then(
-                pl.duration(milliseconds=(length * 1000 // MIN_DOWNLINK_BYTES_PER_SEC))
-                + HEADER_MARGIN
-            )
-            .otherwise(pl.lit(HEADER_WITHOUT_LENGTH_CONTEXT)),
         )
         .sort("h_at")
     )
@@ -353,6 +392,38 @@ def _prefix_paths(files: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+def _microseconds(duration: timedelta) -> int:
+    return duration // timedelta(microseconds=1)
+
+
+def _header_fits(h: str) -> pl.Expr:
+    """Whether each chunk is where header `h` (its `{h}_*` columns) would
+    have put it: in its byte range, and sent when its downlink got to it --
+    see the module docstring. Judged on both clocks, as either can be off: a
+    packet's `sent_at` (merged with a copy sent 30 s later, say), or its
+    `received_at` (the recordings disagreeing).
+    """
+    offset = pl.col("bulk_file_offset")
+    start, length = pl.col(f"{h}_offset"), pl.col(f"{h}_length")
+    due_us = (offset - start) * (1_000_000 / DOWNLINK_BYTES_PER_SEC)
+
+    def on_time(chunk_at: str, header_at: str) -> pl.Expr:
+        late_us = (pl.col(chunk_at) - pl.col(header_at)).dt.total_microseconds()
+        late_us -= due_us
+        return (late_us >= -_microseconds(DOWNLINK_LEAD)) & (
+            late_us <= _microseconds(DOWNLINK_SLACK) + DOWNLINK_RATE_SLACK * due_us
+        )
+
+    return (
+        (offset >= start)
+        & (length.is_null() | (offset < start + length))
+        & (
+            on_time("sent_at", f"{h}_at").fill_null(value=False)
+            | on_time("received_at", f"{h}_received_at").fill_null(value=False)
+        )
+    ).fill_null(value=False)
+
+
 def attribute_chunks(
     chunks: pl.DataFrame,
     beacons: pl.DataFrame,
@@ -363,76 +434,144 @@ def attribute_chunks(
 
     Args:
         chunks: CRC-valid `BULK_FILE_DOWNLINK` rows of `everything_decoded`
-            (`_CHUNK_COLUMNS`).
-        beacons: live, CRC-valid `BEACON_EXTENDED_V5PLUS` rows:
-            `received_at` and `bulk_downlink_file_path_sha256_prefix`.
-        mentions: step 10's `satellite_file_mentions`.
+            (`_CHUNK_COLUMNS`), plus `sent_at` (else `received_at` is used).
+        beacons: CRC-valid `BEACON_EXTENDED_V5PLUS` rows, live or stored:
+            `sent_at` (else `received_at`) and
+            `bulk_downlink_file_path_sha256_prefix`.
+        mentions: step 10's `satellite_file_mentions`, plus `sent_at` for
+            when each was sent (else `seen_at` is used).
         files: step 10's `satellite_files`.
 
     Returns:
-        `chunks`, oldest first, plus `attribution`, `path_sha256_prefix`,
+        `chunks`, oldest sent first, plus `attribution`, `path_sha256_prefix`,
         `file_path` (null where the prefix matches no known path), the
-        latest header's columns (`h_*`), and `file_key` and `downlink_index`
-        -- which file and which downlink of it each chunk is part of.
+        header's columns (`h_*`: the one attributing the chunk, else the
+        latest), and `file_key` and `downlink_index` -- which file and which
+        downlink of it each chunk is part of.
     """
-    chunks = chunks.sort("received_at", "bulk_file_offset")
-    headers = _headers(mentions)
+    if "sent_at" not in chunks.columns:
+        chunks = chunks.with_columns(sent_at=pl.col("received_at"))
+    if "sent_at" not in beacons.columns:
+        beacons = beacons.with_columns(sent_at=pl.col("received_at"))
+    chunks = chunks.sort("sent_at", "bulk_file_offset")
+    headers = _headers(mentions).with_row_index("_h")
+    header_columns = [c for c in headers.columns if c.startswith("h_")]
+    previous_headers = headers.select(
+        (pl.col("_h") + 1).alias("_h"),
+        *(pl.col(c).alias(f"p{c}") for c in header_columns),
+    )
     beacon_times = beacons.select(
-        b_at=pl.col("received_at"),
+        b_at=pl.col("sent_at"),
         b_prefix=pl.col("bulk_downlink_file_path_sha256_prefix"),
     ).sort("b_at")
-    naming_beacons = beacon_times.filter(pl.col("b_prefix").is_not_null()).rename(
-        {"b_at": "nb_at", "b_prefix": "nb_prefix"}
-    )
 
+    # The latest header sent by `DOWNLINK_LEAD` after the chunk, the one
+    # before it, and the first one after that.
+    lead = pl.col("sent_at") + DOWNLINK_LEAD
     joined = (
-        chunks.join_asof(
-            headers, left_on="received_at", right_on="h_at", strategy="backward"
+        chunks.with_columns(_lead=lead)
+        .join_asof(headers, left_on="_lead", right_on="h_at", strategy="backward")
+        .join(previous_headers, on="_h", how="left")
+        .join_asof(
+            headers.select(hn_at=pl.col("h_at")),
+            left_on="_lead",
+            right_on="hn_at",
+            strategy="forward",
+            allow_exact_matches=False,
         )
         .join_asof(
             beacon_times,
-            left_on="received_at",
+            left_on="sent_at",
             right_on="b_at",
             strategy="backward",
             tolerance=BEACON_CONTEXT,
         )
         .join_asof(
-            naming_beacons,
-            left_on="received_at",
+            beacon_times.rename({"b_at": "nb_at", "b_prefix": "nb_prefix"}),
+            left_on="sent_at",
             right_on="nb_at",
             strategy="forward",
             tolerance=BEACON_CONTEXT,
         )
     )
 
-    offset = pl.col("bulk_file_offset")
-    header_is_latest = pl.col("h_at").is_not_null() & (
-        pl.col("b_at").is_null() | (pl.col("h_at") >= pl.col("b_at"))
+    # The latest header's own chunk, or the tail of the one before it (sent
+    # just after the new one, or before it was sent at all).
+    latest_fits = _header_fits("h")
+    use_previous = ~latest_fits & (
+        (_header_fits("ph") & (pl.col("sent_at") <= pl.col("h_at") + DOWNLINK_LEAD))
+        | (pl.col("h_at") > pl.col("sent_at"))
     )
-    header_applies = (
-        (pl.col("received_at") <= pl.col("h_until"))
-        & (offset >= pl.col("h_offset"))
+    joined = joined.with_columns(
+        _from_header=latest_fits | (use_previous & _header_fits("ph")),
+        **{
+            c: pl.when(use_previous).then(pl.col(f"p{c}")).otherwise(pl.col(c))
+            for c in header_columns
+        },
+    )
+
+    # A beacon only names this chunk's downlink if that may have started by
+    # the time the beacon was sent, and no header since says another did.
+    since_start_us = pl.col("bulk_file_offset") * (
+        (1 + DOWNLINK_RATE_SLACK) * 1_000_000 / DOWNLINK_BYTES_PER_SEC
+    ) + _microseconds(DOWNLINK_SLACK)
+    beacon_applies = (
+        pl.col("b_prefix").is_not_null()
         & (
-            pl.col("h_length").is_null()
-            | (offset < pl.col("h_offset") + pl.col("h_length"))
+            (pl.col("sent_at") - pl.col("b_at")).dt.total_microseconds()
+            <= since_start_us
+        )
+        & (
+            pl.col("h_at").is_null()
+            | (pl.col("b_at") >= pl.col("h_at"))
+            | (pl.col("sent_at") <= pl.col("h_at") + DOWNLINK_LEAD)
         )
     ).fill_null(value=False)
+    # See `HEADER_MARGIN`.
+    length = pl.col("h_length").fill_null(0)
+    header_window_applies = (
+        pl.col("b_prefix").is_null()
+        & pl.col("nb_prefix").is_null()
+        & (pl.col("bulk_file_offset") >= pl.col("h_offset"))
+        & (
+            pl.col("h_length").is_null()
+            | (pl.col("bulk_file_offset") < pl.col("h_offset") + length)
+        )
+        & (
+            pl.col("sent_at")
+            <= pl.col("h_at")
+            + pl.duration(milliseconds=length * 1000 // MIN_DOWNLINK_BYTES_PER_SEC)
+            + HEADER_MARGIN
+        )
+    ).fill_null(value=False)
+    next_beacon_applies = (
+        pl.col("nb_prefix").is_not_null()
+        & (pl.col("hn_at").is_null() | (pl.col("nb_at") < pl.col("hn_at")))
+    ).fill_null(value=False)
     attribution = (
-        pl.when(header_is_latest & header_applies)
+        pl.when(pl.col("_from_header") | header_window_applies)
         .then(pl.lit(Attribution.HEADER.value))
-        .when(~header_is_latest & pl.col("b_prefix").is_not_null())
+        .when(beacon_applies)
         .then(pl.lit(Attribution.BEACON.value))
-        .when(pl.col("nb_prefix").is_not_null())
+        .when(next_beacon_applies)
         .then(pl.lit(Attribution.NEXT_BEACON.value))
         .otherwise(pl.lit(Attribution.UNATTRIBUTED.value))
     )
-    attributed = joined.with_columns(attribution=attribution).with_columns(
-        path_sha256_prefix=pl.when(pl.col("attribution") == Attribution.HEADER.value)
-        .then(pl.col("h_prefix"))
-        .when(pl.col("attribution") == Attribution.BEACON.value)
-        .then(pl.col("b_prefix"))
-        .when(pl.col("attribution") == Attribution.NEXT_BEACON.value)
-        .then(pl.col("nb_prefix")),
+    attributed = (
+        joined.with_columns(attribution=attribution)
+        .with_columns(
+            path_sha256_prefix=pl.when(
+                pl.col("attribution") == Attribution.HEADER.value
+            )
+            .then(pl.col("h_prefix"))
+            .when(pl.col("attribution") == Attribution.BEACON.value)
+            .then(pl.col("b_prefix"))
+            .when(pl.col("attribution") == Attribution.NEXT_BEACON.value)
+            .then(pl.col("nb_prefix")),
+        )
+        .drop(
+            "_lead", "_h", "_from_header", "hn_at", *(f"p{c}" for c in header_columns)
+        )
     )
 
     # A header names its path outright; a beacon's prefix is looked up.
@@ -460,11 +599,16 @@ def _assign_downlinks(attributed: pl.DataFrame) -> pl.DataFrame:
         .when(pl.col("path_sha256_prefix").is_not_null())
         .then(pl.lit(PREFIX_KEY_PREFIX) + pl.col("path_sha256_prefix"))
     )
-    sorted_chunks = attributed.sort("received_at", "bulk_file_offset").with_columns(
+    sorted_chunks = attributed.sort("sent_at", "bulk_file_offset").with_columns(
         _identity=identity
     )
+    # When the chunk's downlink must have started, at `DOWNLINK_BYTES_PER_SEC`.
+    started_us = pl.col("sent_at").dt.timestamp("us") - pl.col("bulk_file_offset") * (
+        1_000_000 / DOWNLINK_BYTES_PER_SEC
+    )
     new_downlink = (
-        (pl.col("received_at").diff() > DOWNLINK_GAP)
+        (pl.col("sent_at").diff() > DOWNLINK_GAP)
+        | (started_us.diff().abs() > _microseconds(DOWNLINK_RESTART))
         | pl.col("_identity").ne_missing(pl.col("_identity").shift())
         | pl.col("h_at").ne_missing(pl.col("h_at").shift())
     ).fill_null(value=True)
@@ -532,7 +676,7 @@ def summarize_downlinks(attributed: pl.DataFrame) -> pl.DataFrame:
         offset_end=end.max(),
         _starts=pl.col("bulk_file_offset"),
         _ends=end,
-        header_received_at=pl.col("h_at").filter(from_header).first(),
+        header_received_at=pl.col("h_received_at").filter(from_header).first(),
         header_action=pl.col("h_action").filter(from_header).first(),
         header_offset=pl.col("h_offset").filter(from_header).first(),
         header_length=pl.col("h_length").filter(from_header).first(),
@@ -832,14 +976,14 @@ def rescue_nearby_chunks(attributed: pl.DataFrame, files: pl.DataFrame) -> pl.Da
     # `h_at` is the latest header before each chunk (whether or not the
     # chunk is from it): a downlink is one header's "epoch".
     windows = kept.group_by("file_key", "downlink_index").agg(
-        _start=pl.col("received_at").min(),
-        _end=pl.col("received_at").max(),
+        _start=pl.col("sent_at").min(),
+        _end=pl.col("sent_at").max(),
         _h_at=pl.col("h_at").first(),
         _target_path=pl.col("file_path").first(),
     )
     seconds_away = pl.max_horizontal(
-        (pl.col("_start") - pl.col("received_at")).dt.total_seconds(),
-        (pl.col("received_at") - pl.col("_end")).dt.total_seconds(),
+        (pl.col("_start") - pl.col("sent_at")).dt.total_seconds(),
+        (pl.col("sent_at") - pl.col("_end")).dt.total_seconds(),
         pl.lit(0.0),
     )
     candidates = loose.join_where(
@@ -850,8 +994,8 @@ def rescue_nearby_chunks(attributed: pl.DataFrame, files: pl.DataFrame) -> pl.Da
             _h_at=pl.col("_h_at"),
             _target_path=pl.col("_target_path"),
         ),
-        pl.col("received_at") >= pl.col("_start") - RESCUE_WINDOW,
-        pl.col("received_at") <= pl.col("_end") + RESCUE_WINDOW,
+        pl.col("sent_at") >= pl.col("_start") - RESCUE_WINDOW,
+        pl.col("sent_at") <= pl.col("_end") + RESCUE_WINDOW,
     )
     # A header between them means a new downlink started; and the file's own
     # header only sent its `offset`..`offset + length` -- see the module
@@ -887,7 +1031,7 @@ def rescue_nearby_chunks(attributed: pl.DataFrame, files: pl.DataFrame) -> pl.Da
         mine = kept.filter(pl.col("file_key") == key)
         size, sha256s = _file_size_and_sha256s(key, mine, known)
         groups: list[pl.DataFrame] = [
-            group.sort("received_at")
+            group.sort("sent_at")
             for _, group in offered.sort("_away").group_by(
                 "downlink_index", maintain_order=True
             )
@@ -1165,6 +1309,52 @@ def reassemble_downlinked_files(
     )
 
 
+def _clock_offsets(decoded: pl.LazyFrame) -> pl.DataFrame:
+    """The satellite's clock minus `received_at`, by `received_at`: a
+    rolling median over the packets with a `transmitted_at_sat_clock`.
+    """
+    return (
+        decoded.select(
+            "received_at",
+            _offset=(
+                pl.col("transmitted_at_sat_clock") - pl.col("received_at")
+            ).dt.total_microseconds(),
+        )
+        .drop_nulls()
+        .sort("received_at")
+        .collect()
+        .with_columns(
+            _offset=pl.col("_offset").rolling_median_by(
+                "received_at", window_size=CLOCK_OFFSET_WINDOW
+            )
+        )
+    )
+
+
+def _with_sent_at(packets: pl.DataFrame, offsets: pl.DataFrame) -> pl.DataFrame:
+    """`packets` plus `sent_at`: `transmitted_at_sat_clock`, else
+    `received_at` moved onto the satellite's clock by the nearest offset in
+    `offsets` (see `_clock_offsets`), if any.
+    """
+    return (
+        packets.sort("received_at")
+        .join_asof(
+            offsets,
+            on="received_at",
+            strategy="nearest",
+            tolerance=CLOCK_OFFSET_WINDOW,
+        )
+        .with_columns(
+            sent_at=pl.coalesce(
+                "transmitted_at_sat_clock",
+                pl.col("received_at")
+                + pl.duration(microseconds=pl.col("_offset").fill_null(0)),
+            )
+        )
+        .drop("_offset", "transmitted_at_sat_clock")
+    )
+
+
 def _write_parquet_atomic(df: pl.DataFrame, path: Path) -> None:
     """Write `df` to `path` via a temp file + rename, so a crash mid-write
     can't leave a truncated/corrupt parquet file at `path`.
@@ -1222,21 +1412,44 @@ def run(*, data_dir: Path = DEFAULT_DATA_DIR) -> None:
 
     logger.info(f"Reading {decoded_path}")
     decoded = pl.scan_parquet(decoded_path).filter(pl.col("csp_crc_valid"))
-    chunks = (
+    offsets = _clock_offsets(decoded)
+    chunks = _with_sent_at(
         decoded.filter(pl.col("packet_type") == "BULK_FILE_DOWNLINK")
-        .select(_CHUNK_COLUMNS)
-        .collect()
+        .select(*_CHUNK_COLUMNS, "transmitted_at_sat_clock")
+        .collect(),
+        offsets,
     )
     beacons = (
         decoded.filter(
             (pl.col("packet_type") == "BEACON_EXTENDED_V5PLUS")
-            & ~pl.col("is_stored_beacon").fill_null(value=False)
+            & pl.col("unix_epoch_time_ms").is_between(1, MAX_VALID_EPOCH_MS)
         )
-        .select("received_at", "bulk_downlink_file_path_sha256_prefix")
+        .select(
+            "received_at",
+            "bulk_downlink_file_path_sha256_prefix",
+            # Stored ones too: sent long ago, but each says what was being
+            # downlinked when it was stamped, as a live one would have.
+            sent_at=pl.from_epoch(
+                pl.col("unix_epoch_time_ms") + _BEACON_STAMP_TO_TRANSMIT_MS,
+                time_unit="ms",
+            )
+            .dt.replace_time_zone("UTC")
+            .dt.cast_time_unit("us"),
+        )
         .collect()
     )
+    responses = _with_sent_at(
+        decoded.filter(pl.col("packet_type") == "TCMD_RESPONSE")
+        .select("received_at", "transmitted_at_sat_clock")
+        .collect(),
+        offsets,
+    ).unique("received_at")
     files = pl.read_parquet(files_path)
-    mentions = pl.read_parquet(mentions_path)
+    mentions = pl.read_parquet(mentions_path).join(
+        responses.select(seen_at="received_at", sent_at="sent_at"),
+        on="seen_at",
+        how="left",
+    )
 
     attributed = attribute_chunks(chunks, beacons, mentions, files)
     attributed = attributed.join(
