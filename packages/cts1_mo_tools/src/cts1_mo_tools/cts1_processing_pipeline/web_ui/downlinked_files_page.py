@@ -411,6 +411,34 @@ def _summary_row(row: dict[str, Any]) -> None:
             ui.label(value).classes("break-all")
 
 
+def _capture_metadata_card(metadata: str) -> None:
+    with ui.card().classes("w-full"):
+        ui.label("Capture Metadata").classes("text-lg font-bold")
+        ui.label(
+            "Embedded in the file by camera_capture_v2, right before the "
+            "capture: by the OBC's clock, and the ADCS's state then."
+        ).classes("text-caption text-grey")
+        with ui.row().classes("w-full gap-12"):
+            for section, facts in downlinked_files.capture_metadata_sections(
+                metadata
+            ).items():
+                if not facts:
+                    continue
+                with ui.column().classes("gap-1"):
+                    ui.label(section).classes("font-medium")
+                    with ui.grid(columns="auto 1fr").classes("gap-x-4 gap-y-1 text-sm"):
+                        for label, value in facts:
+                            ui.label(label).classes("text-grey")
+                            ui.label(value).classes("break-all")
+        with ui.expansion("Raw JSON").classes("w-full"):
+            ui.code(
+                orjson.dumps(
+                    orjson.loads(metadata), option=orjson.OPT_INDENT_2
+                ).decode(),
+                language="json",
+            ).classes("w-full")
+
+
 def _preview_section(file: downlinked_files.DownlinkedFile) -> None:
     row = file.row
     if row["preview_media_type"]:
@@ -521,6 +549,8 @@ def _file_viewer(
                 f'type=a href="{downlinked_files.file_download_url(row["file_key"])}"'
             )
         _summary_row(row)
+    if metadata := row.get("file_metadata"):
+        _capture_metadata_card(metadata)
     _preview_section(file)
     with ui.card().classes("w-full"):
         ui.label("Byte Coverage").classes("text-lg font-bold")

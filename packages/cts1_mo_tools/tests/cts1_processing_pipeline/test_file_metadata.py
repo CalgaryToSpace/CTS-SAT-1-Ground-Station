@@ -4,8 +4,9 @@ import io
 from datetime import UTC, datetime
 
 import pytest
-from cts1_mo_tools.cts1_processing_pipeline.file_timestamps import (
+from cts1_mo_tools.cts1_processing_pipeline.file_metadata import (
     parse_adcs_modified_time,
+    parse_camera_metadata,
     parse_capture_time,
     parse_mpi_analysis_start_time,
 )
@@ -125,3 +126,17 @@ def test_mpi_header_start_time(data: bytes, expected: datetime | None) -> None:
 )
 def test_mpi_analysis_start_time(earliest: object, expected: datetime | None) -> None:
     assert parse_mpi_analysis_start_time(earliest) == expected
+
+
+@pytest.mark.parametrize(
+    ("path", "data", "expected"),
+    [
+        ("c/a.img", b"START_CAM:" + _META + b"\n@0000", _META),
+        ("c/a.jpg", bytes(195) + b"+00:00\x00" + _META + b"\x00\xff\xdb\x9f", _META),
+        ("c/a.jpg", b"+00:00\x00" + _META[:40] + bytes(20) + _META[60:], None),
+        ("c/a.img", b"START_CAM:\n@0000", None),
+        ("camera.run", b'{"meta":' + _META + b"}", None),
+    ],
+)
+def test_camera_metadata(path: str, data: bytes, expected: bytes | None) -> None:
+    assert parse_camera_metadata(path, data) == (expected and expected.decode())

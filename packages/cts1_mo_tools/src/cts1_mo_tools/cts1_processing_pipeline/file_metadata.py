@@ -1,18 +1,24 @@
-"""When a file says it was made (`file_timestamp`, in UTC): the capture time
-embedded in a camera image, the start of an MPI recording (from the file's
-header, or the satellite's analysis of it), or the last-modified time the ADCS
-reported for a file copied off its SD card. All come from the satellite's own
-clocks.
+"""What a file says about itself.
+
+When it was made (`file_timestamp`, in UTC): the capture time embedded in a
+camera image, the start of an MPI recording (from the file's header, or the
+satellite's analysis of it), or the last-modified time the ADCS reported for
+a file copied off its SD card. All come from the satellite's own clocks.
+
+And a camera image's metadata JSON (`file_metadata`): its capture settings,
+time sync and ADCS state.
 """
 
 from __future__ import annotations
 
 __all__ = [
     "parse_adcs_modified_time",
+    "parse_camera_metadata",
     "parse_capture_time",
     "parse_mpi_analysis_start_time",
 ]
 
+import json
 import re
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -28,6 +34,7 @@ _MIN_PLAUSIBLE = datetime(2020, 1, 1, tzinfo=UTC)
 # `camera_capture_v2`'s metadata JSON is the first line of a .img and the EXIF
 # description of a .jpg. Matched by itself, as either may be partly downlinked.
 _EPOCH_MS_RE = re.compile(rb'"epoch_ms":(\d{13})[,}]')
+_CAMERA_METADATA_START = b'{"blob":"camera_capture'
 _METADATA_MAX_BYTES = 1024
 _CAMERA_SUFFIXES = (".img", ".jpg")
 
@@ -109,3 +116,21 @@ def parse_capture_time(
         if match:
             return _from_epoch_ms(int(match[1]))
     return _plausible(_exif_time(image)) if image else None
+
+
+def parse_camera_metadata(file_path: str | None, data: bytes) -> str | None:
+    """A camera file's metadata JSON (see `_EPOCH_MS_RE`), exactly as sent, if
+    all of it arrived.
+    """
+    if not (file_path and file_path.lower().endswith(_CAMERA_SUFFIXES)):
+        return None
+    start = data.find(_CAMERA_METADATA_START, 0, _METADATA_MAX_BYTES)
+    if start < 0:
+        return None
+    # One character per byte, so the JSON's end is found whatever follows it.
+    text = data[start : start + _METADATA_MAX_BYTES].decode("latin-1")
+    try:
+        metadata, end = json.JSONDecoder().raw_decode(text)
+    except ValueError:  # cut by missing bytes (zeros)
+        return None
+    return text[:end] if isinstance(metadata, dict) else None

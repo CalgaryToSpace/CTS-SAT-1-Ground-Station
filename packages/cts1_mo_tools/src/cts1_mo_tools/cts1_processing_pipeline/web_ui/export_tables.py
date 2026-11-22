@@ -334,6 +334,7 @@ TABLE_SPECS: tuple[TableSpec, ...] = (
             "mention details, its `file_timestamp` (a camera image's capture "
             "time, an MPI recording's start or an ADCS file's last-modified "
             "time), and for a downlinked one its "
+            "embedded camera `file_metadata` (JSON), its "
             "good/missing/conflicting byte counts, SHA-256 check against what "
             "the satellite reported, and the reassembled bytes themselves."
         ),

@@ -435,9 +435,12 @@ def test_file_timestamp_is_from_the_file_or_the_adcs_header() -> None:
         ),
     )
 
-    assert _file(downlinked, "c/x.img")["file_timestamp"] == datetime(
+    image = _file(downlinked, "c/x.img")
+    assert image["file_timestamp"] == datetime(
         2026, 11, 22, 7, 0, 3, 433000, tzinfo=UTC
     )
+    assert image["file_metadata"] == meta[len("START_CAM:") : -1].decode()
+    assert _file(downlinked, "ADCS/log_1.TLM")["file_metadata"] is None
     # Never downlinked, but the header alone dates it.
     assert _file(downlinked, "ADCS/log_1.TLM")["file_timestamp"] == datetime(
         2026, 11, 21, 22, 27, 36, tzinfo=UTC

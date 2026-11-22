@@ -76,7 +76,8 @@ rescued -- are left out of both outputs. Every file step 10 knows of but that
 was never downlinked gets a row too (no bytes), and every row carries
 step 10's listing and mention columns -- so it's the one list of files.
 A file's `file_timestamp` is the capture time in its own bytes, else the one
-step 10 has from the satellite's responses (see `file_timestamps`).
+step 10 has from the satellite's responses (see `file_metadata`). A camera
+image's embedded metadata JSON is kept as `file_metadata`.
 
 Only CRC-valid packets are used. Reads steps 3, 5 (via 10) and 10's
 outputs; parquet-in-parquet-out, recomputed from scratch on every run.
@@ -119,6 +120,10 @@ import polars as pl
 from loguru import logger
 
 from cts1_mo_tools.cts1_picam_to_jpg import parse_picam_ascii_to_jpg_bytes
+from cts1_mo_tools.cts1_processing_pipeline.file_metadata import (
+    parse_camera_metadata,
+    parse_capture_time,
+)
 from cts1_mo_tools.cts1_processing_pipeline.file_reassembly import (
     MAX_REASSEMBLY_SPAN_BYTES,
     ByteSegment,
@@ -127,7 +132,6 @@ from cts1_mo_tools.cts1_processing_pipeline.file_reassembly import (
     detect_image,
     reassemble_bulk_chunks,
 )
-from cts1_mo_tools.cts1_processing_pipeline.file_timestamps import parse_capture_time
 from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
     pipeline as step_3_pipeline,
 )
@@ -226,6 +230,8 @@ _FILES_SCHEMA = {
     # A camera image's capture time, an MPI recording's start, or an ADCS
     # file's last-modified time.
     "file_timestamp": pl.Datetime("us", "UTC"),
+    # A camera image's metadata JSON, as embedded (capture settings, ADCS).
+    "file_metadata": pl.String,
     "byte_length": pl.Int64,  # of `data`
     "good_bytes": pl.Int64,
     "missing_bytes": pl.Int64,
@@ -1063,6 +1069,7 @@ def _reassemble_one(
         "file_timestamp": parse_capture_time(
             file_path, data, image.data if image else None
         ),
+        "file_metadata": parse_camera_metadata(file_path, data),
         "byte_length": len(data),
         "good_bytes": good,
         "missing_bytes": missing,

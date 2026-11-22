@@ -20,6 +20,7 @@ __all__ = [
     "FILE_PREVIEW_PATH",
     "GALLERY_SORTS",
     "DownlinkedFile",
+    "capture_metadata_sections",
     "download_filename",
     "file_download_url",
     "file_preview_url",
@@ -34,13 +35,20 @@ __all__ = [
 ]
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import PurePosixPath
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import quote, urlencode
 
+import orjson
 import polars as pl
 from fastapi import FastAPI, HTTPException, Response
 
+from cts1_mo_tools.cts1_decode_satnogs_packets import (
+    ADCS_CONTROL_MODE_MAP,
+    ADCS_ESTIM_MODE_MAP,
+    e_numbered,
+)
 from cts1_mo_tools.cts1_processing_pipeline.file_reassembly import (
     DEFAULT_CONFLICT_POLICY,
     ReassemblyResult,
@@ -51,6 +59,8 @@ from cts1_mo_tools.cts1_processing_pipeline.step_10_list_satellite_files import 
 from cts1_mo_tools.cts1_processing_pipeline.step_11_reassemble_downlinked_files import (
     pipeline as step_11_pipeline,
 )
+
+from .mpi_collections import time_sync_sources_text
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -179,6 +189,85 @@ def load_downlinked_file(data_dir: Path, file_key: str) -> DownlinkedFile | None
             policy=DEFAULT_CONFLICT_POLICY,
         ),
     )
+
+
+# `camera_capture_v2`'s lighting mode argument.
+_LIGHTING_MODES = {"d": "daylight", "m": "medium", "n": "night", "s": "solar sail"}
+
+
+def _mode(names: dict[int, str], value: object) -> str:
+    return e_numbered(names, value) if isinstance(value, int) else str(value)
+
+
+def _numbers(values: object, unit: str) -> str:
+    items = cast("list[object]", values) if isinstance(values, list) else [values]
+    return ", ".join(str(v) for v in items) + f" {unit}"
+
+
+def _adcs_rows(adcs: dict[str, Any]) -> list[tuple[str, str]]:
+    if adcs.get("ok") is not True:
+        return [("ADCS", f"no response (error {adcs.get('err')})")]
+    rows = [
+        ("Control mode", _mode(ADCS_CONTROL_MODE_MAP, adcs.get("ctrl_mode"))),
+        ("Estimation mode", _mode(ADCS_ESTIM_MODE_MAP, adcs.get("est_mode"))),
+        (
+            "Attitude (roll, pitch, yaw)",
+            f"error {adcs['att_err']}"
+            if "att_err" in adcs
+            else _numbers(adcs.get("rpy_deg"), "deg"),
+        ),
+    ]
+    # Only queried in a target-tracking control mode.
+    if isinstance(target := adcs.get("target"), dict):
+        target = cast("dict[str, Any]", target)
+        rows.append(
+            (
+                "Target (lat, lon, alt)",
+                f"error {target['err']}"
+                if "err" in target
+                else f"{target.get('lat_deg')}, {target.get('lon_deg')} deg, "
+                f"{target.get('alt_m')} m",
+            )
+        )
+    return rows
+
+
+def capture_metadata_sections(metadata_json: str) -> dict[str, list[tuple[str, str]]]:
+    """A camera image's `file_metadata` as (label, value) rows by section,
+    with its codes named. Fields this doesn't know are left to the raw JSON.
+    """
+    meta = cast("dict[str, Any]", orjson.loads(metadata_json))
+    lighting = meta.get("lighting")
+    epoch_ms = meta.get("epoch_ms")
+    sync_src = meta.get("sync_src")
+    since_sync = meta.get("sec_since_sync")
+    adcs = meta.get("adcs")
+    return {
+        "Capture": [
+            ("Blob", str(meta.get("blob"))),
+            ("Lighting", f"{lighting} - {_LIGHTING_MODES.get(str(lighting), '?')}"),
+            (
+                "Captured (UTC)",
+                f"{datetime.fromtimestamp(epoch_ms / 1000, UTC):%Y-%m-%d %H:%M:%S.%f}"[
+                    :-3
+                ]
+                if isinstance(epoch_ms, int)
+                else str(epoch_ms),
+            ),
+            (
+                "Time sync",
+                time_sync_sources_text(orjson.dumps([sync_src]).decode())
+                + (
+                    f", {since_sync:,} s before"
+                    if isinstance(since_sync, int)
+                    else ", never synced"
+                ),
+            ),
+        ],
+        "ADCS": _adcs_rows(cast("dict[str, Any]", adcs))
+        if isinstance(adcs, dict)
+        else [],
+    }
 
 
 def _is_partial(row: dict[str, Any]) -> bool:

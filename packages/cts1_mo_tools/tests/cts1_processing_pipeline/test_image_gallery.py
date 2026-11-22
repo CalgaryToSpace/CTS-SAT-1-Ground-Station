@@ -79,3 +79,52 @@ def test_gallery_reads_files_written_before_file_timestamp(tmp_path: Path) -> No
     )
 
     assert ordered["file_timestamp"].to_list() == [None]
+
+
+def test_capture_metadata_sections() -> None:
+    sections = downlinked_files.capture_metadata_sections(
+        '{"blob":"camera_capture_v2","lighting":"d","epoch_ms":1795330803433,'
+        '"sync_src":"G","sec_since_sync":1240,"adcs":{"ok":true,"ctrl_mode":7,'
+        '"est_mode":6,"rpy_deg":[6.88,-34.28,-2.19],"target":{"lon_deg":57.310001,'
+        '"lat_deg":-20.480000,"alt_m":0.0}},"new_field":1}'
+    )
+
+    assert sections == {
+        "Capture": [
+            ("Blob", "camera_capture_v2"),
+            ("Lighting", "d - daylight"),
+            ("Captured (UTC)", "2026-11-22 07:00:03.433"),
+            ("Time sync", "GNSS_UART (G), 1,240 s before"),
+        ],
+        "ADCS": [
+            ("Control mode", "7 - Rwheel target tracking control"),
+            ("Estimation mode", "6 - MEMS gyro EKF"),
+            ("Attitude (roll, pitch, yaw)", "6.88, -34.28, -2.19 deg"),
+            ("Target (lat, lon, alt)", "-20.48, 57.310001 deg, 0.0 m"),
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    ("adcs", "expected"),
+    [
+        ('{"ok":false,"err":4}', [("ADCS", "no response (error 4)")]),
+        (
+            '{"ok":true,"ctrl_mode":15,"est_mode":99,"att_err":3,"target":{"err":5}}',
+            [
+                ("Control mode", "15 - Target-tracking yaw-only wheel control mode"),
+                ("Estimation mode", "99 - UNKNOWN(99)"),
+                ("Attitude (roll, pitch, yaw)", "error 3"),
+                ("Target (lat, lon, alt)", "error 5"),
+            ],
+        ),
+    ],
+)
+def test_capture_metadata_adcs_errors(adcs: str, expected: object) -> None:
+    sections = downlinked_files.capture_metadata_sections(
+        f'{{"lighting":"q","sync_src":"N","sec_since_sync":null,"adcs":{adcs}}}'
+    )
+
+    assert sections["ADCS"] == expected
+    assert ("Lighting", "q - ?") in sections["Capture"]
+    assert ("Time sync", "NONE (N), never synced") in sections["Capture"]
