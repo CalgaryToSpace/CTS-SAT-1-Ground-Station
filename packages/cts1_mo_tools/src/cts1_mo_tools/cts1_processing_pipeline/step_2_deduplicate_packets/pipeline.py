@@ -40,9 +40,10 @@ Trust model:
 
 `transmitted_at_sat_clock` is separate from all of that: it's when the packet
 was sent according to the satellite's clock, interpolated within each
-recording between live beacons' timestamps (see `sat_clock`). It's the median
-over the recordings that caught the packet, and null if none of those had
-both a baseline decode of it and a usable beacon.
+recording between the timestamps in log messages and live beacons, its
+"anchors" (see `sat_clock`). It's the median over the recordings that caught
+the packet, and null if none of those had both a baseline decode of it and a
+usable anchor.
 
 Unlike step 1 -- which appends to a DuckDB database as its source of truth,
 since it's cheap to run incrementally against new SatNOGS observations --
@@ -58,9 +59,9 @@ changed: no distinct packet ever spans two contents, so every distinct
 packet whose content appears in a raw month that changed since the last run
 is recomputed -- from all of that content's decodes, whatever their month --
 and every other one is left as it was. As `transmitted_at_sat_clock` also
-depends on a recording's beacons, so is every packet of a recording with a
-beacon in a changed month (one can straddle two months), and recomputing a
-packet reads the beacons of every recording it's in. The result is the same
+depends on a recording's anchors, so is every packet of a recording with an
+anchor in a changed month (one can straddle two months), and recomputing a
+packet reads the anchors of every recording it's in. The result is the same
 as a full run's (as long as `raw_packets` is only ever appended to, which step
 1 guarantees, and `raw_observations` windows don't change after the fact).
 """
@@ -546,24 +547,24 @@ def _recompute_contents(
     packets_path: Path, observations: pl.LazyFrame, changed_months: set[str]
 ) -> tuple[pl.Series, pl.DataFrame]:
     """The incremental run's work: every content (as `data_hex`) with a
-    decode in `changed_months` of `raw_packets`, or in a recording with a
-    beacon there, and its distinct packets recomputed from every one of its
-    decodes plus the beacons of their recordings."""
+    decode in `changed_months` of `raw_packets`, or in a recording with an
+    anchor there, and its distinct packets recomputed from every one of its
+    decodes plus the anchors of their recordings."""
     files = partitions.month_files(packets_path)
     is_baseline = pl.col("decoder").is_in(BASELINE_DECODERS)
-    is_beacon = is_baseline & pl.col("data_hex").str.slice(
+    is_anchor = is_baseline & pl.col("data_hex").str.slice(
         2 * CSP_HEADER_SIZE, 2
-    ).str.to_lowercase().is_in(sat_clock.BEACON_TYPE_HEX)
+    ).str.to_lowercase().is_in(sat_clock.ANCHOR_TYPE_HEX)
     changed_rows = pl.scan_parquet([files[month] for month in sorted(changed_months)])
     to_recompute = [changed_rows]
     if unchanged := [files[month] for month in files if month not in changed_months]:
-        # A recording straddling a month boundary: a beacon landing on one
+        # A recording straddling a month boundary: an anchor landing on one
         # side changes the times of the packets on the other.
-        beacon_recordings = _observation_ids(changed_rows.filter(is_beacon))
+        anchor_recordings = _observation_ids(changed_rows.filter(is_anchor))
         straddling = (
             pl.scan_parquet(unchanged)
             .select(_RAW_FIELDS)
-            .filter(is_baseline & pl.col("observation_id").is_in(beacon_recordings))
+            .filter(is_baseline & pl.col("observation_id").is_in(anchor_recordings))
             .collect(engine="streaming")
         )
         # Nearly always empty, and each input here costs a pass of its own.
@@ -595,18 +596,18 @@ def _recompute_contents(
     )
     all_packets = pl.scan_parquet(packets_path).select(_RAW_FIELDS)
     # Collected, as matching on content is the expensive part of this scan
-    # and both the beacons' lookup and the recomputation need the result.
+    # and both the anchors' lookup and the recomputation need the result.
     candidates = all_packets.filter(is_candidate).collect(engine="streaming")
-    # Plus the beacons their times are interpolated between. Those bring in
+    # Plus the anchors their times are interpolated between. Those bring in
     # incomplete clusters of their own, cut back out the same way.
     recordings = _observation_ids(candidates.lazy().filter(is_baseline))
-    beacons = (
-        all_packets.filter(is_beacon & pl.col("observation_id").is_in(recordings))
+    anchors = (
+        all_packets.filter(is_anchor & pl.col("observation_id").is_in(recordings))
         .collect(engine="streaming")
         .filter(~is_candidate)
     )
     recomputed = compute_distinct_packets(
-        pl.concat([candidates, beacons]), observations
+        pl.concat([candidates, anchors]), observations
     ).filter(pl.col("data_hex").is_in(contents.implode()))
     return contents, recomputed
 

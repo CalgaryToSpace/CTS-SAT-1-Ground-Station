@@ -10,6 +10,9 @@ from cts1_mo_tools.cts1_processing_pipeline import partitions
 from cts1_mo_tools.cts1_processing_pipeline.step_2_deduplicate_packets import (
     pipeline as step_2_pipeline,
 )
+from cts1_mo_tools.cts1_processing_pipeline.step_2_deduplicate_packets import (
+    sat_clock,
+)
 from cts1_mo_tools.cts1_processing_pipeline.step_2_deduplicate_packets.pipeline import (
     compute_distinct_packets,
 )
@@ -25,6 +28,7 @@ _SAT_START = datetime(2026, 7, 30, 12, 0, tzinfo=UTC)
 
 _BASIC = (0x01, b"END\0", 130)
 _V5 = (0x21, b" X5\0", 198)
+_LEAD_MS = {0x01: 390, 0x20: 430, 0x21: 430}
 
 
 def _with_crc(body: bytes) -> str:
@@ -37,7 +41,9 @@ def _beacon_hex(
     *,
     uptime_ms: int | None = None,
 ) -> str:
+    """A beacon transmitted at `sat_ms`, so stamped a little before that."""
     packet_type, end_message, size = kind
+    sat_ms -= _LEAD_MS.get(packet_type, 0)
     payload = bytearray(size)
     uptime_ms = 10_000_000 + sat_ms if uptime_ms is None else uptime_ms
     epoch_ms = int(_SAT_START.timestamp() * 1000) + sat_ms
@@ -50,6 +56,15 @@ def _beacon_hex(
 
 def _other_hex(message: bytes = b"hello") -> str:
     return _with_crc(bytes.fromhex("c2a28a00") + b"\x03" + message + b"\n")
+
+
+def _log_hex(
+    sat_ms: int, *, synced_ms: int = -600_000, source: bytes = b"E", text: bytes = b""
+) -> str:
+    """A log message transmitted at `sat_ms`, of a clock set at `synced_ms`."""
+    synced_at = int(_SAT_START.timestamp() * 1000) + synced_ms
+    prefix = f"{synced_at}+{sat_ms - synced_ms:010d}_".encode() + source
+    return _other_hex(prefix + b" [A:OBC:INFO]: " + text)
 
 
 def _decode(t_ms: float, data_hex: str, **overrides: Any) -> dict[str, Any]:
@@ -133,7 +148,7 @@ def test_field_offsets_match_the_full_decoder() -> None:
 
     assert result["transmitted_at_sat_clock"][0] == datetime.fromisoformat(
         decoded["utc_time"]
-    )
+    ) + timedelta(milliseconds=430)
 
 
 @pytest.mark.parametrize(
@@ -271,6 +286,127 @@ def test_does_not_interpolate_across_a_clock_step() -> None:
     assert result[near_second] == 116_000
 
 
+def test_reads_a_real_log_prefix() -> None:
+    log = _other_hex(b"1780208589000+0002833553_E [A:OBC:INFO]: Heartbeat")
+
+    result = compute_distinct_packets(pl.DataFrame([_decode(0, log)]), _observations())
+
+    # What the same message's own text says: "Datetime: 2026-05-31T071022.553Z".
+    assert result["transmitted_at_sat_clock"][0] == datetime(
+        2026, 5, 31, 7, 10, 22, 553_000, tzinfo=UTC
+    )
+
+
+@pytest.mark.parametrize("source", [b"E", b"G", b"T", b"A", b"Z"])
+def test_logs_are_anchors(source: bytes) -> None:
+    packet = _other_hex()
+    log = _log_hex(2_000, source=source, text="🚀 not only ascii".encode())
+
+    result = _sat_ms(_decode(0, log), _decode(1_000, packet))
+
+    assert result == {log: 2_000, packet: 3_000}
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        b"1780208589000+0002833553_N unsynced",
+        b"0000000000000+0002833553_E synced at zero",
+        b"9999999999999+0002833553_E too far in the future",
+        b"1780208589000+K\xbc* garbled",
+        b"1780208589000+0002833553\xab\xdd garbled",
+        b"178020858900+0002833553_E too few digits",
+        b"text 1780208589000+0002833553_E not at the start",
+        b"1780208589000+00",
+    ],
+)
+def test_other_logs_are_not_anchors(message: bytes) -> None:
+    packet = _other_hex()
+
+    result = _sat_ms(_decode(0, _other_hex(message)), _decode(1_000, packet))
+
+    assert result[packet] is None
+
+
+def test_log_with_bad_crc_is_not_an_anchor() -> None:
+    packet = _other_hex()
+
+    result = _sat_ms(
+        _decode(0, _log_hex(0), csp_crc_valid=False), _decode(1_000, packet)
+    )
+
+    assert result[packet] is None
+
+
+def test_interpolates_between_a_beacon_and_a_log() -> None:
+    packet = _other_hex()
+
+    result = _sat_ms(
+        _decode(0, _beacon_hex(1_000)),
+        _decode(10_000, packet),
+        _decode(20_000, _log_hex(21_100)),
+    )
+
+    assert result[packet] == 11_050
+
+
+def test_log_that_waited_to_be_sent_is_not_used() -> None:
+    log = _log_hex(19_700)
+
+    result = _sat_ms(
+        _decode(0, _beacon_hex(0)),
+        _decode(20_000, log),
+        _decode(40_000, _beacon_hex(40_000)),
+    )
+
+    assert result[log] == 20_000
+
+
+def test_does_not_interpolate_across_a_step_only_logs_show() -> None:
+    packet = _other_hex()
+
+    result = _sat_ms(
+        _decode(0, _log_hex(0)),
+        _decode(4_000, packet),
+        _decode(20_000, _log_hex(21_000, synced_ms=15_000)),
+    )
+
+    assert result[packet] == 4_000
+
+
+def test_log_between_beacons_showing_a_step_joins_the_closer_side() -> None:
+    packet = _other_hex()
+
+    result = _sat_ms(
+        _decode(0, _beacon_hex(0, uptime_ms=100_000)),
+        _decode(8_000, packet),
+        # The clock was set forward 2s before this log.
+        _decode(10_000, _log_hex(12_000)),
+        _decode(20_000, _beacon_hex(22_000, uptime_ms=120_000)),
+    )
+
+    # Not 9_600, as interpolating across the step would give.
+    assert result[packet] == 10_000
+
+
+def test_big_step_between_the_only_beacon_and_the_only_log() -> None:
+    packet = _other_hex()
+
+    result = _sat_ms(
+        _decode(0, _beacon_hex(0)),
+        _decode(4_000, packet),
+        _decode(20_000, _log_hex(120_000)),
+    )
+
+    assert result[packet] == 4_000
+
+
+def test_stamp_to_transmit_covers_every_beacon_type() -> None:
+    assert set(sat_clock.BEACON_STAMP_TO_TRANSMIT_MS) == set(
+        sat_clock.LIVE_END_MESSAGES
+    )
+
+
 def test_median_across_recordings() -> None:
     packet = _other_hex()
 
@@ -353,6 +489,16 @@ def test_carried_into_everything_decoded() -> None:
             ],
             [_decode(310_000, _beacon_hex(9_000))],
             id="recomputing_needs_other_recordings_beacons",
+        ),
+        pytest.param(
+            [_decode(290_000, _other_hex())],
+            [_decode(310_000, _log_hex(5_000))],
+            id="new_log_changes_previous_month",
+        ),
+        pytest.param(
+            [_decode(280_000, _log_hex(1_000)), _decode(290_000, _other_hex())],
+            [_decode(310_000, _other_hex(), observation_id=2)],
+            id="recomputing_needs_previous_months_logs",
         ),
     ],
 )
