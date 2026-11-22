@@ -34,15 +34,12 @@ __all__ = [
 ]
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urlencode
 
 import polars as pl
 from fastapi import FastAPI, HTTPException, Response
-from loguru import logger
-from PIL import ExifTags, Image
 
 from cts1_mo_tools.cts1_processing_pipeline.file_reassembly import (
     DEFAULT_CONFLICT_POLICY,
@@ -68,7 +65,7 @@ PARTIAL_FILENAME_SUFFIX = "_partial"
 
 GALLERY_SORTS = {
     "Last downlinked": ("last_downlinked_at", "file_path"),
-    "Capture date": ("captured_at", "_name_key", "file_path"),
+    "File timestamp": ("file_timestamp", "_name_key", "file_path"),
     "File name": ("_name_key", "file_path"),
     "File path": ("_path_key", "file_path"),
 }
@@ -86,49 +83,20 @@ def load_downlinked_files(data_dir: Path) -> pl.DataFrame:
     path = _files_path(data_dir)
     if not path.exists():
         return pl.DataFrame()
-    return pl.scan_parquet(path).drop(_BULKY_COLUMNS).collect()
-
-
-def _capture_date(image: bytes) -> datetime | None:
-    """EXIF's `DateTimeOriginal`, in UTC (assumed where it gives no offset)."""
-    # Not `Image.open`, which fails on a partial image that still has its EXIF.
-    start = image.find(b"Exif\x00\x00")
-    if start < 0:
-        return None
-    try:
-        exif = Image.Exif()
-        exif.load(image[start:])
-        tags = exif.get_ifd(ExifTags.IFD.Exif)
-        taken = tags.get(ExifTags.Base.DateTimeOriginal)
-        if not taken:
-            return None
-        offset = tags.get(ExifTags.Base.OffsetTimeOriginal) or "+00:00"
-        return datetime.strptime(f"{taken}{offset}", "%Y:%m:%d %H:%M:%S%z").astimezone(
-            UTC
+    files = pl.scan_parquet(path).drop(_BULKY_COLUMNS).collect()
+    if "file_timestamp" not in files.columns:  # until step 11 next runs after a deploy
+        files = files.with_columns(
+            file_timestamp=pl.lit(None, pl.Datetime("us", "UTC"))
         )
-    except Exception as e:  # noqa: BLE001 -- a damaged downlink is just undated
-        logger.debug(f"Unreadable EXIF: {type(e).__name__}: {e}")
-        return None
+    return files
 
 
 def load_gallery_images(data_dir: Path) -> pl.DataFrame:
-    """Every file with a preview image, with its `captured_at` but without its
-    bytes; empty if step 11 hasn't run yet.
-    """
-    path = _files_path(data_dir)
-    if not path.exists():
-        return pl.DataFrame()
-    return (
-        pl.scan_parquet(path)
-        .filter(pl.col("preview_media_type").is_not_null())
-        .with_columns(
-            captured_at=pl.coalesce("preview_image", "data").map_elements(
-                _capture_date, return_dtype=pl.Datetime("us", "UTC")
-            )
-        )
-        .drop(_BULKY_COLUMNS)
-        .collect()
-    )
+    """`load_downlinked_files`' rows that have a preview image."""
+    files = load_downlinked_files(data_dir)
+    if files.is_empty():
+        return files
+    return files.filter(pl.col("preview_media_type").is_not_null())
 
 
 def sort_gallery_images(

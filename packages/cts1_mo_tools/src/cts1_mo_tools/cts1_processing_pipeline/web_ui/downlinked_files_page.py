@@ -176,6 +176,8 @@ def _gallery_tile(row: dict[str, Any]) -> None:
         ).classes("w-full bg-grey-2").style(f"height: {GALLERY_THUMBNAIL_HEIGHT_PX}px")
         with ui.column().classes("p-2 gap-0 w-full"):
             ui.label(row["file_path"]).classes("text-sm font-medium break-all")
+            if timestamp := row["file_timestamp"]:
+                ui.label(f"{_when(timestamp)} UTC").classes("text-caption")
             with ui.row().classes("items-center gap-2"):
                 ui.badge(status, color=_STATUS_COLORS.get(status, "grey"))
                 ui.label(f"{row['received_fraction']:.0%}").classes(
@@ -189,6 +191,11 @@ _FILES_COLUMNS: tuple[dict[str, Any], ...] = (
     {"name": "_open", "label": "", "field": "_open"},
     {"name": "file_path", "label": "File", "field": "file_path", "align": "left"},
     {"name": "content_kind", "label": "Kind", "field": "content_kind", "align": "left"},
+    {
+        "name": "file_timestamp",
+        "label": "File Timestamp (UTC)",
+        "field": "file_timestamp",
+    },
     {"name": "status", "label": "Downlinked", "field": "status", "align": "left"},
     {
         "name": "received_fraction",
@@ -241,7 +248,9 @@ def _files_card(data_dir: Path, files: pl.DataFrame | None) -> None:
             "tied to its file by the downlink header before it or the "
             'beacons\' path hash. "Listing" compares a file with the latest complete '
             "listing of its directory that covers its name (a listing may be "
-            "just one page)."
+            'just one page). "File Timestamp" is when a camera image was '
+            "captured, an MPI recording started or an ADCS file was last "
+            "modified, by the satellite's clocks."
         ).classes("text-caption text-grey")
         if files is None:
             _loading()
@@ -258,6 +267,7 @@ def _files_card(data_dir: Path, files: pl.DataFrame | None) -> None:
                 if row["downlink_count"]
                 else None,
                 "content_kind": row["content_kind"] or "",
+                "file_timestamp": _when(row["file_timestamp"]),
                 "status": downlinked_files.status_text(row),
                 "received_fraction": row["received_fraction"],
                 "size": row["file_size"] or row["byte_length"],
@@ -366,6 +376,7 @@ def _summary_row(row: dict[str, Any]) -> None:
     expected = orjson.loads(row["expected_sha256s"] or "[]")
     facts = [
         ("Size", _size(row["byte_length"])),
+        ("File timestamp (UTC)", _when(row.get("file_timestamp")) or "unknown"),
         (
             "Received",
             f"{row['received_fraction']:.1%} "

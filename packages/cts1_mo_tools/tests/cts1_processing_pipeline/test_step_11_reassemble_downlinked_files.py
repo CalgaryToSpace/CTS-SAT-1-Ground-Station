@@ -413,3 +413,63 @@ def test_known_but_never_downlinked_file_gets_a_row_without_bytes() -> None:
     assert never["file_size"] == len(unsent)
     assert never["reported_sha256"] == hashlib.sha256(unsent).hexdigest()
     assert never["file_path"] == "b.bin"
+
+
+def test_file_timestamp_is_from_the_file_or_the_adcs_header() -> None:
+    meta = b'START_CAM:{"blob":"camera_capture_v2","epoch_ms":1795330803433}\n'
+    data = meta + _content("image", 300)
+    adcs = (
+        '{"action":"adcs_get_latest_sd_file_blob_v2","file":"ADCS/log_1.TLM",'
+        '"file_size":10,"datetime":"2026-11-21 22:27:36"}'
+    )
+    # A later response without the date doesn't lose it.
+    adcs_v1 = (
+        '{"action":"adcs_get_latest_sd_file_blob","file":"ADCS/log_1.TLM",'
+        '"file_size":10}'
+    )
+    other = '{"action":"analyze_x","file":"b","datetime":"2026-11-21 22:27:36"}'
+    _, _, downlinked = _run(
+        _chunks(data, 5),
+        _responses(
+            (-900, adcs), (-800, adcs_v1), (-700, other), (0, _header("c/x.img", data))
+        ),
+    )
+
+    assert _file(downlinked, "c/x.img")["file_timestamp"] == datetime(
+        2026, 11, 22, 7, 0, 3, 433000, tzinfo=UTC
+    )
+    # Never downlinked, but the header alone dates it.
+    assert _file(downlinked, "ADCS/log_1.TLM")["file_timestamp"] == datetime(
+        2026, 11, 21, 22, 27, 36, tzinfo=UTC
+    )
+    assert _file(downlinked, "b")["file_timestamp"] is None
+
+
+def test_mpi_file_timestamp_is_from_its_header_or_the_analysis() -> None:
+    header = b'{"mpi_start":1,"timestamp_ms":1794645210166}'
+    with_header = header + _content("with header", 300)
+    headerless = _content("first packet lost", 600)
+
+    def analysis(path: str) -> str:
+        return (
+            f'{{"action":"analyze_mpi_data_v2","file":"{path}","size":600,'
+            '"earliest":{"timestamp_ms":1793988090847},'
+            '"latest":{"timestamp_ms":1793988190847}}'
+        )
+
+    _, _, downlinked = _run(
+        _chunks(with_header, 5) + _chunks(headerless, 905, offsets=[195, 390]),
+        _responses(
+            (-900, analysis("m/never.mpi")),
+            (-800, analysis("m/headerless.mpi")),
+            (0, _header("m/header_only.mpi", with_header)),
+            (900, _header("m/headerless.mpi", headerless)),
+        ),
+    )
+
+    analyzed = datetime(2026, 11, 6, 18, 1, 30, 847000, tzinfo=UTC)
+    assert _file(downlinked, "m/header_only.mpi")["file_timestamp"] == datetime(
+        2026, 11, 14, 8, 33, 30, 166000, tzinfo=UTC
+    )
+    assert _file(downlinked, "m/headerless.mpi")["file_timestamp"] == analyzed
+    assert _file(downlinked, "m/never.mpi")["file_timestamp"] == analyzed

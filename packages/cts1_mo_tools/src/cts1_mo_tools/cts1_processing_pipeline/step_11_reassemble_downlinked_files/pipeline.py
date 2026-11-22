@@ -75,6 +75,8 @@ named file -- a prefix matching no known path, or unattributed and not
 rescued -- are left out of both outputs. Every file step 10 knows of but that
 was never downlinked gets a row too (no bytes), and every row carries
 step 10's listing and mention columns -- so it's the one list of files.
+A file's `file_timestamp` is the capture time in its own bytes, else the one
+step 10 has from the satellite's responses (see `file_timestamps`).
 
 Only CRC-valid packets are used. Reads steps 3, 5 (via 10) and 10's
 outputs; parquet-in-parquet-out, recomputed from scratch on every run.
@@ -125,6 +127,7 @@ from cts1_mo_tools.cts1_processing_pipeline.file_reassembly import (
     detect_image,
     reassemble_bulk_chunks,
 )
+from cts1_mo_tools.cts1_processing_pipeline.file_timestamps import parse_capture_time
 from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
     pipeline as step_3_pipeline,
 )
@@ -220,6 +223,9 @@ _FILES_SCHEMA = {
     "file_path": pl.String,
     "path_sha256_prefix": pl.String,
     "file_size": pl.Int64,  # as last reported by the satellite, if ever
+    # A camera image's capture time, an MPI recording's start, or an ADCS
+    # file's last-modified time.
+    "file_timestamp": pl.Datetime("us", "UTC"),
     "byte_length": pl.Int64,  # of `data`
     "good_bytes": pl.Int64,
     "missing_bytes": pl.Int64,
@@ -1047,12 +1053,16 @@ def _reassemble_one(
     reassembled = hashlib.sha256(data).hexdigest()
 
     image = _detect_preview(file_key, data)
+    file_path = cast("str | None", all_chunks["file_path"].drop_nulls().first())
 
     return {
         "file_key": file_key,
-        "file_path": all_chunks["file_path"].drop_nulls().first(),
+        "file_path": file_path,
         "path_sha256_prefix": all_chunks["path_sha256_prefix"].drop_nulls().first(),
         "file_size": file_size,
+        "file_timestamp": parse_capture_time(
+            file_path, data, image.data if image else None
+        ),
         "byte_length": len(data),
         "good_bytes": good,
         "missing_bytes": missing,
@@ -1118,6 +1128,7 @@ def reassemble_downlinked_files(
         "file_path",
         *(pl.col(src).alias(dst) for src, dst in _SATELLITE_FILE_COLUMNS.items()),
         _file_size=pl.col("file_size"),
+        _file_timestamp=pl.col("file_timestamp"),
         _prefix=pl.col("path_sha256_prefix"),
         _sha256s=pl.col("sha256s_seen"),
     )
@@ -1127,6 +1138,7 @@ def reassemble_downlinked_files(
         .with_columns(
             file_key=pl.coalesce("file_key", "file_path"),
             file_size=pl.coalesce("file_size", "_file_size"),
+            file_timestamp=pl.coalesce("file_timestamp", "_file_timestamp"),
             path_sha256_prefix=pl.coalesce("path_sha256_prefix", "_prefix"),
             expected_sha256s=pl.when(never)
             .then(pl.col("_sha256s").fill_null("[]"))
