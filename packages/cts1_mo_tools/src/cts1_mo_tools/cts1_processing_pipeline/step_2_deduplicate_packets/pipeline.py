@@ -19,13 +19,17 @@ Trust model:
     `BASELINE_DECODERS`) are the most trustworthy decoders in both content
     and timing (each reports a within-file offset resolved against the
     observation's own start time). Their packets form the baseline: two
-    baseline-decoder decodes of the same content are merged if received
-    within `BASELINE_DEDUPE_TOLERANCE` of each other -- multiple SatNOGS
-    ground stations time-synced to within about a minute of real time
-    commonly all catch the same overpass. When a merged baseline cluster
-    has an `askew_demod_from_file` decode, its timestamp wins as the
-    cluster's `received_at`; otherwise the earliest `sso_rx_replay` decode
-    is used.
+    baseline-decoder decodes of the same content are merged if their
+    recordings put them within `TRANSMIT_DEDUPE_TOLERANCE` of each other by
+    the satellite's clock (see `transmitted_at_sat_clock` below) -- several
+    SatNOGS ground stations commonly catch the same overpass, their clocks
+    often tens of seconds apart, and the same content is often sent again
+    seconds later (a file downlinked twice). A decode from a recording with
+    no clock anchors joins the same content's nearest packet received within
+    `BASELINE_DEDUPE_TOLERANCE`, else others like it within that. When a
+    merged baseline cluster has an `askew_demod_from_file` decode, its
+    timestamp wins as the cluster's `received_at`; otherwise the earliest
+    `sso_rx_replay` decode is used.
   - Every other decoder is treated as far less trustworthy on timing (some,
     like gr_satellites_pdu, can't localize a frame within its observation at
     all and just report the observation's end time). A same-content packet
@@ -114,6 +118,15 @@ CTS1_CSP_HEADER_HEX = "c2a28a00"
 # Multiple ground stations recording the same overpass are all assumed
 # time-synced to within about a minute of real time.
 BASELINE_DEDUPE_TOLERANCE = timedelta(minutes=1)
+
+# Two baseline decodes of the same content are one transmission if their
+# recordings put it within this of each other by the satellite's clock
+# (`sat_clock`). Across ground stations, one transmission's estimates agree
+# to within 2 s 99% of the time (by `received_at`, only to within 133 s),
+# while a repeat of the same content -- a file downlinked again, the same
+# JPEG header in two images -- is sent 20 s or more later. Decodes from a
+# recording with no estimate fall back to `BASELINE_DEDUPE_TOLERANCE`.
+TRANSMIT_DEDUPE_TOLERANCE = timedelta(seconds=10)
 
 # Everything else gets a much wider berth, since e.g. gr_satellites_pdu
 # reports the observation's end time for every single frame.
@@ -241,10 +254,10 @@ def _prepare_rows(packets: pl.LazyFrame, observations: pl.LazyFrame) -> pl.LazyF
 
 
 def _cluster_by_content_and_time(
-    df: pl.LazyFrame, *, tolerance: timedelta
+    df: pl.LazyFrame, *, tolerance: timedelta, time: str = "received_at"
 ) -> pl.LazyFrame:
     """Assign `_cluster`: rows with the same `_content_id` chained together
-    by consecutive `received_at` gaps no larger than `tolerance`
+    by consecutive `time` gaps no larger than `tolerance`
     (gap-and-island / "sessionization"). Cluster ids are unique across all
     content, not just within one content.
 
@@ -255,21 +268,60 @@ def _cluster_by_content_and_time(
     """
     starts_new_cluster = (
         (pl.col("_content_id") != pl.col("_content_id").shift(1))
-        | ((pl.col("received_at") - pl.col("received_at").shift(1)) > tolerance)
+        | ((pl.col(time) - pl.col(time).shift(1)) > tolerance)
     ).fill_null(value=True)  # the very first row
-    return df.sort(["_content_id", "received_at"]).with_columns(
-        _cluster=starts_new_cluster.cum_sum()
+    return df.sort(["_content_id", time]).with_columns(
+        _cluster=starts_new_cluster.cum_sum().cast(pl.Int64)
     )
 
 
-def _assign_clusters(rows: pl.LazyFrame) -> pl.LazyFrame:
+def _cluster_baseline(baseline: pl.LazyFrame, estimates: pl.LazyFrame) -> pl.LazyFrame:
+    """`_cluster` for each baseline decode in `baseline` -- see
+    `TRANSMIT_DEDUPE_TOLERANCE`. `estimates` is `sat_clock`'s.
+    """
+    with_times = baseline.join(
+        estimates.select("_row_id", "_transmitted_at"), on="_row_id", how="left"
+    )
+    timed = _cluster_by_content_and_time(
+        with_times.filter(pl.col("_transmitted_at").is_not_null()),
+        tolerance=TRANSMIT_DEDUPE_TOLERANCE,
+        time="_transmitted_at",
+    )
+    untimed = with_times.filter(pl.col("_transmitted_at").is_null())
+    # One with no estimate joins the same content's nearest cluster by
+    # `received_at`, as before -- else it's clustered by that among its own.
+    received = timed.group_by("_cluster").agg(
+        pl.col("_content_id").first(), _received=pl.col("received_at").median()
+    )
+    distance = (pl.col("received_at") - pl.col("_received")).abs()
+    joined = (
+        untimed.join(received, on="_content_id", how="inner")
+        .filter(distance <= BASELINE_DEDUPE_TOLERANCE)
+        .group_by("_row_id")
+        .agg(pl.col("_cluster").sort_by(distance, "_cluster").first())
+    )
+    alone = _cluster_by_content_and_time(
+        untimed.join(joined, on="_row_id", how="anti"),
+        tolerance=BASELINE_DEDUPE_TOLERANCE,
+    ).with_columns(_cluster=-pl.col("_cluster"))  # apart from `timed`'s ids
+    return pl.concat(
+        [
+            timed.select("_row_id", "_cluster"),
+            joined.select("_row_id", "_cluster"),
+            alone.select("_row_id", "_cluster"),
+        ]
+    ).join(baseline, on="_row_id")
+
+
+def _assign_clusters(rows: pl.LazyFrame, estimates: pl.LazyFrame) -> pl.LazyFrame:
     """Decide which distinct packet each decode belongs to.
 
     Returns one `(_row_id, _cluster, _is_leftover)` row per input row:
     `(_cluster, _is_leftover)` is the distinct packet's key.
 
-      - Baseline-decoder rows are clustered by content+time with
-        `BASELINE_DEDUPE_TOLERANCE`.
+      - Baseline-decoder rows are clustered by content and when they were
+        transmitted by the satellite's clock (`estimates`, from `sat_clock`),
+        with `TRANSMIT_DEDUPE_TOLERANCE` -- see `_cluster_baseline`.
       - Every other row is matched to its nearest same-content baseline
         cluster: either its `received_at` falls within
         `OTHER_DECODER_TOLERANCE` of the cluster's observation-window span,
@@ -285,9 +337,7 @@ def _assign_clusters(rows: pl.LazyFrame) -> pl.LazyFrame:
     keys = ["_row_id", "_content_id", "received_at", "obs_start", "obs_end"]
     is_baseline = pl.col("_trust_rank").is_not_null()
 
-    baseline = _cluster_by_content_and_time(
-        rows.filter(is_baseline).select(keys), tolerance=BASELINE_DEDUPE_TOLERANCE
-    )
+    baseline = _cluster_baseline(rows.filter(is_baseline).select(keys), estimates)
     others = rows.filter(~is_baseline).select(keys)
 
     cluster_spans = baseline.group_by("_cluster").agg(
@@ -534,11 +584,10 @@ def compute_distinct_packets(
         .lazy()
     )
     # Materialized too, as both aggregations below need it.
-    clusters = _assign_clusters(rows).collect(engine="streaming").lazy()
+    estimates = sat_clock.estimate_transmit_times(rows).collect().lazy()
+    clusters = _assign_clusters(rows, estimates).collect(engine="streaming").lazy()
     clustered_rows = rows.join(clusters, on="_row_id", how="inner")
-    transmit_times = _median_transmit_times(
-        sat_clock.estimate_transmit_times(rows), clusters
-    )
+    transmit_times = _median_transmit_times(estimates, clusters)
     packets_out = _aggregate_clusters(clustered_rows).join(
         transmit_times, on=["_is_leftover", "_cluster"], how="left"
     )

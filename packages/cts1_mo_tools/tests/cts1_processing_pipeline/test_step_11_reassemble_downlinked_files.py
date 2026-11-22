@@ -202,14 +202,61 @@ def test_next_beacon_attributes_a_downlink_that_started_between_beacons() -> Non
     assert set(attributed["file_path"]) == {"b.run"}
 
 
-def test_null_beacon_after_header_ends_its_context() -> None:
+def test_beacon_naming_another_file_ends_a_headers_context() -> None:
     data = _content("a", 1000)
     attributed, _, _ = _run(
         _chunks(data, 30, offsets=[0]),
         _responses((0, _header("c/a", data))),
-        _beacons((10, None)),
+        _beacons((10, path_sha256_prefix("c/other"))),
     )
     assert attributed["attribution"].to_list() == [Attribution.UNATTRIBUTED]
+
+
+def _sent(rows: list[dict[str, Any]], received_late_by: float) -> list[dict[str, Any]]:
+    """`rows` as sent when they say, but received `received_late_by` s later."""
+    return [
+        row
+        | {
+            "sent_at": row["received_at"],
+            "received_at": row["received_at"] + timedelta(seconds=received_late_by),
+        }
+        for row in rows
+    ]
+
+
+def test_chunks_are_placed_by_when_the_satellite_sent_them() -> None:
+    a, b = _content("a", 3900), _content("b", 3900)
+    # c/a's chunks came from a recording whose times are 30 s late: by
+    # `received_at`, they'd all be after c/b's header.
+    attributed, _, downlinked = _run(
+        _sent(_chunks(a, 1), received_late_by=30) + _sent(_chunks(b, 21), 0),
+        _responses((0.5, _header("c/a", a)), (20.5, _header("c/b", b))),
+    )
+    assert set(attributed["attribution"]) == {Attribution.HEADER}
+    assert _file(downlinked, "c/a")["sha256_verified"] is True
+    assert _file(downlinked, "c/b")["sha256_verified"] is True
+
+
+def test_previous_downlinks_tail_after_a_new_header_stays_with_it() -> None:
+    a, b = _content("a", 50_000), _content("b", 50_000)
+    # c/a's chunk at 23,400 is due 30 s in -- just after c/b's header.
+    attributed, _, _ = _run(
+        _chunks(a, 1, offsets=[0, 195]) + _chunks(a, 30.5, offsets=[23_400]),
+        _responses((0.5, _header("c/a", a)), (30, _header("c/b", b))),
+    )
+    assert set(attributed["file_path"]) == {"c/a"}
+    assert set(attributed["attribution"]) == {Attribution.HEADER}
+
+
+def test_restarting_without_a_header_is_a_new_downlink() -> None:
+    data = _content("a", 2000)
+    # Sent again 30 s later, by a telecommand whose header was never heard.
+    _, downlinks, downlinked = _run(
+        _chunks(data, 1) + _chunks(data, 31),
+        _responses((0.5, _header("c/a", data))),
+    )
+    assert downlinks.height == 2
+    assert _file(downlinked, "c/a")["sha256_verified"] is True
 
 
 def test_unnamed_chunks_are_grouped_but_left_out_of_the_outputs() -> None:
