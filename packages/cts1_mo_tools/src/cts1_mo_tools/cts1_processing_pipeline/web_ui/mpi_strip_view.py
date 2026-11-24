@@ -37,7 +37,6 @@ import contextlib
 import html
 import math
 from dataclasses import dataclass
-from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
@@ -56,12 +55,14 @@ from cts1_mo_tools.cts1_processing_pipeline.step_9_clean_mpi_frames import (
 )
 
 from . import data as beacon_data
+from . import mpi_collection_fields as fields
 from . import mpi_collections, mpi_strip
 from .layout import page_shell
 from .preview_image_route import preview_image_url
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+    from datetime import datetime
     from pathlib import Path
 
     from nicegui.events import GenericEventArguments
@@ -506,35 +507,53 @@ def _adcs_labels(adcs: pl.DataFrame) -> None:
                     )
 
 
-def _metadata_value(value: Any) -> str:
-    if isinstance(value, datetime):
-        return f"{value:%Y-%m-%d %H:%M:%S.%f}"[:-3] + " UTC"
-    if isinstance(value, float):
-        return f"{value:,.6g}"
-    if isinstance(value, int) and not isinstance(value, bool):
-        return f"{value:,}"
-    return str(value)
+def _metadata_group(label: str, items: list[tuple[str, Any]]) -> None:
+    """One group of the metadata panel, laid out like the MPI Data table's:
+    its label as a header over its fields' labels and values.
+    """
+    with ui.element("div").classes("w-full border rounded"):
+        ui.label(label).classes("text-sm font-bold text-center w-full border-b py-1")
+        with (
+            ui.element("div")
+            .classes("grid gap-x-6 gap-y-0 text-xs w-full p-2")
+            .style("grid-template-columns: repeat(auto-fill, minmax(24rem, 1fr))")
+        ):
+            for item_label, value in items:
+                with ui.row().classes("no-wrap gap-2 min-w-0"):
+                    ui.label(item_label).classes("text-grey flex-none")
+                    ui.label(str(value)).classes("font-mono break-all")
 
 
 def _recording_metadata(row: dict[str, Any]) -> None:
     """Every field `mpi_collections.parquet` has on the recording, bar the
-    empty ones, as a two-column grid.
+    empty ones, grouped and labelled as on the MPI Data page (see
+    `mpi_collection_fields`) -- with each group's details there too, and any
+    field no group shows at the end.
     """
-    fields = {k: v for k, v in row.items() if v is not None}
-    with (
-        ui.expansion(
-            f"Recording Metadata ({len(fields)} fields)", icon="list", value=False
+    cells = fields.collection_cells(row)
+    groups = [
+        (
+            group.label,
+            [
+                (column.label, cells[column.field])
+                for column in (*group.columns, *group.details)
+                if cells[column.field] != ""
+            ],
         )
+        for group in fields.COLUMN_GROUPS
+    ]
+    other = fields.other_fields(row)
+    groups.append(("Other", [(k, fields.cell_text(k, v)) for k, v in other.items()]))
+    count = sum(len(items) for _, items in groups)
+    with (
+        ui.expansion(f"Recording Metadata ({count} fields)", icon="list", value=False)
         .props("dense")
         .classes("w-full border rounded"),
-        ui.element("div")
-        .classes("grid gap-x-6 gap-y-0 font-mono text-xs w-full p-2")
-        .style("grid-template-columns: repeat(auto-fill, minmax(28rem, 1fr))"),
+        ui.column().classes("w-full gap-2 p-2"),
     ):
-        for key, value in fields.items():
-            with ui.row().classes("no-wrap gap-2 min-w-0"):
-                ui.label(key).classes("text-grey flex-none")
-                ui.label(_metadata_value(value)).classes("break-all")
+        for label, items in groups:
+            if items:
+                _metadata_group(label, items)
 
 
 def _strip_body(  # noqa: PLR0913
