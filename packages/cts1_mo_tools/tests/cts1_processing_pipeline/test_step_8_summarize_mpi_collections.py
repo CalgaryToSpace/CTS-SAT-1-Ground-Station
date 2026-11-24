@@ -7,6 +7,9 @@ from cts1_mo_tools.cts1_processing_pipeline.step_6_extract_mpi_frames.pipeline i
     assign_mpi_collections,
     compute_mpi_frames,
 )
+from cts1_mo_tools.cts1_processing_pipeline.step_8_summarize_mpi_collections.beacons import (  # noqa: E501
+    BEACON_SUMMARY_SCHEMA,
+)
 from cts1_mo_tools.cts1_processing_pipeline.step_8_summarize_mpi_collections.pipeline import (  # noqa: E501
     count_downlinked_strong_signal_frames,
     extract_all_mpi_analyses,
@@ -110,6 +113,8 @@ def test_collection_summary_counts_frames_and_largest_gap() -> None:
         "frame_collection_count": 1,
         **dict.fromkeys(orbit_columns),
         **dict.fromkeys(analysis_columns),
+        # No beacons given, so not summarized from them.
+        **dict.fromkeys(BEACON_SUMMARY_SCHEMA),
     }
     assert second["frames_missing"] == 0
     assert second["largest_gap_frames"] == 0
