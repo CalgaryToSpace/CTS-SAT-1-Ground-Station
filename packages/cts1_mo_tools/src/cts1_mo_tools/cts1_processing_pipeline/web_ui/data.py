@@ -25,6 +25,7 @@ __all__ = [
     "BEACON_TIME_COLUMN",
     "DEFAULT_PARQUET_PATH",
     "DEFAULT_REASSEMBLED_TCMD_PATH",
+    "MAGNETIC_FIELD_COLUMNS",
     "adcs_channel_states",
     "adcs_error_states",
     "beacon_receive_delay_medians",
@@ -32,6 +33,7 @@ __all__ = [
     "latest_beacons",
     "latest_friendly_message",
     "latest_local_max_pending_tcmd_count",
+    "load_adcs_between",
     "load_attitude_window",
     "load_beacon_window",
     "load_bulk_file_downlink_packets",
@@ -84,6 +86,12 @@ ATTITUDE_COLUMNS = (
     "adcs_estimated_rate_x_deg_per_sec",
     "adcs_estimated_rate_y_deg_per_sec",
     "adcs_estimated_rate_z_deg_per_sec",
+)
+# The ADCS magnetometer reading, in the body frame -- also extended beacons only.
+MAGNETIC_FIELD_COLUMNS = (
+    "adcs_magnetic_field_x_uT",
+    "adcs_magnetic_field_y_uT",
+    "adcs_magnetic_field_z_uT",
 )
 # Carried alongside each attitude frame, but not what makes a row a frame.
 ATTITUDE_MODE_COLUMNS = ("adcs_attitude_estimation_mode", "adcs_control_mode")
@@ -312,6 +320,25 @@ def load_attitude_window(
         .select(BEACON_TIME_COLUMN, *ATTITUDE_COLUMNS, *ATTITUDE_MODE_COLUMNS)
         .collect()
     )
+
+
+def load_adcs_between(path: Path, start: datetime, end: datetime) -> pl.DataFrame:
+    """`BEACON_TIME_COLUMN` + `ATTITUDE_COLUMNS` + `MAGNETIC_FIELD_COLUMNS` for
+    every extended beacon timestamped in [`start`, `end`] that carries any of
+    them, oldest first and one per onboard time.
+    """
+    columns = (*ATTITUDE_COLUMNS, *MAGNETIC_FIELD_COLUMNS)
+    lf = _scan_beacons(path, packet_types=BEACON_EXTENDED_PACKET_TYPES, since=start)
+    if lf is None:
+        return pl.DataFrame(
+            schema={BEACON_TIME_COLUMN: _BEACON_TIME_DTYPE}
+            | dict.fromkeys(columns, pl.Float64)
+        )
+    lf = lf.filter(
+        (pl.col("unix_epoch_time_ms") <= int(end.timestamp() * 1000))
+        & pl.any_horizontal(pl.col(c).is_not_null() for c in columns)
+    )
+    return _dedupe_by_beacon_time(lf).select(BEACON_TIME_COLUMN, *columns).collect()
 
 
 def _filter_to_ranges(

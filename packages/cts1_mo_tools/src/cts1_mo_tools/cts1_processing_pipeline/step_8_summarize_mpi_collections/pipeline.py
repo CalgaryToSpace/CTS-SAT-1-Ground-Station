@@ -153,6 +153,9 @@ _ANALYSES_SCHEMA = {
     "analysis_strong_frame_count": pl.Int64,
     "analysis_strong_signal_count": pl.Int64,
     "analysis_strong_signals": pl.String,  # JSON array, as sent
+    # From the end-of-recording `footer` (v2+); null if the file has none.
+    "analysis_uart_lost_bytes": pl.Int64,
+    "analysis_reason_for_stopping": pl.String,
     "analysis_action": pl.String,
     # The `v<N>` at the end of `analysis_action`, if any.
     "analysis_version": pl.Int64,
@@ -268,6 +271,9 @@ def _analysis_row(
     file = properties.get("file")
     sha256 = properties.get("sha256")
     strong_signals = properties.get("strong_signals")
+    footer = properties.get("footer")
+    footer = cast("dict[str, Any]", footer) if isinstance(footer, dict) else {}
+    reason_for_stopping = footer.get("reason_for_stopping")
     return {
         "analysis_started_at": started_at,
         "analysis_ended_at": ended_at,
@@ -296,6 +302,10 @@ def _analysis_row(
             orjson.dumps(strong_signals).decode()
             if isinstance(strong_signals, list)
             else None
+        ),
+        "analysis_uart_lost_bytes": _int_field(footer.get("uart_lost_bytes")),
+        "analysis_reason_for_stopping": (
+            reason_for_stopping if isinstance(reason_for_stopping, str) else None
         ),
         "analysis_action": properties["action"],
         "analysis_version": (

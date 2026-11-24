@@ -171,3 +171,25 @@ def test_max_width_averages_columns_and_maps_back() -> None:
     column = strip.column_at(3.5)
     assert column is not None
     assert (column.kind, column.frame_counter) == ("missing", 10)
+
+
+def test_column_positions_line_up_with_frames_across_gaps() -> None:
+    # Counters 0, 1, 4 (2 and 3 missing), then a second collection: columns
+    # 0, 1, [2, 3 missing], 4, [separators], then its frames.
+    frames = pl.concat([_frames([0, 1, 4]), _frames([0, 1], started_at=_T1)])
+    columns = mpi_strip.prepare_frames(frames).columns  # pyright: ignore[reportOptionalMemberAccess]
+    times = frames["collected_at"].to_list()
+    second_start = next(i for i, c in enumerate(columns) if c.frame_index == 3)
+    positions = mpi_strip.column_positions(
+        columns,
+        times,
+        [
+            _T0,  # The first frame: its column's centre.
+            _T0 + timedelta(milliseconds=31 * 2.5),  # Between frames 1 and 4.
+            _T1,  # The second collection's first frame.
+            _T0 - timedelta(seconds=1),  # Before the first frame.
+            _T1 + timedelta(hours=1),  # After the last.
+        ],
+    )
+    np.testing.assert_allclose(positions[:3], [0.5, 3.0, second_start + 0.5], atol=1e-3)
+    assert np.isnan(positions[3:]).all()

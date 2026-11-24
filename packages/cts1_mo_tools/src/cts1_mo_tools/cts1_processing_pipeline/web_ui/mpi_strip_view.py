@@ -1,7 +1,10 @@
 """The "MPI Vis" page: a list of every MPI collection on the left, and
 the selected one's frames as a long strip -- see `mpi_strip` for the image
 itself -- with a readout of whatever frame, pixel and housekeeping value is
-under the mouse.
+under the mouse. Above it, every field of the collection's
+`mpi_collections.parquet` row; under it, the extended beacons' attitude
+estimate and magnetic field over the recording, placed by time on the
+strip's columns so they line up with it at any zoom.
 
 The selected collection is kept in the page's URL (`?collection=<start
 time>`, see `collection_key`), so a link to it opens it directly, and the
@@ -34,12 +37,17 @@ import contextlib
 import html
 import math
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 
 import orjson
+import polars as pl
 from nicegui import run, ui
 
+from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
+    pipeline as step_3_pipeline,
+)
 from cts1_mo_tools.cts1_processing_pipeline.step_9_clean_mpi_frames import (
     cleaning as step_9_cleaning,
 )
@@ -47,16 +55,15 @@ from cts1_mo_tools.cts1_processing_pipeline.step_9_clean_mpi_frames import (
     night_reference as step_9_night_reference,
 )
 
+from . import data as beacon_data
 from . import mpi_collections, mpi_strip
 from .layout import page_shell
 from .preview_image_route import preview_image_url
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
-    from datetime import datetime
     from pathlib import Path
 
-    import polars as pl
     from nicegui.events import GenericEventArguments
 
 # Image pixels across per frame -- or "fit": the whole strip scaled to the
@@ -389,15 +396,158 @@ def _strip_canvas(
     return canvas
 
 
+# The ADCS chart under the strip: one panel per vector, each (title,
+# ((column, series name), ...)), x/y/z in red/green/blue.
+_ADCS_PANELS = (
+    (
+        "Attitude estimate (°)",
+        (
+            ("adcs_estimated_roll_angle_deg", "Roll"),
+            ("adcs_estimated_pitch_angle_deg", "Pitch"),
+            ("adcs_estimated_yaw_angle_deg", "Yaw"),
+        ),
+    ),
+    (
+        "Magnetic field, body (µT)",
+        tuple(
+            (column, f"B{axis}")
+            for column, axis in zip(
+                beacon_data.MAGNETIC_FIELD_COLUMNS, "xyz", strict=True
+            )
+        ),
+    ),
+)
+_ADCS_COLORS = ("#ef4444", "#22c55e", "#3b82f6")
+_ADCS_PANEL_HEIGHT = 120  # px
+_ADCS_PANEL_GAP = 12  # px
+_ADCS_CHART_HEIGHT = len(_ADCS_PANELS) * (_ADCS_PANEL_HEIGHT + _ADCS_PANEL_GAP)
+# The axis tooltip: the beacon's time (each point's third value), then values.
+_ADCS_TOOLTIP_JS = (
+    "ps => ps.length ? ps[0].value[2] + ' UTC<br>' + ps.map(p => p.marker + "
+    "p.seriesName + ': ' + p.value[1].toFixed(2)).join('<br>') : ''"
+)
+# Its column (see `mpi_strip.column_positions`) in `_LoadedCollection.adcs`.
+_ADCS_X = "_strip_x"
+
+
+def _adcs_chart_option(adcs: pl.DataFrame, extent: float) -> dict[str, Any]:
+    """`adcs` (see `_LoadedCollection.adcs`) as stacked panels whose x axis
+    runs 0..`extent` strip columns, edge to edge, so they line up with it.
+    """
+    grids, x_axes, y_axes, series = [], [], [], []
+    for i, (_, columns) in enumerate(_ADCS_PANELS):
+        top = i * (_ADCS_PANEL_HEIGHT + _ADCS_PANEL_GAP)
+        grids.append({"left": 0, "right": 0, "top": top, "height": _ADCS_PANEL_HEIGHT})
+        x_axes.append(
+            {
+                "type": "value",
+                "gridIndex": i,
+                "min": 0,
+                "max": extent,
+                "axisLine": {"show": False},
+                "axisTick": {"show": False},
+                "axisLabel": {"show": False},
+                "splitLine": {"show": False},
+            }
+        )
+        y_axes.append(
+            {
+                "type": "value",
+                "gridIndex": i,
+                "scale": True,
+                "axisLabel": {"inside": True, "fontSize": 10},
+                "splitLine": {"lineStyle": {"opacity": 0.3}},
+            }
+        )
+        for (column, name), color in zip(columns, _ADCS_COLORS, strict=True):
+            points = adcs.filter(pl.col(column).is_not_null())
+            series.append(
+                {
+                    "name": name,
+                    "type": "line",
+                    "xAxisIndex": i,
+                    "yAxisIndex": i,
+                    "color": color,
+                    "symbolSize": 5,
+                    "data": [
+                        [x, value, _time_text(t)]
+                        for x, value, t in points.select(
+                            _ADCS_X, column, beacon_data.BEACON_TIME_COLUMN
+                        ).iter_rows()
+                    ],
+                }
+            )
+    return {
+        "animation": False,
+        "grid": grids,
+        "xAxis": x_axes,
+        "yAxis": y_axes,
+        "series": series,
+        "tooltip": {"trigger": "axis", ":formatter": _ADCS_TOOLTIP_JS},
+        "axisPointer": {"link": [{"xAxisIndex": "all"}]},
+    }
+
+
+def _adcs_labels(adcs: pl.DataFrame) -> None:
+    """The ADCS panels' titles and series colours, beside them."""
+    with (
+        ui.element("div")
+        .classes("relative w-full")
+        .style(f"height: {_ADCS_CHART_HEIGHT}px")
+    ):
+        for i, (title, columns) in enumerate(_ADCS_PANELS):
+            top = i * (_ADCS_PANEL_HEIGHT + _ADCS_PANEL_GAP)
+            with ui.column().classes("absolute gap-0").style(f"top: {top}px"):
+                ui.label(title).classes("text-xs font-bold")
+                for (column, name), color in zip(columns, _ADCS_COLORS, strict=True):
+                    count = adcs[column].count()
+                    ui.label(f"{name}: {count:,} beacon(s)").classes("text-xs").style(
+                        f"color: {color}"
+                    )
+
+
+def _metadata_value(value: Any) -> str:
+    if isinstance(value, datetime):
+        return f"{value:%Y-%m-%d %H:%M:%S.%f}"[:-3] + " UTC"
+    if isinstance(value, float):
+        return f"{value:,.6g}"
+    if isinstance(value, int) and not isinstance(value, bool):
+        return f"{value:,}"
+    return str(value)
+
+
+def _recording_metadata(row: dict[str, Any]) -> None:
+    """Every field `mpi_collections.parquet` has on the recording, bar the
+    empty ones, as a two-column grid.
+    """
+    fields = {k: v for k, v in row.items() if v is not None}
+    with (
+        ui.expansion(
+            f"Recording Metadata ({len(fields)} fields)", icon="list", value=False
+        )
+        .props("dense")
+        .classes("w-full border rounded"),
+        ui.element("div")
+        .classes("grid gap-x-6 gap-y-0 font-mono text-xs w-full p-2")
+        .style("grid-template-columns: repeat(auto-fill, minmax(28rem, 1fr))"),
+    ):
+        for key, value in fields.items():
+            with ui.row().classes("no-wrap gap-2 min-w-0"):
+                ui.label(key).classes("text-grey flex-none")
+                ui.label(_metadata_value(value)).classes("break-all")
+
+
 def _strip_body(  # noqa: PLR0913
     strip: mpi_strip.MpiStrip,
     frames: list[dict[str, Any]],
     mode: mpi_strip.IntensityMode,
     filename: str,
     zoom: int | None,
+    adcs: pl.DataFrame,
     on_download: Callable[[], Awaitable[None]],
 ) -> ui.element:
-    """Build the strip, its legends and readout, at `zoom` screen pixels per
+    """Build the strip, its legends and readout, and the ADCS chart under
+    it, at `zoom` screen pixels per
     column -- the image stretched to that, pixelated -- or fit to the
     width (None); returns the strip's horizontally-scrolling container.
     """
@@ -420,7 +570,15 @@ def _strip_body(  # noqa: PLR0913
         )
 
     with ui.row().classes("w-full no-wrap gap-2 items-start"):
-        _labels_column(strip)
+        with (
+            ui.column()
+            .classes("flex-none gap-0")
+            .style(f"width: {_LABEL_COLUMN_WIDTH}")
+        ):
+            _labels_column(strip)
+            ui.element("div").style("height: 1.25rem")  # Beside the time axis.
+            if not adcs.is_empty():
+                _adcs_labels(adcs)
         with (
             ui.element("div")
             .classes(
@@ -430,6 +588,18 @@ def _strip_body(  # noqa: PLR0913
         ):
             canvas = _strip_canvas(strip, filename, zoom)
             _time_axis(strip, frames, zoom)
+            if not adcs.is_empty():
+                # In strip columns, as shown: a shrunk (fit-width) strip's
+                # last image pixel may average past the last column.
+                extent = strip.width * strip.bin_columns / strip.zoom
+                width = "100%" if fit else f"{len(strip.columns) * zoom}px"
+                ui.echart(_adcs_chart_option(adcs, extent)).style(
+                    f"width: {width}; height: {_ADCS_CHART_HEIGHT}px"
+                )
+    if adcs.is_empty():
+        ui.label(
+            "No ADCS attitude or magnetic field beacons during this recording."
+        ).classes("text-caption text-grey")
 
     # Tall enough for a full readout (frame, time, pixel, every band, timing),
     # so the page's height -- and so its vertical scroll -- doesn't change
@@ -744,6 +914,9 @@ class _LoadedCollection:
     # Each frame's fields bar its pixels, for the readout and time axis.
     frame_rows: list[dict[str, Any]]
     summary: str
+    # The extended beacons' attitude estimate and magnetic field over the
+    # frames' times, each with its place along the strip (`_ADCS_X`).
+    adcs: pl.DataFrame
 
 
 def _load_collection(
@@ -756,10 +929,27 @@ def _load_collection(
     prepared = mpi_strip.prepare_frames(frames)
     if prepared is None:
         return None
+    frame_times = frames["collected_at"]
+    adcs = beacon_data.load_adcs_between(
+        data_dir / step_3_pipeline.OUTPUT_FILENAME,
+        frame_times.min(),  # pyright: ignore[reportArgumentType]
+        frame_times.max(),  # pyright: ignore[reportArgumentType]
+    )
+    adcs = adcs.with_columns(
+        pl.Series(
+            _ADCS_X,
+            mpi_strip.column_positions(
+                prepared.columns,
+                frame_times.to_list(),
+                adcs[beacon_data.BEACON_TIME_COLUMN].to_list(),
+            ),
+        )
+    ).filter(pl.col(_ADCS_X).is_not_nan())
     return _LoadedCollection(
         prepared=prepared,
         frame_rows=frames.drop("pixels").to_dicts(),
         summary=_summary_text(frames),
+        adcs=adcs,
     )
 
 
@@ -853,6 +1043,7 @@ class _MpiStripView:
                     )
                 ):
                     _night_reference_explanation()
+                self._metadata = ui.column().classes("w-full gap-0")
                 self._body = ui.column().classes("w-full gap-2")
         self._viewer = _StripViewer(
             body=self._body,
@@ -927,6 +1118,9 @@ class _MpiStripView:
             f"MPI Collection Started {started_at:%Y-%m-%d %H:%M:%S} UTC"
         )
         self._summary.set_text("")
+        self._metadata.clear()
+        with self._metadata:
+            _recording_metadata(row)
         self._viewer.clear_strip()
         with self._body, ui.row().classes("items-center gap-2 p-2"):
             ui.spinner(size="md")
@@ -1125,6 +1319,7 @@ class _StripViewer:
                 mode,
                 self._filename,
                 zoom,
+                loaded.adcs,
                 on_download=lambda: self._download(loaded, mode, intensity_range),
             )
         if anchor is not None:

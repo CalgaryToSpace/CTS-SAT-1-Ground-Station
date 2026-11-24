@@ -51,6 +51,7 @@ from cts1_mo_tools.cts1_processing_pipeline.step_9_clean_mpi_frames import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from datetime import datetime
     from pathlib import Path
 
@@ -329,6 +330,33 @@ def _columns(frames: pl.DataFrame) -> list[StripColumn]:
         columns.append(StripColumn("frame", frame_index=i, frame_counter=counter))
         previous = (started_at, counter)
     return columns
+
+
+def column_positions(
+    columns: list[StripColumn],
+    frame_times: Sequence[datetime],
+    times: Sequence[datetime],
+) -> npt.NDArray[np.float64]:
+    """Where each of `times` falls along the strip, in columns from its left
+    edge (a frame's column `i` is centred on `i + 0.5`) -- linearly between
+    the frames either side, so it lines up with the strip at any zoom. NaN
+    outside the first..last frame's time. `frame_times`: each frame's
+    `collected_at`, by its `frame_index`.
+    """
+    xs = [i + 0.5 for i, c in enumerate(columns) if c.frame_index is not None]
+    frame_ms = np.array(
+        [
+            frame_times[c.frame_index].timestamp()
+            for c in columns
+            if c.frame_index is not None
+        ]
+    )
+    # np.interp needs them ascending; a frame timed out of order mustn't break it.
+    frame_ms = np.maximum.accumulate(frame_ms)
+    at = np.array([t.timestamp() for t in times], dtype=np.float64)
+    if not len(frame_ms):
+        return np.full(at.shape, np.nan)
+    return np.interp(at, frame_ms, xs, left=np.nan, right=np.nan)
 
 
 def _scaled(values: npt.NDArray[np.float64], low: float, high: float) -> Any:
