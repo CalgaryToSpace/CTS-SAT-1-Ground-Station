@@ -172,6 +172,7 @@ def _analysis_response(  # noqa: PLR0913
             "strong_frame_count": 0,
             "strong_signal_count": strong_signal_count,
             "strong_signals": strong_signals or [],
+            "footer": {"uart_lost_bytes": 12, "reason_for_stopping": "TELECOMMAND"},
         }
     )
     return {
@@ -231,6 +232,8 @@ def test_extract_mpi_analyses_keeps_complete_successful_ones() -> None:
     assert analysis["analysis_first_frame_byte"] == 259
     assert analysis["analysis_last_frame_byte"] == 102919
     assert analysis["analysis_strong_signals"] == "[]"
+    assert analysis["analysis_uart_lost_bytes"] == 12
+    assert analysis["analysis_reason_for_stopping"] == "TELECOMMAND"
     assert analysis["analysis_action"] == "analyze_mpi_data_v1"
     assert analysis["analysis_version"] == 1
 
