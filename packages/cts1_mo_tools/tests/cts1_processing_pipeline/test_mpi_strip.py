@@ -1,6 +1,7 @@
 import io
 import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import numpy as np
 import polars as pl
@@ -193,3 +194,28 @@ def test_column_positions_line_up_with_frames_across_gaps() -> None:
     )
     np.testing.assert_allclose(positions[:3], [0.5, 3.0, second_start + 0.5], atol=1e-3)
     assert np.isnan(positions[3:]).all()
+
+
+def test_detector_only_strip_is_one_row_per_pixel_without_bands() -> None:
+    prepared = mpi_strip.prepare_frames(_frames([0, 1, 4]))
+    assert prepared is not None
+    strip = mpi_strip.render_prepared(prepared, detector_only=True)
+    image = Image.open(io.BytesIO(strip.png))
+    assert image.size == (5, 3)  # 5 columns (2 missing), 3 pixels.
+    assert strip.bands == []
+
+
+def test_raw_thumbnails_one_per_collection_with_frames(tmp_path: Path) -> None:
+    frames = pl.concat([_frames(list(range(300))), _frames([0, 1], started_at=_T1)])
+    frames.write_parquet(tmp_path / "mpi_frames.parquet")
+    collections = pl.DataFrame(
+        {
+            "collection_started_at": [_T0, _T1, _T1 + timedelta(hours=1)],
+            "collection_time_source": ["frames"] * 3,
+        }
+    )
+    first, second, none = mpi_strip.raw_thumbnails(tmp_path, collections, width=100)
+    assert first is not None
+    assert second is not None
+    assert none is None
+    assert Image.open(io.BytesIO(first)).size == (100, 3)  # Shrunk from 300.

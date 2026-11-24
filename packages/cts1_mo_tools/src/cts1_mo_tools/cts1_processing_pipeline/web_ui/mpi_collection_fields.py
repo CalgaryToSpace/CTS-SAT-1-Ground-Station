@@ -32,6 +32,9 @@ import xlsxwriter  # pyright: ignore[reportMissingTypeStubs]
 
 from cts1_mo_tools.cts1_processing_pipeline.common import drop_timezones_for_excel
 from cts1_mo_tools.cts1_processing_pipeline.step_8_summarize_mpi_collections import (
+    beacons as beacon_summary,
+)
+from cts1_mo_tools.cts1_processing_pipeline.step_8_summarize_mpi_collections import (
     pipeline as step_8_pipeline,
 )
 from cts1_mo_tools.time_str import duration_str
@@ -61,9 +64,13 @@ class ColumnGroup:
     details: tuple[Column, ...] = ()
 
 
+# How far around each collection its beacons are summarized from.
+_BEACON_MARGIN_S = int(beacon_summary.BEACON_WINDOW_MARGIN.total_seconds())
+_AXES = ("roll", "pitch", "yaw")
+
 COLUMN_GROUPS: tuple[ColumnGroup, ...] = (
     ColumnGroup(
-        "Collection",
+        "Collection Metadata",
         (
             Column("collection_started_at", "Started (UTC)"),
             Column("collection_ended_at", "Ended (UTC)"),
@@ -136,6 +143,40 @@ COLUMN_GROUPS: tuple[ColumnGroup, ...] = (
         ),
     ),
     ColumnGroup(
+        f"Beacons (±{_BEACON_MARGIN_S} s)",
+        (
+            Column("beacon_extended_count", "Beacon Count", numeric=True),
+            Column("beacon_adcs_estimation_modes", "Estimation Mode(s)"),
+            Column("beacon_adcs_control_modes", "Control Mode(s)"),
+            *(
+                Column(
+                    f"_beacon_{axis}",
+                    f"{axis.title()} (°)",
+                    numeric=True,
+                    sources=(f"beacon_{axis}_min_deg", f"beacon_{axis}_max_deg"),
+                )
+                for axis in _AXES
+            ),
+            Column("_beacon_slew", "Slew", sources=("beacon_slew",)),
+            Column("beacon_max_angular_rate_deg_per_sec", "Max Rate", numeric=True),
+            Column("beacon_oscillator_mhz", "Clock (MHz)", numeric=True),
+            Column(
+                "_beacon_time_sync_age",
+                "Time Sync Age",
+                numeric=True,
+                sources=(
+                    "beacon_time_sync_age_min_sec",
+                    "beacon_time_sync_age_max_sec",
+                ),
+            ),
+        ),
+        (
+            Column("beacon_count", "All Beacons", numeric=True),
+            Column("beacon_max_attitude_change_deg", "Max Attitude Change (°)"),
+            Column("beacon_time_sync_sources", "Time Sync Source(s)"),
+        ),
+    ),
+    ColumnGroup(
         "Frames Received (Downlinked)",
         (
             Column("frames_present", "Present", numeric=True),
@@ -181,6 +222,13 @@ _CELL_FORMATTERS: dict[str, Callable[[Any], Any]] = {
     "analysis_strong_signal_counts": mpi_collections.strong_signal_counts_text,
     "integration_periods": mpi_collections.integration_periods_text,
     "time_sync_sources": mpi_collections.time_sync_sources_text,
+    # Any JSON array, joined.
+    "beacon_adcs_estimation_modes": mpi_collections.integration_periods_text,
+    "beacon_adcs_control_modes": mpi_collections.integration_periods_text,
+    "beacon_oscillator_mhz": mpi_collections.integration_periods_text,
+    "beacon_time_sync_sources": mpi_collections.integration_periods_text,
+    "beacon_max_angular_rate_deg_per_sec": lambda rate: f"{rate:.2f} °/s",
+    "beacon_max_attitude_change_deg": lambda change: f"{change:.1f}",
 }
 
 
@@ -223,6 +271,37 @@ def _time_sync_age_cell(row: dict[str, Any]) -> str:
     return f"⚠ resynced {times} during; {age} at {at}"
 
 
+def _angle_range_cell(row: dict[str, Any], axis: str) -> str:
+    """An attitude angle's range, e.g. "-86.3 to 60.1" -- see
+    `beacons.angle_range` (start > end when it wraps through +-180).
+    """
+    low, high = row.get(f"beacon_{axis}_min_deg"), row.get(f"beacon_{axis}_max_deg")
+    if low is None or high is None:
+        return ""
+    if low == high:
+        return f"{low:.1f}"
+    return f"{low:.1f} to {high:.1f}" + (" (wraps ±180)" if low > high else "")
+
+
+def _slew_cell(row: dict[str, Any]) -> str:
+    """ "yes"/"no", flagged when it's a slew, with by how much."""
+    slew = row.get("beacon_slew")
+    if slew != "yes":
+        return slew or ""
+    change = row.get("beacon_max_attitude_change_deg")
+    return "⚠ yes" + (f" ({change:.0f}° swing)" if change is not None else "")
+
+
+def _beacon_time_sync_age_cell(row: dict[str, Any]) -> str:
+    low = row.get("beacon_time_sync_age_min_sec")
+    high = row.get("beacon_time_sync_age_max_sec")
+    if low is None or high is None:
+        return ""
+    if low == high:
+        return duration_str(low)
+    return f"{duration_str(low)} to {duration_str(high)}"
+
+
 def _time_source_cell(row: dict[str, Any]) -> str:
     """ "Times From": the analysis's full action name when it's from one --
     e.g. "analyze_mpi_data_v1".
@@ -253,6 +332,9 @@ def collection_cells(row: dict[str, Any]) -> dict[str, Any]:
         "_temperature_range": _temperature_range_cell(row),
         "_time_sync_age": _time_sync_age_cell(row),
         "_downlinked_percent": mpi_collections.downlinked_percent_text(row),
+        **{f"_beacon_{axis}": _angle_range_cell(row, axis) for axis in _AXES},
+        "_beacon_slew": _slew_cell(row),
+        "_beacon_time_sync_age": _beacon_time_sync_age_cell(row),
     }
 
 

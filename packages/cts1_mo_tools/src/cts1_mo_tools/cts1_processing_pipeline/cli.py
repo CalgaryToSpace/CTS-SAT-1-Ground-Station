@@ -172,8 +172,9 @@ class Step7Args:
 class Step8Args:
     """Step 8: collect every analyze_mpi_data response from
     reassembled_tcmd_responses into mpi_analyses, and summarize mpi_frames
-    per MPI collection (merged with those analyses, and placed in orbit from
-    tle_history) into mpi_collections."""
+    per MPI collection (merged with those analyses, placed in orbit from
+    tle_history, and summarized from everything_decoded's beacons) into
+    mpi_collections."""
 
 
 @dataclass(frozen=True, slots=True)

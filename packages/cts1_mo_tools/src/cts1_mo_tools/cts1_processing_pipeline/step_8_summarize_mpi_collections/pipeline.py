@@ -25,13 +25,15 @@ with the file's metadata alongside. An analysis with no frames downlinked
 yet is still a collection. Each collection also gets the integration
 period(s) and board temperature range its frames reported, and where the
 satellite was at its start/end and whether it was sunlit, propagated from
-step 7's TLE history (see `orbit.py`). The result is
+step 7's TLE history (see `orbit.py`), and what the beacons around it said
+-- ADCS modes, attitude range, any slew, clock and time sync -- from step
+3's decoded packets (see `beacons.py`). The result is
 `mpi_collections.parquet` (`summarize_mpi_collections`).
 
-This step reads the output of steps 5, 6 and 7 (5's and 7's are optional:
-without them, the collections just aren't merged with any analyses, or
-placed in orbit). Like steps 2-6, it's parquet-in-parquet-out and
-reprocesses from scratch on every run.
+This step reads the output of steps 3, 5, 6 and 7 (all but 6's are
+optional: without them, the collections just aren't summarized from
+beacons, merged with any analyses, or placed in orbit). Like steps 2-6,
+it's parquet-in-parquet-out and reprocesses from scratch on every run.
 """
 
 from __future__ import annotations
@@ -63,6 +65,9 @@ from loguru import logger
 
 from cts1_mo_tools.cts1_decode_satnogs_packets import MAX_VALID_EPOCH_MS
 from cts1_mo_tools.cts1_processing_pipeline import orbit
+from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
+    pipeline as step_3_pipeline,
+)
 from cts1_mo_tools.cts1_processing_pipeline.step_5_reassemble_tcmd_responses import (
     pipeline as step_5_pipeline,
 )
@@ -72,6 +77,8 @@ from cts1_mo_tools.cts1_processing_pipeline.step_6_extract_mpi_frames import (
 from cts1_mo_tools.cts1_processing_pipeline.step_7_fetch_tle_history import (
     pipeline as step_7_pipeline,
 )
+
+from . import beacons as beacon_summary
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -219,6 +226,9 @@ _COLLECTIONS_SCHEMA = {
     # The epoch of the TLE `collection_started_at` was propagated from.
     "orbit_tle_epoch": pl.Datetime("us", "UTC"),
     **_FILE_ANALYSES_SCHEMA,
+    # What the beacons around the collection said -- see `beacons.py`. Null
+    # until step 3's output is there.
+    **beacon_summary.BEACON_SUMMARY_SCHEMA,
 }
 
 # How far apart two frames' sync times (see `time_synced_at`) must be to
@@ -847,7 +857,7 @@ def _write_parquet_atomic(df: pl.DataFrame, path: Path) -> None:
 
 def run(*, data_dir: Path = DEFAULT_DATA_DIR) -> None:
     """Recompute `mpi_analyses.parquet` and `mpi_collections.parquet` from
-    step 6's (and, if they're there, steps 5 and 7's) output.
+    step 6's (and, if they're there, steps 3, 5 and 7's) output.
 
     Reads `mpi_frames.parquet`, `reassembled_tcmd_responses.parquet` and
     `tle_history.parquet` from `data_dir` (where steps 6, 5 and 7 write
@@ -882,6 +892,14 @@ def run(*, data_dir: Path = DEFAULT_DATA_DIR) -> None:
     collections = summarize_mpi_collections(
         frames, primary_mpi_analyses(all_analyses), tle_history
     )
+    decoded_path = data_dir / step_3_pipeline.OUTPUT_FILENAME
+    if decoded_path.exists():
+        logger.info(f"Reading beacons from {decoded_path}")
+        collections = beacon_summary.with_beacon_summary(
+            collections, beacon_summary.load_beacons(decoded_path, collections)
+        )
+    else:
+        logger.warning(f"{decoded_path} not found -- no beacon summary (run step_3).")
     collections_path = data_dir / COLLECTIONS_OUTPUT_FILENAME
     _write_parquet_atomic(collections, collections_path)
 

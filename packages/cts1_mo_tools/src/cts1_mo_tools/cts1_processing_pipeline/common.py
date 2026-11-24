@@ -6,6 +6,7 @@ __all__ = [
     "DEFAULT_DUCKDB_MEMORY_LIMIT",
     "DEFAULT_DUCKDB_THREADS",
     "connect_duckdb",
+    "dedupe_by_beacon_time",
     "default_duckdb_memory_limit",
     "drop_timezones_for_excel",
     "parse_start_filter",
@@ -123,3 +124,37 @@ def parse_start_filter(value: str, *, now: datetime | None = None) -> datetime:
         raise ValueError(msg) from exc
 
     return dt.astimezone(UTC) if dt.tzinfo else dt.replace(tzinfo=UTC)
+
+
+def dedupe_by_beacon_time(lf: pl.LazyFrame, column: str) -> pl.LazyFrame:
+    """One row per distinct onboard beacon time `column`, sorted by it.
+
+    The same beacon can be received more than once: live (" X5") and again
+    later replayed from storage (" S5"), or by several ground stations. Of
+    the copies, keep a CRC-valid one, then a live one, then the earliest
+    received -- so each beacon counts once.
+    """
+    schema = lf.collect_schema()
+    preference = [
+        (expr, descending)
+        for name, expr, descending in (
+            # CRC-valid first.
+            ("csp_crc_valid", pl.col("csp_crc_valid").fill_null(value=False), True),
+            # Live first (null = not a v5+ beacon, so not stored either).
+            (
+                "is_stored_beacon",
+                pl.col("is_stored_beacon").fill_null(value=False),
+                False,
+            ),
+            # Earliest received first.
+            ("received_at", pl.col("received_at"), False),
+        )
+        if name in schema
+    ]
+    if preference:
+        lf = lf.sort(
+            [expr for expr, _ in preference],
+            descending=[descending for _, descending in preference],
+            nulls_last=True,
+        )
+    return lf.unique(column, keep="first", maintain_order=True).sort(column)

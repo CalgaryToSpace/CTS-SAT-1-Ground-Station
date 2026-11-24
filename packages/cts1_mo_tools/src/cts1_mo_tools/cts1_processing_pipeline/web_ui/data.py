@@ -60,6 +60,7 @@ from cts1_mo_tools.cts1_decode_satnogs_packets import (
     MAX_VALID_EPOCH_MS,
     PACKET_TYPE_ENUM,
 )
+from cts1_mo_tools.cts1_processing_pipeline.common import dedupe_by_beacon_time
 from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
     pipeline as step_3_pipeline,
 )
@@ -248,39 +249,8 @@ def load_packet_counts_per_window(
 
 
 def _dedupe_by_beacon_time(lf: pl.LazyFrame) -> pl.LazyFrame:
-    """One row per distinct `BEACON_TIME_COLUMN`, sorted by it.
-
-    The same beacon can be received more than once: live (" X5") and again
-    later replayed from storage (" S5"), or by several ground stations. Of
-    the copies, keep a CRC-valid one, then a live one, then the earliest
-    received -- so each beacon is plotted once.
-    """
-    schema = lf.collect_schema()
-    preference = [
-        (expr, descending)
-        for column, expr, descending in (
-            # CRC-valid first.
-            ("csp_crc_valid", pl.col("csp_crc_valid").fill_null(value=False), True),
-            # Live first (null = not a v5+ beacon, so not stored either).
-            (
-                "is_stored_beacon",
-                pl.col("is_stored_beacon").fill_null(value=False),
-                False,
-            ),
-            # Earliest received first.
-            ("received_at", pl.col("received_at"), False),
-        )
-        if column in schema
-    ]
-    if preference:
-        lf = lf.sort(
-            [expr for expr, _ in preference],
-            descending=[descending for _, descending in preference],
-            nulls_last=True,
-        )
-    return lf.unique(BEACON_TIME_COLUMN, keep="first", maintain_order=True).sort(
-        BEACON_TIME_COLUMN
-    )
+    """See `common.dedupe_by_beacon_time`."""
+    return dedupe_by_beacon_time(lf, BEACON_TIME_COLUMN)
 
 
 @cached(TTLCache(maxsize=3, ttl=_CACHE_TTL_SECONDS), lock=threading.Lock())
