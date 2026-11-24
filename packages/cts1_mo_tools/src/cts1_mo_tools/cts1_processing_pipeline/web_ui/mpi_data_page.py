@@ -12,6 +12,9 @@ from __future__ import annotations
 __all__ = ["build_mpi_data_page"]
 
 import asyncio
+import base64
+import functools
+import itertools
 import json
 from dataclasses import dataclass
 from pathlib import Path  # noqa: TC003 -- tyro needs this at runtime elsewhere
@@ -20,8 +23,22 @@ from typing import TYPE_CHECKING, Any, cast
 import fracturedjson
 from nicegui import run, ui
 
-from . import collection_timeline, mpi_collections
+from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
+    pipeline as step_3_pipeline,
+)
+from cts1_mo_tools.cts1_processing_pipeline.step_6_extract_mpi_frames import (
+    pipeline as step_6_pipeline,
+)
+from cts1_mo_tools.cts1_processing_pipeline.step_8_summarize_mpi_collections import (
+    beacons as beacon_summary,
+)
+from cts1_mo_tools.cts1_processing_pipeline.step_8_summarize_mpi_collections import (
+    pipeline as step_8_pipeline,
+)
+
+from . import collection_timeline, mpi_collections, mpi_strip
 from . import mpi_collection_fields as fields
+from .attitude_sparkline import attitude_sparkline_svg
 from .charts import collection_timeline_option
 from .layout import page_shell
 from .mpi_strip_view import collection_key, vis_page_url
@@ -55,12 +72,41 @@ def _collection_timeline_card(timeline: pl.DataFrame | None) -> None:
         ui.echart(option).classes("w-full h-80")
 
 
-# The collections table's groups: a link to the strip, then the shared ones
-# -- each group gets its own header row above its columns', so it's clear
-# which come from the satellite's on-board analysis of the file and which
-# from the frames actually downlinked.
+# The page-only plot columns -- pictures, not values the exports or the
+# metadata panel could show. The attitude plot is an inline SVG (see
+# `attitude_sparkline`); the raw MPI one a thumbnail PNG of the frames,
+# linking to them in MPI Vis.
+_ATTITUDE_PLOT_COLUMN = "_beacon_attitude_plot"
+_THUMBNAIL_WIDTH = 140  # px, as wide as the attitude plot.
+_RAW_MPI_PLOT_COLUMN = "_raw_mpi_plot"
+_ATTITUDE_PLOT_CELL_SLOT = (
+    '<q-td :props="props" style="padding-top: 0; padding-bottom: 0">'
+    '<span v-html="props.row._beacon_attitude_plot"></span></q-td>'
+)
+_RAW_MPI_PLOT_CELL_SLOT = (
+    '<q-td :props="props" style="padding-top: 0; padding-bottom: 0">'
+    '<a v-if="props.row._raw_mpi_plot" :href="props.row._strip_href">'
+    '<img :src="props.row._raw_mpi_plot" alt="Raw MPI frames" '
+    # `max-width: none`: the page's base CSS caps images at their cell's width.
+    f'style="display: block; width: {_THUMBNAIL_WIDTH}px; max-width: none; '
+    'height: 36px">'
+    "<q-tooltip>Raw MPI frames (pixels top to bottom, time left to right)"
+    " -- view them in MPI Vis</q-tooltip></a></q-td>"
+)
+
+# The collections table's groups: the buttons and plots, then the shared
+# ones -- each group gets its own header row above its columns', so it's
+# clear which come from the satellite's on-board analysis of the file and
+# which from the frames actually downlinked.
 _COLLECTION_COLUMN_GROUPS = (
-    fields.ColumnGroup("", (fields.Column("_strip", "Vis"),)),
+    fields.ColumnGroup(
+        "",
+        (
+            fields.Column("_strip", "Vis"),
+            fields.Column(_RAW_MPI_PLOT_COLUMN, "Raw MPI"),
+            fields.Column(_ATTITUDE_PLOT_COLUMN, "Attitude Plot"),
+        ),
+    ),
     *fields.COLUMN_GROUPS,
 )
 _COLLECTION_COLUMNS = tuple(
@@ -71,7 +117,7 @@ _COLLECTION_COLUMNS = tuple(
 # rather than a row click, so the cells' text can be selected and copied.
 _DETAILS_COLUMN = "_details"
 _DETAILS_CELL_SLOT = r"""
-    <q-td :props="props" auto-width>
+    <q-td :props="props">
         <q-btn
             flat round dense size="sm" icon="info"
             @click="$parent.$emit('show_analyses', props.row._row_index)"
@@ -81,15 +127,80 @@ _DETAILS_CELL_SLOT = r"""
     </q-td>
 """
 
+# The columns that stay put when the table scrolls sideways -- the buttons
+# and plots, leftmost -- each with its (fixed) width in px.
+_PINNED_WIDTHS = {
+    _DETAILS_COLUMN: 44,
+    "_strip": 52,
+    _RAW_MPI_PLOT_COLUMN: _THUMBNAIL_WIDTH + 16,  # Plus the cell's padding.
+    _ATTITUDE_PLOT_COLUMN: _THUMBNAIL_WIDTH + 16,
+}
+# Each one's offset from the left: the widths of those before it.
+_PINNED_LEFTS = dict(
+    zip(
+        _PINNED_WIDTHS,
+        itertools.accumulate(_PINNED_WIDTHS.values(), initial=0),
+        strict=False,  # `accumulate` gives one more: the total.
+    )
+)
+_PINNED_CLASS = "mpi-pinned"
+# Opaque, so what scrolls under them doesn't show through.
+_PINNED_CSS = f"""
+.{_PINNED_CLASS} {{ background: #fff; }}
+.body--dark .{_PINNED_CLASS} {{ background: var(--q-dark); }}
+"""
+
+
+def _pinned_style(field: str, *, header: bool = False) -> str:
+    """The CSS pinning `field`'s cells at their place from the left, the
+    last pinned column edged so it's clear the rest scrolls under it.
+    """
+    width = _PINNED_WIDTHS[field]
+    edge = (
+        "; box-shadow: inset -1px 0 0 rgba(128, 128, 128, 0.5)"
+        if field == list(_PINNED_WIDTHS)[-1]
+        else ""
+    )
+    return (
+        f"position: sticky; left: {_PINNED_LEFTS[field]}px; "
+        f"z-index: {3 if header else 2}; "
+        f"width: {width}px; min-width: {width}px; max-width: {width}px{edge}"
+    )
+
+
+def _column_def(field: str, label: str, *, numeric: bool = False) -> dict[str, Any]:
+    column: dict[str, Any] = {
+        "name": field,
+        "label": label,
+        "field": field,
+        "align": "right" if numeric else "left",
+    }
+    if field in _PINNED_WIDTHS:
+        column |= {
+            "classes": _PINNED_CLASS,
+            "headerClasses": _PINNED_CLASS,
+            "style": _pinned_style(field),
+            "headerStyle": _pinned_style(field, header=True),
+        }
+    return column
+
+
 # The table's header: a row of group labels, each spanning its columns, then
-# the usual row of column labels.
+# the usual row of column labels. The buttons-and-plots group is pinned like
+# its columns.
+_LEADING_GROUP_WIDTH = sum(_PINNED_WIDTHS.values()) - _PINNED_WIDTHS[_DETAILS_COLUMN]
 _COLLECTION_HEADER_SLOT = (
     '<q-tr :props="props">'
-    "<q-th></q-th>"
+    f'<q-th class="{_PINNED_CLASS}" '
+    f'style="{_pinned_style(_DETAILS_COLUMN, header=True)}"></q-th>'
+    f'<q-th colspan="{len(_COLLECTION_COLUMN_GROUPS[0].columns)}" '
+    f'class="{_PINNED_CLASS}" style="position: sticky; z-index: 3; '
+    f"left: {_PINNED_WIDTHS[_DETAILS_COLUMN]}px; width: {_LEADING_GROUP_WIDTH}px; "
+    'box-shadow: inset -1px 0 0 rgba(128, 128, 128, 0.5)"></q-th>'
     + "".join(
         f'<q-th colspan="{len(group.columns)}" class="text-center text-weight-bold"'
         f' style="border-left: 1px solid rgba(128, 128, 128, 0.4)">{group.label}</q-th>'
-        for group in _COLLECTION_COLUMN_GROUPS
+        for group in _COLLECTION_COLUMN_GROUPS[1:]
     )
     + "</q-tr>"
     '<q-tr :props="props">'
@@ -249,15 +360,18 @@ def _export_buttons(collections: pl.DataFrame) -> None:
 def _collections_card(
     collections: pl.DataFrame | None,
     analyses: pl.DataFrame | None,
+    plots: list[dict[str, str]] | None,
 ) -> None:
-    """`collections`/`analyses` are None while they're still loading."""
+    """`collections`/`analyses`/`plots` (each collection's plot columns'
+    cells, in order) are None while they're still loading.
+    """
     with ui.card().classes("w-full"):
         with ui.row().classes("w-full items-center justify-between"):
             ui.label("MPI Collections").classes("text-lg font-bold")
             if collections is not None and not collections.is_empty():
                 _export_buttons(collections)
 
-        if collections is None or analyses is None:
+        if collections is None or analyses is None or plots is None:
             with ui.row().classes("items-center gap-2 p-2"):
                 ui.spinner(size="md")
                 ui.label("Loading...").classes("text-grey")
@@ -269,13 +383,8 @@ def _collections_card(
             ).classes("text-caption text-grey mt-2")
             return
 
-        columns = [{"name": _DETAILS_COLUMN, "label": "", "field": _DETAILS_COLUMN}] + [
-            {
-                "name": column.field,
-                "label": column.label,
-                "field": column.field,
-                "align": "right" if column.numeric else "left",
-            }
+        columns = [_column_def(_DETAILS_COLUMN, "")] + [
+            _column_def(column.field, column.label, numeric=column.numeric)
             for column in _COLLECTION_COLUMNS
         ]
         collection_rows = collections.to_dicts()
@@ -287,6 +396,7 @@ def _collections_card(
                 ),
                 "_row_index": i,
             }
+            | plots[i]
             for i, row in enumerate(collection_rows)
         ]
         table = ui.table(columns=columns, rows=rows, row_key="_row_index").classes(
@@ -296,6 +406,8 @@ def _collections_card(
         table.add_slot("header", _COLLECTION_HEADER_SLOT)
         table.add_slot(f"body-cell-{_DETAILS_COLUMN}", _DETAILS_CELL_SLOT)
         table.add_slot("body-cell-_strip", _STRIP_CELL_SLOT)
+        table.add_slot(f"body-cell-{_ATTITUDE_PLOT_COLUMN}", _ATTITUDE_PLOT_CELL_SLOT)
+        table.add_slot(f"body-cell-{_RAW_MPI_PLOT_COLUMN}", _RAW_MPI_PLOT_CELL_SLOT)
         # The event's arg is the row's `_row_index`.
         table.on(
             "show_analyses",
@@ -310,17 +422,64 @@ def _collections_card(
 class _CollectionsData:
     collections: pl.DataFrame
     analyses: pl.DataFrame
+    # Each collection's plot columns' cells (an SVG, or a PNG's data URI; ""
+    # for none), in `collections` order.
+    plots: list[dict[str, str]]
+
+
+@functools.lru_cache(maxsize=1)
+def _raw_mpi_plots(
+    data_dir: Path, frames_mtime: float, collections_mtime: float
+) -> list[str]:
+    """Each collection's raw frames thumbnail as a data URI (or "") -- see
+    `mpi_strip.raw_thumbnails`. Slow-ish (it decodes every frame), so kept
+    until either file changes (the mtimes are only the cache key).
+    """
+    del frames_mtime, collections_mtime
+    return [
+        f"data:image/png;base64,{base64.b64encode(png).decode()}" if png else ""
+        for png in mpi_strip.raw_thumbnails(
+            data_dir, mpi_collections.load_collections(data_dir), _THUMBNAIL_WIDTH
+        )
+    ]
+
+
+def _mtime(path: Path) -> float:
+    return path.stat().st_mtime if path.exists() else 0.0
 
 
 def _load_collections_data(data_dir: Path) -> _CollectionsData:
     """Blocking -- run it via `run.io_bound`."""
+    collections = mpi_collections.load_collections(data_dir)
+    decoded_path = data_dir / step_3_pipeline.OUTPUT_FILENAME
+    attitude_plots = [""] * collections.height
+    if decoded_path.exists() and not collections.is_empty():
+        beacons = beacon_summary.load_beacons(decoded_path, collections)
+        attitude_plots = [
+            attitude_sparkline_svg(beacons, start, end)
+            for start, end in collections.select(
+                "collection_started_at", "collection_ended_at"
+            ).iter_rows()
+        ]
+    raw_mpi_plots = _raw_mpi_plots(
+        data_dir,
+        _mtime(data_dir / step_6_pipeline.OUTPUT_FILENAME),
+        _mtime(data_dir / step_8_pipeline.COLLECTIONS_OUTPUT_FILENAME),
+    )
+    if len(raw_mpi_plots) != collections.height:  # Rewritten in between.
+        raw_mpi_plots = [""] * collections.height
     return _CollectionsData(
-        collections=mpi_collections.load_collections(data_dir),
+        collections=collections,
         analyses=mpi_collections.load_analyses(data_dir),
+        plots=[
+            {_ATTITUDE_PLOT_COLUMN: attitude, _RAW_MPI_PLOT_COLUMN: raw}
+            for attitude, raw in zip(attitude_plots, raw_mpi_plots, strict=True)
+        ],
     )
 
 
 def build_mpi_data_page(data_dir: Path) -> None:
+    ui.add_css(_PINNED_CSS)
 
     # The timeline and the collections table load and render independently,
     # so the (small, quick) table doesn't wait on the (big) timeline.
@@ -333,6 +492,7 @@ def build_mpi_data_page(data_dir: Path) -> None:
         _collections_card(
             collections_data and collections_data.collections,
             collections_data and collections_data.analyses,
+            collections_data and collections_data.plots,
         )
 
     # Each loads in a thread, then rebuilds synchronously -- see

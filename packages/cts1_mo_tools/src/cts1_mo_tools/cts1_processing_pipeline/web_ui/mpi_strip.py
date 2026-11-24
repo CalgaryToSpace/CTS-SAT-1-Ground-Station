@@ -485,6 +485,43 @@ def render_strip(
     )
 
 
+def raw_thumbnails(
+    data_dir: Path, collections: pl.DataFrame, width: int
+) -> list[bytes | None]:
+    """Each of `collections`' (`mpi_collections.parquet`'s rows, in order)
+    raw frames as a detector-only strip PNG at most `width` wide -- None for
+    one with no frames downlinked. From step 6's `mpi_frames.parquet`, read
+    once for them all.
+    """
+    path = data_dir / step_6_pipeline.OUTPUT_FILENAME
+    if not path.exists() or collections.is_empty():
+        return [None] * collections.height
+    frames = pl.read_parquet(path)
+    frame_collections = frames.group_by("collection_started_at").agg(
+        collection_ended_at=pl.col("collected_at").max()
+    )
+    thumbnails: list[bytes | None] = []
+    for row in collections.iter_rows(named=True):
+        starts = step_8_pipeline.frame_collections_in(
+            row, collections, frame_collections
+        )
+        prepared = prepare_frames(
+            frames.filter(
+                pl.col("collection_started_at").is_in(
+                    pl.Series(
+                        starts, dtype=frame_collections["collection_started_at"].dtype
+                    ).implode()
+                )
+            ).sort("collection_started_at", "frame_counter", "collected_at")
+        )
+        thumbnails.append(
+            None
+            if prepared is None
+            else render_prepared(prepared, max_width=width, detector_only=True).png
+        )
+    return thumbnails
+
+
 def _shrunk(image: npt.NDArray[np.uint8], bin_columns: int) -> npt.NDArray[np.uint8]:
     """`image` with each run of `bin_columns` columns (the last maybe fewer)
     averaged into one -- as a browser does, scaling an image down smoothly.
@@ -518,12 +555,15 @@ def render_prepared(  # noqa: PLR0913
     intensity_range: IntensityRange = "typical",
     max_width: int | None = None,
     tile_width: int | None = None,
+    detector_only: bool = False,
 ) -> MpiStrip:
     """`prepared`'s frames as a strip image, `zoom` image pixels across per
     frame (less, if that would make it too wide to show) -- or, when that's
     wider than `max_width`, shrunk to it (or just under), each image pixel
     across averaging the colours of `bin_columns` columns. Split into tiles
-    at most `tile_width` wide, if given; one image if not.
+    at most `tile_width` wide, if given; one image if not. `detector_only`:
+    just the detector, one image row per pixel, without the bands -- e.g.
+    for a thumbnail.
     """
     columns = prepared.columns
     zoom = max(1, min(zoom, _MAX_WIDTH // len(columns)))
@@ -566,6 +606,9 @@ def render_prepared(  # noqa: PLR0913
         image[top : top + BAND_HEIGHT, is_frame] = colours
         band_ranges.append(BandRange(band, top, band_low, band_high))
 
+    if detector_only:
+        image, height = image[:detector_height:_PIXEL_ROW_HEIGHT], pixel_count
+        band_ranges = []
     bin_columns = 1
     if max_width is not None and len(columns) > max_width:
         zoom = 1

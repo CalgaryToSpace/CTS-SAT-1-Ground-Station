@@ -70,7 +70,7 @@ _AXES = ("roll", "pitch", "yaw")
 
 COLUMN_GROUPS: tuple[ColumnGroup, ...] = (
     ColumnGroup(
-        "Collection",
+        "Collection Metadata",
         (
             Column("collection_started_at", "Started (UTC)"),
             Column("collection_ended_at", "Ended (UTC)"),
@@ -145,7 +145,7 @@ COLUMN_GROUPS: tuple[ColumnGroup, ...] = (
     ColumnGroup(
         f"Beacons (±{_BEACON_MARGIN_S} s)",
         (
-            Column("beacon_extended_count", "Extended", numeric=True),
+            Column("beacon_extended_count", "Beacon Count", numeric=True),
             Column("beacon_adcs_estimation_modes", "Estimation Mode(s)"),
             Column("beacon_adcs_control_modes", "Control Mode(s)"),
             *(

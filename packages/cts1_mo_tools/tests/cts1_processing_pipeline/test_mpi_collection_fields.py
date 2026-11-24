@@ -51,7 +51,7 @@ def test_csv_export_is_grouped_and_formatted_as_shown() -> None:
     groups, labels, row = csv.reader(
         io.StringIO(mpi_collection_fields.collections_csv_bytes(_COLLECTIONS).decode())
     )
-    assert groups[0] == "Collection"
+    assert groups[0] == "Collection Metadata"
     assert row[labels.index("Started (UTC)")] == "2026-10-21 20:32:06.000"
     assert row[labels.index("Duration")] == "1m 57s"
     valid, new = labels.index("Valid Frames"), labels.index("some_new_field")
@@ -68,7 +68,7 @@ def test_excel_export_has_grouped_sheet_and_raw_table() -> None:
     assert workbook.sheetnames == ["As Shown", "mpi_collections"]
     shown = workbook["As Shown"]
     groups, labels, row = shown.iter_rows(values_only=True)
-    assert groups[0] == "Collection"
+    assert groups[0] == "Collection Metadata"
     assert row[list(labels).index("Valid Frames")] == 667
     # Each group's label is merged across its columns.
     assert "A1:E1" in {str(r) for r in shown.merged_cells.ranges}  # Collection
