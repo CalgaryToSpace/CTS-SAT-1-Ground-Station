@@ -9,8 +9,6 @@ from __future__ import annotations
 
 __all__ = [
     "analyses_of",
-    "collections_csv_bytes",
-    "collections_xlsx_bytes",
     "downlinked_percent_text",
     "integration_periods_text",
     "load_analyses",
@@ -22,14 +20,11 @@ __all__ = [
     "time_sync_sources_text",
 ]
 
-import io
 from typing import TYPE_CHECKING, Any, cast
 
 import orjson
 import polars as pl
-import xlsxwriter  # pyright: ignore[reportMissingTypeStubs]
 
-from cts1_mo_tools.cts1_processing_pipeline.common import drop_timezones_for_excel
 from cts1_mo_tools.cts1_processing_pipeline.step_8_summarize_mpi_collections import (
     pipeline as step_8_pipeline,
 )
@@ -188,21 +183,3 @@ def response_properties(response_text: str) -> dict[str, Any]:
     step 8 already checked is a JSON object), as sent.
     """
     return cast("dict[str, Any]", orjson.loads(response_text))
-
-
-def collections_csv_bytes(collections: pl.DataFrame) -> bytes:
-    """`collections` (every column, not just the ones the page shows) as CSV."""
-    return collections.write_csv().encode("utf-8")
-
-
-def collections_xlsx_bytes(collections: pl.DataFrame) -> bytes:
-    """`collections` (every column, not just the ones the page shows) as an
-    Excel (.xlsx) workbook.
-    """
-    buf = io.BytesIO()
-    workbook = xlsxwriter.Workbook(buf, {"in_memory": True})
-    drop_timezones_for_excel(collections).write_excel(
-        workbook=workbook, worksheet="mpi_collections"
-    )
-    workbook.close()
-    return buf.getvalue()

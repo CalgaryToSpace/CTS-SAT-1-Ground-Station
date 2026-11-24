@@ -223,15 +223,16 @@ def _show_analyses(collection: dict[str, Any], analyses: pl.DataFrame) -> None:
 
 
 def _export_buttons(collections: pl.DataFrame) -> None:
-    """Download the whole table -- every column of `mpi_collections.parquet`,
-    including the ones the page hides.
+    """Download the whole table as the page shows it, grouped and
+    labelled alike -- every field of `mpi_collections.parquet`, including
+    the ones the page hides (as in the MPI Vis page's metadata panel).
     """
     with ui.row().classes("items-center gap-2"):
         ui.button(
             "Export CSV",
             icon="download",
             on_click=lambda: ui.download.content(
-                mpi_collections.collections_csv_bytes(collections),
+                fields.collections_csv_bytes(collections),
                 filename="mpi_collections.csv",
             ),
         ).props("dense")
@@ -239,7 +240,7 @@ def _export_buttons(collections: pl.DataFrame) -> None:
             "Export Excel",
             icon="download",
             on_click=lambda: ui.download.content(
-                mpi_collections.collections_xlsx_bytes(collections),
+                fields.collections_xlsx_bytes(collections),
                 filename="mpi_collections.xlsx",
             ),
         ).props("dense outline")

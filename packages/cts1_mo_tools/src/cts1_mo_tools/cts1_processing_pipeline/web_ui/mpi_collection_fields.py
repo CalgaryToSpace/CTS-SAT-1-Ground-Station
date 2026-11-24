@@ -3,8 +3,11 @@ shown: grouped, labelled and formatted -- shared by the MPI Data page's
 collections table and the MPI Vis page's metadata panel, so both read alike.
 
 Each group's `columns` are the table's; its `details` are only in the
-metadata panel, which shows every field.
+metadata panel and the exports, which show every field.
 """
+
+# xlsxwriter has no type stubs, so its methods' types are partly unknown.
+# pyright: reportUnknownMemberType=false
 
 from __future__ import annotations
 
@@ -14,13 +17,20 @@ __all__ = [
     "ColumnGroup",
     "cell_text",
     "collection_cells",
+    "collections_csv_bytes",
+    "collections_xlsx_bytes",
     "other_fields",
 ]
 
+import csv
+import io
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
+import xlsxwriter  # pyright: ignore[reportMissingTypeStubs]
+
+from cts1_mo_tools.cts1_processing_pipeline.common import drop_timezones_for_excel
 from cts1_mo_tools.cts1_processing_pipeline.step_8_summarize_mpi_collections import (
     pipeline as step_8_pipeline,
 )
@@ -30,6 +40,8 @@ from . import mpi_collections
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    import polars as pl
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,3 +267,84 @@ def other_fields(row: dict[str, Any]) -> dict[str, Any]:
         for name in (column.field, *column.sources)
     }
     return {k: v for k, v in row.items() if k not in shown and v is not None}
+
+
+def _export_table(
+    collections: pl.DataFrame,
+) -> tuple[list[tuple[str, int]], list[str], list[list[Any]]]:
+    """`collections` as the page shows them, every field included: each
+    group's (label, column count), the column labels, and the rows -- the
+    groups' columns and details in order, then an "Other" group for any field
+    no group shows (by its own name).
+    """
+    rows = collections.to_dicts()
+    other = list(dict.fromkeys(k for row in rows for k in other_fields(row)))
+    groups = [
+        (group.label, [(c.field, c.label) for c in (*group.columns, *group.details)])
+        for group in COLUMN_GROUPS
+    ]
+    if other:
+        groups.append(("Other", [(k, k) for k in other]))
+    columns = [column for _, group_columns in groups for column in group_columns]
+    data = [
+        [
+            cells[field]
+            for cells in [
+                collection_cells(row) | {k: cell_text(k, row.get(k)) for k in other}
+            ]
+            for field, _ in columns
+        ]
+        for row in rows
+    ]
+    return (
+        [(label, len(group_columns)) for label, group_columns in groups],
+        [label for _, label in columns],
+        data,
+    )
+
+
+def collections_csv_bytes(collections: pl.DataFrame) -> bytes:
+    """`collections` as the page shows them (see `_export_table`), as CSV:
+    a row of group labels (each over its first column), then the column
+    labels, then a row per collection.
+    """
+    groups, labels, data = _export_table(collections)
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(
+        [cell for label, span in groups for cell in (label, *[""] * (span - 1))]
+    )
+    writer.writerow(labels)
+    writer.writerows(data)
+    return buf.getvalue().encode("utf-8")
+
+
+def collections_xlsx_bytes(collections: pl.DataFrame) -> bytes:
+    """`collections` as an Excel (.xlsx) workbook of two sheets: "As
+    Shown", as the page shows them (see `_export_table`), each group's label
+    merged across its columns above the column labels; and
+    "mpi_collections", the raw table -- every column of
+    `mpi_collections.parquet`, by its own name, values unformatted.
+    """
+    groups, labels, data = _export_table(collections)
+    buf = io.BytesIO()
+    workbook = xlsxwriter.Workbook(buf, {"in_memory": True})
+    sheet = workbook.add_worksheet("As Shown")
+    group_format = workbook.add_format({"bold": True, "align": "center", "border": 1})
+    label_format = workbook.add_format({"bold": True, "bottom": 1})
+    first = 0
+    for label, span in groups:
+        if span > 1:
+            sheet.merge_range(0, first, 0, first + span - 1, label, group_format)
+        else:
+            sheet.write(0, first, label, group_format)
+        first += span
+    sheet.write_row(1, 0, labels, label_format)
+    for i, row in enumerate(data, start=2):
+        sheet.write_row(i, 0, row)
+    sheet.freeze_panes(2, 0)
+    drop_timezones_for_excel(collections).write_excel(
+        workbook=workbook, worksheet="mpi_collections"
+    )
+    workbook.close()
+    return buf.getvalue()

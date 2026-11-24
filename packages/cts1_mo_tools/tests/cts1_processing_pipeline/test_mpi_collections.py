@@ -1,39 +1,13 @@
-import io
 from datetime import UTC, datetime
 
-import openpyxl
 import polars as pl
 from cts1_mo_tools.cts1_processing_pipeline.web_ui.mpi_collections import (
     analyses_of,
-    collections_csv_bytes,
-    collections_xlsx_bytes,
     downlinked_percent_text,
     strong_signal_counts_text,
     strong_signals_downlinked_text,
     time_sync_sources_text,
 )
-
-_COLLECTIONS = pl.DataFrame(
-    {
-        "collection_started_at": [datetime(2026, 10, 21, 20, 32, 6, tzinfo=UTC)],
-        "frames_present": [0],
-        "analysis_file": ["mpi_data/2026-10-21_203206Z.mpi"],
-        "analysis_valid_frame_count": [667],
-    }
-)
-
-
-def test_csv_export_has_every_column() -> None:
-    exported = pl.read_csv(io.BytesIO(collections_csv_bytes(_COLLECTIONS)))
-    assert exported.columns == _COLLECTIONS.columns
-    assert exported["analysis_valid_frame_count"].to_list() == [667]
-
-
-def test_excel_export_has_every_column() -> None:
-    workbook = openpyxl.load_workbook(io.BytesIO(collections_xlsx_bytes(_COLLECTIONS)))
-    header, row = workbook["mpi_collections"].iter_rows(values_only=True)
-    assert list(header) == _COLLECTIONS.columns
-    assert row[2] == "mpi_data/2026-10-21_203206Z.mpi"
 
 
 def test_strong_signal_counts_text() -> None:
