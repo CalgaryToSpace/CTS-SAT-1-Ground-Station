@@ -17,6 +17,7 @@ from __future__ import annotations
 from . import _subprocess_registry
 
 __all__ = [
+    "AUDIO_DECODERS",
     "DB_FILENAME",
     "DEFAULT_DATA_DIR",
     "DEFAULT_DB_PATH",
@@ -93,7 +94,9 @@ _DECODER_VERSION_COMMAND = {
 # satnogs_client_live_data has no local versioned tool -- it downloads packets
 # already decoded by SatNOGS's own (continuously-deployed) infrastructure.
 _SATNOGS_CLIENT_LIVE_DATA_VERSION_HARDCODE = "SatNOGS Rolling Release"
-_AUDIO_DECODERS = (
+# The decoders that need the observation's audio (all but
+# satnogs_client_live_data, which reads the station's own live decodes).
+AUDIO_DECODERS = (
     "askew_demod_from_file",
     "sso_rx_replay",
     "gr_satellites_pdu",
@@ -198,7 +201,7 @@ def _process_audio(  # noqa: C901
         except Exception as exc:  # noqa: BLE001
             logger.exception(f"Failed to download audio for observation {obs_id}")
             error = _describe_error("audio download", exc)
-            return rows, {d: error for d in _AUDIO_DECODERS if d in tools}
+            return rows, {d: error for d in AUDIO_DECODERS if d in tools}
 
         if "askew_demod_from_file" in tools:
             askew_rows = _run_decoder(

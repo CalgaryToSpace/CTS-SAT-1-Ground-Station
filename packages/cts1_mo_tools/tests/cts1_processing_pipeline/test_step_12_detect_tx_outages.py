@@ -14,11 +14,15 @@ def _h(hours: float) -> datetime:
 
 
 def _history(
-    passes: Sequence[tuple[int, float, bool]], uncorrectable_at: Sequence[float] = ()
+    passes: Sequence[tuple[int, float, bool]],
+    uncorrectable_at: Sequence[float] = (),
+    no_audio_at: Sequence[float] = (),
 ) -> tuple[pl.DataFrame, pl.DataFrame, pl.LazyFrame, pl.LazyFrame]:
     """Three reliable stations (1, 2, 3) each heard 60 earlier passes, plus
     `passes`: (station, start hour, heard?), each 10 min long. Each heard
-    pass got one beacon, 5 min in, its OBC uptime the pass's start hour."""
+    pass got one beacon, 5 min in, its OBC uptime the pass's start hour.
+    Passes starting at `no_audio_at` hours only ran satnogs_client_live_data
+    (the audio download failed)."""
     all_passes = [(s, -100.0 + i, True) for i in range(60) for s in (1, 2, 3)]
     all_passes += list(passes)
     observations = pl.DataFrame(
@@ -31,8 +35,17 @@ def _history(
         }
     )
     decoder_runs = pl.DataFrame(
-        {"observation_id": observations["id"], "error": [None] * observations.height},
-        schema={"observation_id": pl.Int64, "error": pl.String},
+        {
+            "observation_id": [*observations["id"]] * 2,
+            "decoder": ["askew_demod_from_file"] * observations.height
+            + ["satnogs_client_live_data"] * observations.height,
+            "error": [
+                "audio download: HTTPError: 503" if t in no_audio_at else None
+                for _, t, _ in all_passes
+            ]
+            + [None] * observations.height,
+        },
+        schema={"observation_id": pl.Int64, "decoder": pl.String, "error": pl.String},
     )
     heard = [(i, t) for i, (_, t, hit) in enumerate(all_passes) if hit]
     packets = pl.DataFrame(
@@ -100,6 +113,13 @@ def test_ongoing_outage() -> None:
 def test_ongoing_gap_under_3h_is_not_an_outage() -> None:
     passes = [(1, 0, True), (2, 1, False), (3, 2, False)]
     assert compute_tx_outages(*_history(passes)).is_empty()
+
+
+def test_pass_without_audio_is_not_a_miss() -> None:
+    # Two misses, but one's audio never downloaded: only one station missed.
+    passes = [(1, 0, True), (2, 4, False), (3, 6, False), (1, 10, True)]
+    assert compute_tx_outages(*_history(passes, no_audio_at=[6])).is_empty()
+    assert compute_tx_outages(*_history(passes)).height == 1
 
 
 def test_short_gap_is_not_an_outage() -> None:

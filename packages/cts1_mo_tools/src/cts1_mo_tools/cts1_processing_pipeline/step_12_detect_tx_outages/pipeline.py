@@ -6,7 +6,8 @@ nobody listening. So this step only calls a gap an outage when stations
 that nearly always hear the satellite were listening and heard nothing:
 
 1. Per station (`ground_station`), its hit rate: the share of its decoded
-   observations (any `decoder_runs` row without an error) with at least one
+   observations (an audio decoder -- `AUDIO_DECODERS` -- ran without an
+   error, so the audio was really there to listen to) with at least one
    good packet (`rs_correctable` and `csp_crc_valid`), Laplace-smoothed
    (`(hits + 1) / (n + 2)`). A "reliable" station
    has at least `RELIABLE_STATION_MIN_OBSERVATIONS` of them and a hit rate
@@ -66,6 +67,9 @@ import polars as pl
 from loguru import logger
 
 from cts1_mo_tools.cts1_decode_satnogs_packets import BEACON_PACKET_TYPES
+from cts1_mo_tools.cts1_processing_pipeline.step_1_download_and_demodulate.pipeline import (  # noqa: E501
+    AUDIO_DECODERS,
+)
 from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
     pipeline as step_3_pipeline,
 )
@@ -175,7 +179,7 @@ def compute_tx_outages(
     Args:
         observations: `raw_observations` (`id`, `ground_station`,
             `station_name`, `start`, `end`).
-        decoder_runs: `decoder_runs` (`observation_id`, `error`).
+        decoder_runs: `decoder_runs` (`observation_id`, `decoder`, `error`).
         packets: `raw_packets` (`observation_id`, `received_at`,
             `rs_correctable`, `csp_crc_valid`) -- lazy, as it's big.
         decoded_packets: `everything_decoded` (`received_at`, `packet_type`,
@@ -193,7 +197,11 @@ def compute_tx_outages(
         return pl.DataFrame(schema=_OUTPUT_SCHEMA)
 
     hit_ids = packets.filter(is_good).select("observation_id").unique().collect()
-    decoded_ids = decoder_runs.filter(pl.col("error").is_null())["observation_id"]
+    # Not satnogs_client_live_data: it succeeds without any audio (e.g. during
+    # a SatNOGS archive outage), so a pass it alone ran on wasn't listened to.
+    decoded_ids = decoder_runs.filter(
+        pl.col("error").is_null() & pl.col("decoder").is_in(AUDIO_DECODERS)
+    )["observation_id"]
     decoded = observations.filter(
         pl.col("id").is_in(decoded_ids.implode())
         & pl.col("ground_station").is_not_null()
@@ -287,7 +295,9 @@ def run(*, data_dir: Path = DEFAULT_DATA_DIR) -> None:
             paths["raw_observations"],
             columns=["id", "ground_station", "station_name", "start", "end"],
         ),
-        pl.read_parquet(paths["decoder_runs"], columns=["observation_id", "error"]),
+        pl.read_parquet(
+            paths["decoder_runs"], columns=["observation_id", "decoder", "error"]
+        ),
         pl.scan_parquet(paths["raw_packets"]),
         pl.scan_parquet(paths["everything_decoded"]),
     )
