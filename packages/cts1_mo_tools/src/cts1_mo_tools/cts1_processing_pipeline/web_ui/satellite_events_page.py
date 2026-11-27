@@ -10,8 +10,9 @@ and `step_4_detect_satellite_events.pipeline`/
 
 from __future__ import annotations
 
-__all__ = ["build_satellite_events_page"]
+__all__ = ["build_satellite_events_page", "format_chance"]
 
+import math
 from pathlib import Path  # noqa: TC003 -- tyro needs this at runtime elsewhere
 from typing import TYPE_CHECKING
 
@@ -118,6 +119,19 @@ def _events_table(events: pl.DataFrame) -> None:
     ui.label(f"{events.height:,} event(s).").classes("text-caption text-grey mt-2")
 
 
+_SUPERSCRIPT = str.maketrans("-0123456789", "⁻⁰¹²³⁴⁵⁶⁷⁸⁹")
+
+
+def format_chance(probability: float) -> str:
+    """A probability as a percent down to 0.001%, then as its nearest power
+    of ten with a superscript exponent, e.g. `10⁻²²`."""
+    percent = probability * 100
+    if percent == 0 or round(percent, 3) >= 0.001:  # noqa: PLR2004
+        return f"{percent:.3f}%"
+    exponent = round(math.log10(probability))
+    return f"10{str(exponent).translate(_SUPERSCRIPT)}"
+
+
 def _fmt_time(value: datetime | None) -> str:
     return "" if value is None else f"{value:%Y-%m-%d %H:%M:%S}"
 
@@ -156,11 +170,11 @@ def _tx_outages_table(outages: pl.DataFrame) -> None:
                 "field": "first_good_after",
             },
             {"name": "duration", "label": "Duration", "field": "duration"},
-            {"name": "missed", "label": "Missed Passes", "field": "missed"},
+            {"name": "missed", "label": "Reliable Passes Missed", "field": "missed"},
             {"name": "chance", "label": "Chance", "field": "chance"},
             {
                 "name": "stations",
-                "label": "Stations That Missed",
+                "label": "Reliable Stations That Missed",
                 "field": "stations",
                 "align": "left",
                 "style": "min-width: 12rem; max-width: 18rem; white-space: normal",
@@ -181,7 +195,7 @@ def _tx_outages_table(outages: pl.DataFrame) -> None:
                     f"{r['missed_observation_count']} "
                     f"({r['missed_station_count']} stations)"
                 ),
-                "chance": f"{r['probability_by_chance']:.1e}",
+                "chance": format_chance(r["probability_by_chance"]),
                 "stations": ", ".join(r["missed_stations"]),
             }
             for r in outages.to_dicts()
