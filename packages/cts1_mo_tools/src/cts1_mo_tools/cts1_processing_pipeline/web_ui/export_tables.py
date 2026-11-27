@@ -353,7 +353,8 @@ TABLE_SPECS: tuple[TableSpec, ...] = (
         description=(
             "One row per estimated time the satellite stopped transmitting: "
             "its last good packet, last uncorrectable packet, first good "
-            "packet after, and the reliable stations' passes that missed it."
+            "packet after, the reliable stations' passes that missed it, and "
+            "the first beacon after recovery (OBC/EPS uptime and reboot reasons)."
         ),
         filename=step_12_pipeline.OUTPUT_FILENAME,
         time_column="last_good_packet_at",

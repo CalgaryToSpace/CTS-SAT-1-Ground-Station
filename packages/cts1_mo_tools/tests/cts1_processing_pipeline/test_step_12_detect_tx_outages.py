@@ -15,9 +15,10 @@ def _h(hours: float) -> datetime:
 
 def _history(
     passes: Sequence[tuple[int, float, bool]], uncorrectable_at: Sequence[float] = ()
-) -> tuple[pl.DataFrame, pl.DataFrame, pl.LazyFrame]:
+) -> tuple[pl.DataFrame, pl.DataFrame, pl.LazyFrame, pl.LazyFrame]:
     """Three reliable stations (1, 2, 3) each heard 60 earlier passes, plus
-    `passes`: (station, start hour, heard?), each 10 min long."""
+    `passes`: (station, start hour, heard?), each 10 min long. Each heard
+    pass got one beacon, 5 min in, its OBC uptime the pass's start hour."""
     all_passes = [(s, -100.0 + i, True) for i in range(60) for s in (1, 2, 3)]
     all_passes += list(passes)
     observations = pl.DataFrame(
@@ -43,7 +44,18 @@ def _history(
             "csp_crc_valid": [True] * len(heard) + [False] * len(uncorrectable_at),
         }
     )
-    return observations, decoder_runs, packets.lazy()
+    beacons = pl.DataFrame(
+        {
+            "received_at": [_h(t) + timedelta(minutes=5) for _, t in heard],
+            "packet_type": ["BEACON_BASIC"] * len(heard),
+            "csp_crc_valid": [True] * len(heard),
+            "uptime_sec": [t for _, t in heard],
+            "eps_uptime_sec": [7] * len(heard),
+            "reboot_reason": ["BROWNOUT_RESET"] * len(heard),
+            "eps_reset_cause": ["COMMANDED"] * len(heard),
+        }
+    )
+    return observations, decoder_runs, packets.lazy(), beacons.lazy()
 
 
 def test_outage_needs_two_reliable_stations_missing() -> None:
@@ -67,6 +79,12 @@ def test_outage_needs_two_reliable_stations_missing() -> None:
     assert not row["is_ongoing"]
     assert row["missed_stations"] == ["GS1 (#1)", "GS2 (#2)"]
     assert 0 < row["probability_by_chance"] < 0.01
+    # The first beacon after recovery: the 20h pass's.
+    assert row["recovery_beacon_at"] == _h(20) + timedelta(minutes=5)
+    assert row["recovery_obc_uptime_sec"] == 20
+    assert row["recovery_eps_uptime_sec"] == 7
+    assert row["recovery_obc_reboot_reason"] == "BROWNOUT_RESET"
+    assert row["recovery_eps_reboot_reason"] == "COMMANDED"
 
 
 def test_ongoing_outage() -> None:
@@ -76,6 +94,7 @@ def test_ongoing_outage() -> None:
     outages = compute_tx_outages(*_history(passes))
     assert outages["is_ongoing"].to_list() == [True]
     assert outages["first_good_packet_after_at"].to_list() == [None]
+    assert outages["recovery_beacon_at"].to_list() == [None]
 
 
 def test_ongoing_gap_under_3h_is_not_an_outage() -> None:

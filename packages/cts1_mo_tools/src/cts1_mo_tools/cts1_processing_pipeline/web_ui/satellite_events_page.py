@@ -132,6 +132,18 @@ def format_chance(probability: float) -> str:
     return f"10{str(exponent).translate(_SUPERSCRIPT)}"
 
 
+def _fmt_seconds(value: float | None) -> str:
+    if value is None:
+        return ""
+    # duration_str rounds to whole seconds; a recovery beacon is often <1s.
+    return f"{value:.1f}s" if value < 60 else duration_str(value)  # noqa: PLR2004
+
+
+def _obc_and_eps(obc: str | None, eps: str | None) -> str:
+    """OBC and EPS values stacked in one cell (one line each), or "" if neither."""
+    return f"OBC: {obc}\nEPS: {eps}" if obc or eps else ""
+
+
 def _fmt_time(value: datetime | None) -> str:
     return "" if value is None else f"{value:%Y-%m-%d %H:%M:%S}"
 
@@ -173,13 +185,32 @@ def _tx_outages_table(outages: pl.DataFrame) -> None:
             {"name": "missed", "label": "Reliable Passes Missed", "field": "missed"},
             {"name": "chance", "label": "Chance", "field": "chance"},
             {
+                "name": "recovery_beacon_dt",
+                "label": "Recovery to Beacon ΔT",
+                "field": "recovery_beacon_dt",
+            },
+            {
+                "name": "recovery_uptime",
+                "label": "Uptime at Recovery",
+                "field": "recovery_uptime",
+                "align": "left",
+            },
+            {
+                "name": "recovery_reboot_reason",
+                "label": "Reboot Reason at Recovery",
+                "field": "recovery_reboot_reason",
+                "align": "left",
+            },
+            {
                 "name": "stations",
                 "label": "Reliable Stations That Missed",
                 "field": "stations",
                 "align": "left",
-                "style": "min-width: 12rem; max-width: 18rem; white-space: normal",
             },
         ]
+        # Long headers wrap, so the table fits the page instead of scrolling.
+        for column in columns:
+            column["headerStyle"] = "white-space: normal"
         rows = [
             {
                 "status": "Ongoing" if r["is_ongoing"] else "Recovered",
@@ -196,13 +227,51 @@ def _tx_outages_table(outages: pl.DataFrame) -> None:
                     f"({r['missed_station_count']} stations)"
                 ),
                 "chance": format_chance(r["probability_by_chance"]),
+                "recovery_beacon_dt": _fmt_seconds(
+                    None
+                    if r["recovery_beacon_at"] is None
+                    else (
+                        r["recovery_beacon_at"] - r["first_good_packet_after_at"]
+                    ).total_seconds()
+                ),
+                "recovery_uptime": _obc_and_eps(
+                    _fmt_seconds(r["recovery_obc_uptime_sec"]),
+                    _fmt_seconds(r["recovery_eps_uptime_sec"]),
+                ),
+                "recovery_reboot_reason": _obc_and_eps(
+                    r["recovery_obc_reboot_reason"], r["recovery_eps_reboot_reason"]
+                ),
                 "stations": ", ".join(r["missed_stations"]),
             }
             for r in outages.to_dicts()
         ]
-        table = ui.table(columns=columns, rows=rows, row_key="last_good").classes(
-            "w-full"
+        table = (
+            ui.table(columns=columns, rows=rows, row_key="last_good")
+            .classes("w-full")
+            .props("dense")
         )
+        # Browsers ignore a table cell's own width limits, so a fixed-width box.
+        table.add_slot(
+            "body-cell-stations",
+            r"""
+                <q-td :props="props">
+                    <div style="width: 14rem; white-space: normal">
+                        {{ props.value }}
+                    </div>
+                </q-td>
+            """,
+        )
+        # One line each for OBC and EPS; an uptime never wraps, a reason may.
+        for name, white_space in (
+            ("recovery_uptime", "pre"),
+            ("recovery_reboot_reason", "pre-line"),
+        ):
+            table.add_slot(
+                f"body-cell-{name}",
+                # No whitespace around the value: pre/pre-line would show it.
+                f'<q-td :props="props" style="white-space: {white_space}">'
+                "{{ props.value }}</q-td>",
+            )
         table.add_slot(
             "body-cell-status",
             r"""

@@ -35,8 +35,14 @@ sign the satellite was still transmitting (weakly, or garbled) after the
 last good packet. (Not just the latest one in the gap: that's nearly always
 a garbled first frame of the recovery pass.)
 
+The `recovery_*` columns are the first beacon (CRC-valid, from step 3's
+`everything_decoded`) received at or after `first_good_packet_after_at`,
+within `RECOVERY_BEACON_MAX_DELAY`: its OBC/EPS uptime and reboot reasons
+show whether the outage ended with a reboot.
+
 Parquet-in-parquet-out, reading step 1's exports (`raw_observations`,
-`raw_packets`, `decoder_runs`), and cheap enough to recompute every run.
+`raw_packets`, `decoder_runs`) and step 3's `everything_decoded`, and cheap
+enough to recompute every run.
 """
 
 from __future__ import annotations
@@ -46,6 +52,7 @@ __all__ = [
     "MIN_MISSING_STATIONS",
     "MIN_OUTAGE_DURATION",
     "OUTPUT_FILENAME",
+    "RECOVERY_BEACON_MAX_DELAY",
     "RELIABLE_STATION_MIN_HIT_RATE",
     "RELIABLE_STATION_MIN_OBSERVATIONS",
     "compute_tx_outages",
@@ -58,6 +65,7 @@ from typing import TYPE_CHECKING
 import polars as pl
 from loguru import logger
 
+from cts1_mo_tools.cts1_decode_satnogs_packets import BEACON_PACKET_TYPES
 from cts1_mo_tools.cts1_processing_pipeline.step_3_decode_packets import (
     pipeline as step_3_pipeline,
 )
@@ -72,6 +80,7 @@ RELIABLE_STATION_MIN_OBSERVATIONS = 50
 RELIABLE_STATION_MIN_HIT_RATE = 0.6
 MIN_OUTAGE_DURATION = timedelta(hours=3)
 MIN_MISSING_STATIONS = 2
+RECOVERY_BEACON_MAX_DELAY = timedelta(hours=1)
 
 _UTC = pl.Datetime("us", "UTC")
 _FAR_FUTURE = datetime(9999, 1, 1, tzinfo=UTC)
@@ -86,6 +95,11 @@ _OUTPUT_SCHEMA = {
     "missed_stations": pl.List(pl.String),
     "missed_observation_ids": pl.List(pl.Int64),
     "probability_by_chance": pl.Float64,
+    "recovery_beacon_at": _UTC,
+    "recovery_obc_uptime_sec": pl.Float64,
+    "recovery_eps_uptime_sec": pl.Int64,
+    "recovery_obc_reboot_reason": pl.String,
+    "recovery_eps_reboot_reason": pl.String,
 }
 
 
@@ -129,12 +143,32 @@ def _find_outages(
     )
 
 
+def _beacons(decoded_packets: pl.LazyFrame) -> pl.DataFrame:
+    """Every CRC-valid beacon, by `received_at`, as `recovery_*` columns."""
+    return (
+        decoded_packets.filter(
+            pl.col("packet_type").is_in(BEACON_PACKET_TYPES) & pl.col("csp_crc_valid")
+        )
+        .select(
+            recovery_beacon_at="received_at",
+            recovery_obc_uptime_sec="uptime_sec",
+            recovery_eps_uptime_sec="eps_uptime_sec",
+            recovery_obc_reboot_reason="reboot_reason",
+            recovery_eps_reboot_reason="eps_reset_cause",
+        )
+        .sort("recovery_beacon_at")
+        .collect()
+    )
+
+
 def compute_tx_outages(
     observations: pl.DataFrame,
     decoder_runs: pl.DataFrame,
     packets: pl.LazyFrame,
+    decoded_packets: pl.LazyFrame,
 ) -> pl.DataFrame:
-    """Pure computation: step 1's tables -> one row per TX outage, newest
+    """Pure computation: step 1's tables (and step 3's beacons) -> one row
+    per TX outage, newest
     first. See the module docstring for the model, `_OUTPUT_SCHEMA` for the
     columns.
 
@@ -144,6 +178,9 @@ def compute_tx_outages(
         decoder_runs: `decoder_runs` (`observation_id`, `error`).
         packets: `raw_packets` (`observation_id`, `received_at`,
             `rs_correctable`, `csp_crc_valid`) -- lazy, as it's big.
+        decoded_packets: `everything_decoded` (`received_at`, `packet_type`,
+            `csp_crc_valid`, `uptime_sec`, `eps_uptime_sec`, `reboot_reason`,
+            `eps_reset_cause`) -- lazy, as it's big.
     """
     packets = packets.select(
         "observation_id", "received_at", "rs_correctable", "csp_crc_valid"
@@ -207,6 +244,14 @@ def compute_tx_outages(
                 pl.col("first_good_packet_after_at") - pl.col("last_good_packet_at")
             ).dt.total_milliseconds(),
         )
+        .sort("gap_end")
+        .join_asof(
+            _beacons(decoded_packets),
+            left_on="gap_end",  # far in the future (so no match) if ongoing
+            right_on="recovery_beacon_at",
+            strategy="forward",
+            tolerance=RECOVERY_BEACON_MAX_DELAY,
+        )
         .filter(
             pl.col("first_good_packet_after_at").is_not_null()
             | (
@@ -221,14 +266,20 @@ def compute_tx_outages(
 
 
 def run(*, data_dir: Path = DEFAULT_DATA_DIR) -> None:
-    """Recompute `tx_outages.parquet` from step 1's exports in `data_dir`."""
+    """Recompute `tx_outages.parquet` from step 1's exports and step 3's
+    output in `data_dir`."""
     paths = {
         name: data_dir / f"{name}.parquet"
-        for name in ("raw_observations", "raw_packets", "decoder_runs")
+        for name in (
+            "raw_observations",
+            "raw_packets",
+            "decoder_runs",
+            "everything_decoded",
+        )
     }
     for path in paths.values():
         if not path.exists():
-            msg = f"{path} not found -- run step_1 first."
+            msg = f"{path} not found -- run steps 1 and 3 first."
             raise FileNotFoundError(msg)
 
     result = compute_tx_outages(
@@ -238,6 +289,7 @@ def run(*, data_dir: Path = DEFAULT_DATA_DIR) -> None:
         ),
         pl.read_parquet(paths["decoder_runs"], columns=["observation_id", "error"]),
         pl.scan_parquet(paths["raw_packets"]),
+        pl.scan_parquet(paths["everything_decoded"]),
     )
     out_path = data_dir / OUTPUT_FILENAME
     tmp_path = out_path.with_suffix(".tmp")

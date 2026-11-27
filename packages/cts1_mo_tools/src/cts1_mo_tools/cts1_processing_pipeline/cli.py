@@ -203,7 +203,8 @@ class Step11Args:
 @dataclass(frozen=True, slots=True)
 class Step12Args:
     """Step 12: find the times the satellite stopped transmitting, from
-    reliable stations missing passes in raw_observations/raw_packets, into
+    reliable stations missing passes in raw_observations/raw_packets (with
+    the first beacon after each recovery from everything_decoded), into
     tx_outages."""
 
 

@@ -70,6 +70,7 @@ flowchart TD
     raw_observations --> step12["Step 12\\nDetect TX Outages"]
     raw_packets --> step12
     decoder_runs --> step12
+    everything_decoded --> step12
     step12 --> tx_outages[("tx_outages")]
     %% Invisible links holding step 7 (which only step 8 reads) up top with
     %% step 0 -- the layout otherwise pulls it down, right next to step 8.

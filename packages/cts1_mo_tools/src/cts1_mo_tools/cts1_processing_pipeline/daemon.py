@@ -159,8 +159,8 @@ def run_all_steps(  # noqa: PLR0913
     # just run one after the other here to keep the daemon single-threaded.
     # Step 7 (fetching the TLE history) doesn't depend on any other step;
     # step 8 reads the output of steps 5-7; step 9 only reads step 6's;
-    # step 10 reads step 5's, step 11 steps 3 and 10's, and step 12 only
-    # step 1's.
+    # step 10 reads step 5's, step 11 steps 3 and 10's, and step 12 steps 1
+    # and 3's.
     announce(5)
     step_5_pipeline.run(data_dir=data_dir)
     announce(6)
