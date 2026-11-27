@@ -70,6 +70,9 @@ from cts1_mo_tools.cts1_processing_pipeline.step_10_list_satellite_files import 
 from cts1_mo_tools.cts1_processing_pipeline.step_11_reassemble_downlinked_files import (
     pipeline as step_11_pipeline,
 )
+from cts1_mo_tools.cts1_processing_pipeline.step_12_detect_tx_outages import (
+    pipeline as step_12_pipeline,
+)
 
 from . import pipeline_status
 
@@ -342,6 +345,19 @@ TABLE_SPECS: tuple[TableSpec, ...] = (
         ),
         filename=step_11_pipeline.DOWNLINKED_FILES_OUTPUT_FILENAME,
         time_column="last_downlinked_at",
+        has_packet_type=False,
+    ),
+    TableSpec(
+        key="tx_outages",
+        step="Step 12 -- Detect TX Outages",
+        description=(
+            "One row per estimated time the satellite stopped transmitting: "
+            "its last good packet, last uncorrectable packet, first good "
+            "packet after, the reliable stations' passes that missed it, and "
+            "the first beacon after recovery (OBC/EPS uptime and reboot reasons)."
+        ),
+        filename=step_12_pipeline.OUTPUT_FILENAME,
+        time_column="last_good_packet_at",
         has_packet_type=False,
     ),
 )

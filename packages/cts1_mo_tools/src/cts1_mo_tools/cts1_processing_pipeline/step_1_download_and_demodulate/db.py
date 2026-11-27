@@ -339,11 +339,17 @@ def load_observations(
 
 
 def already_decoded_pairs(con: duckdb.DuckDBPyConnection) -> set[tuple[int, str]]:
-    """Return {(observation_id, decoder)} already recorded in decoder_runs."""
+    """Return {(observation_id, decoder)} already recorded in decoder_runs,
+    except those whose audio download failed (other than a 404): that's
+    usually SatNOGS being briefly unavailable, so they're retried next run
+    (the retry's row replaces the failed one -- see `record_decoder_runs`).
+    """
     if not table_exists(con, DECODER_RUNS_TABLE):
         return set()
     rows = con.execute(
         f"SELECT observation_id, decoder "  # noqa: S608
-        f"FROM {quote_ident(DECODER_RUNS_TABLE)}"
+        f"FROM {quote_ident(DECODER_RUNS_TABLE)} "
+        f"WHERE error IS NULL OR NOT (error LIKE 'audio download:%' "
+        f"AND error NOT LIKE '%404 Client Error%')"
     ).fetchall()
     return {(obs_id, decoder) for obs_id, decoder in rows}
