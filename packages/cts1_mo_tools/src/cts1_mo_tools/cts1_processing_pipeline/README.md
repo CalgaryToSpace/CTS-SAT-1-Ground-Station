@@ -20,7 +20,7 @@ web UI as two containers sharing that directory.
 
 ### Step 1: Download and demodulate.
 
-* Read the observations step 0 listed from `raw_observations` (filtered to the NORAD ID and, optionally, `--start`), skipping any observation/decoder pair already recorded in `decoder_runs`.
+* Read the observations step 0 listed from `raw_observations` (filtered to the NORAD ID and, optionally, `--start`), skipping any observation/decoder pair already recorded in `decoder_runs` -- except one whose audio download failed with anything but a 404 (usually SatNOGS being briefly unavailable), which is retried on every run until it succeeds.
 * Download and demodulate each audio file.
 * Download the raw data files produced by the flowgraphs (one file per frame).
 * Output: the same DuckDB database as step 0, which gets checkpointed into parquet files.

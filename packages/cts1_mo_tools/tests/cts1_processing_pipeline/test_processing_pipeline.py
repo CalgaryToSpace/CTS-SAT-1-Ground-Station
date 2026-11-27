@@ -462,6 +462,30 @@ def test_record_decoder_runs_rerun_clears_error(tmp_path: Path) -> None:
         assert _decoder_run_errors(con) == {"sso_rx_replay": None}
 
 
+def test_already_decoded_pairs_retries_failed_audio_downloads(tmp_path: Path) -> None:
+    with landing_db.connect(tmp_path / "test.duckdb") as con:
+        for obs_id, error in [
+            (1, None),
+            (2, "audio download: HTTPError: 503 Server Error: Backend unavailable"),
+            (3, "audio download: ConnectionError: HTTPSConnectionPool(...)"),
+            (4, "audio download: HTTPError: 404 Client Error: Not Found for url"),
+            (5, "decode: CalledProcessError: boom"),
+        ]:
+            db.record_decoder_runs(
+                con,
+                obs_id,
+                {"askew_demod_from_file": "v1"},
+                runtime_ms=5,
+                errors={"askew_demod_from_file": error} if error else None,
+            )
+        # 2 and 3 are left out, to be retried; a 404 or a decode error isn't.
+        assert db.already_decoded_pairs(con) == {
+            (1, "askew_demod_from_file"),
+            (4, "askew_demod_from_file"),
+            (5, "askew_demod_from_file"),
+        }
+
+
 def test_record_decoder_runs_adds_error_column_to_old_table(tmp_path: Path) -> None:
     with landing_db.connect(tmp_path / "test.duckdb") as con:
         con.execute(
