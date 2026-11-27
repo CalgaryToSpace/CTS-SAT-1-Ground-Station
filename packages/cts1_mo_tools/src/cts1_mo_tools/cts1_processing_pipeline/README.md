@@ -106,9 +106,15 @@ web UI as two containers sharing that directory.
 * Output: `file_downlink_time_periods.parquet` -- one row per time period a file was being downlinked (a new one after a gap over 2 min or a new header): file, attribution(s), start/end, chunks, offsets, bytes received, its header's fields, and `rejected_reason`.
 * Output: `downlinked_files.parquet` -- one row per file: size, `file_timestamp` (UTC, by the satellite's clocks: a camera image's capture time from its `epoch_ms` header or EXIF, or an MPI recording's start from its `mpi_start` header, else step 10's, from the ADCS header or MPI analysis; null if neither, or from an unset clock), `file_metadata` (a camera image's embedded metadata JSON: capture settings, time sync, ADCS state), good/missing/conflicting byte counts, `is_complete`, `sha256` vs `expected_sha256s` (`sha256_verified`), downlink counts, `segments` (JSON), `content_kind`, an image preview where one is detected (a PiCAM image converted to JPG), the reassembled bytes (`data`), and step 10's listing/mention columns. Also has a row (without bytes) for every file step 10 knows of that was never downlinked. The web UI's Files page reads this file.
 
+### Step 12: Detect TX outages
+
+* Read `raw_observations.parquet`, `raw_packets.parquet` and `decoder_runs.parquet` from step 1.
+* Logic: a station is "reliable" if at least 60% of its 50+ decoded observations got a good packet (`rs_correctable` and `csp_crc_valid`; Laplace-smoothed). A gap of 3h+ between consecutive good packets (from any station), or since the latest one (up to the end of the latest decoded observation), is a TX outage if reliable stations' observations wholly inside it all missed, from at least 2 different stations. Hit rates are then re-estimated without the outages' observations, and the outages found again. `probability_by_chance` is the product of the missed observations' station miss rates (assumes independent misses, so it's a rough guide). See `step_12_detect_tx_outages/pipeline.py`.
+* Output: `tx_outages.parquet` -- one row per outage, newest first: `last_good_packet_at`, `last_uncorrectable_packet_at` (latest packet failing Reed-Solomon after the last good one and before the first missed pass; null if none), `first_good_packet_after_at` (null while `is_ongoing`), `gap_duration_ms`, `missed_observation_count`/`missed_station_count`/`missed_stations` (`name (#station id)`)/`missed_observation_ids`, and `probability_by_chance`. The web UI's Satellite Events page shows it.
+
 ### Parquet steps
 
-* `cts1_processing_pipeline parquet_steps` runs every parquet-in-parquet-out step (2-6 and 8-11) once, in order -- e.g. to regenerate their outputs after changing one of them.
+* `cts1_processing_pipeline parquet_steps` runs every parquet-in-parquet-out step (2-6 and 8-12) once, in order -- e.g. to regenerate their outputs after changing one of them.
 * Unlike the daemon, it doesn't list, download or fetch anything (steps 0, 1 and 7), and runs once rather than continuously. Step 8 uses whatever `tle_history.parquet` is already in `--data-dir`.
 
 ### Partitioned outputs and incremental runs
@@ -120,7 +126,7 @@ web UI as two containers sharing that directory.
 
 ### Daemon
 
-* Runs steps 0-11 continuously instead of one-off: an initial backfill of `--start` (default: 24h), then a rerun of steps 0 through 11 every `--interval` minutes (default: 15).
+* Runs steps 0-12 continuously instead of one-off: an initial backfill of `--start` (default: 24h), then a rerun of steps 0 through 12 every `--interval` minutes (default: 15).
 * `--start` is resolved to an absolute time once, at startup, and every run covers the same span: step 0 only re-lists the tail of the listing windows that haven't settled yet (about the last hour of observations), and step 1 only decodes observations not already recorded in `decoder_runs`. So a SatNOGS observation that was still uploading during one run is picked up by the next.
 * With `--idle-backfill` (or `CTS1_IDLE_BACKFILL=1`), the time between runs is spent backfilling steps 0 and 1 for the history before `--start`, back to the satellite's first observations: one 12h listing window at a time, newest first, picking only windows step 0 hasn't listed or with observations step 1 hasn't decoded. A trigger request or the next scheduled run is honoured between windows. Steps 2-6 pick up the backfilled packets on the next run.
 * Runs until interrupted (Ctrl+C).

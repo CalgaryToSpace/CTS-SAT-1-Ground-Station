@@ -22,6 +22,7 @@ Usage (uv):
     uv run cts1_processing_pipeline step_9
     uv run cts1_processing_pipeline step_10
     uv run cts1_processing_pipeline step_11
+    uv run cts1_processing_pipeline step_12
     uv run cts1_processing_pipeline parquet_steps
     uv run cts1_processing_pipeline daemon
     uv run cts1_processing_pipeline daemon --start "3 days" --interval 5
@@ -69,6 +70,7 @@ from .step_10_list_satellite_files import pipeline as step_10_list_satellite_fil
 from .step_11_reassemble_downlinked_files import (
     pipeline as step_11_reassemble_downlinked_files,
 )
+from .step_12_detect_tx_outages import pipeline as step_12_detect_tx_outages
 
 DEFAULT_DATA_DIR = step_0_list_observations.DEFAULT_DATA_DIR
 
@@ -199,8 +201,15 @@ class Step11Args:
 
 
 @dataclass(frozen=True, slots=True)
+class Step12Args:
+    """Step 12: find the times the satellite stopped transmitting, from
+    reliable stations missing passes in raw_observations/raw_packets, into
+    tx_outages."""
+
+
+@dataclass(frozen=True, slots=True)
 class ParquetStepsArgs:
-    """Run every parquet-in-parquet-out step (2-6 and 8-11) once, in order --
+    """Run every parquet-in-parquet-out step (2-6 and 8-12) once, in order --
     e.g. to regenerate their outputs after changing one of them. Unlike the
     daemon, this doesn't list, download or fetch anything (steps 0, 1 and
     7): step 8 uses whatever tle_history is already in --data-dir."""
@@ -208,8 +217,8 @@ class ParquetStepsArgs:
 
 @dataclass(frozen=True, slots=True)
 class DaemonArgs:
-    """Daemon: run steps 0-11 continuously -- an initial backfill of
-    `--start`, then a full steps 0-11 rerun every `--interval` minutes."""
+    """Daemon: run steps 0-12 continuously -- an initial backfill of
+    `--start`, then a full steps 0-12 rerun every `--interval` minutes."""
 
     norad_id: Annotated[str, tyro.conf.Positional] = "69015"
     """NORAD catalog ID of the satellite (default: 69015, CTS-SAT-1)."""
@@ -264,6 +273,7 @@ Command = (
     | Annotated[Step9Args, tyro.conf.subcommand(name="step_9", prefix_name=False)]
     | Annotated[Step10Args, tyro.conf.subcommand(name="step_10", prefix_name=False)]
     | Annotated[Step11Args, tyro.conf.subcommand(name="step_11", prefix_name=False)]
+    | Annotated[Step12Args, tyro.conf.subcommand(name="step_12", prefix_name=False)]
     | Annotated[
         ParquetStepsArgs,
         tyro.conf.subcommand(name="parquet_steps", prefix_name=False),
@@ -286,6 +296,7 @@ _DATA_DIR_ONLY_STEPS: dict[
         | Step9Args
         | Step10Args
         | Step11Args
+        | Step12Args
     ],
     tuple[int, Callable[..., None]],
 ] = {
@@ -298,6 +309,7 @@ _DATA_DIR_ONLY_STEPS: dict[
     Step9Args: (9, step_9_clean_mpi_frames.run),
     Step10Args: (10, step_10_list_satellite_files.run),
     Step11Args: (11, step_11_reassemble_downlinked_files.run),
+    Step12Args: (12, step_12_detect_tx_outages.run),
 }
 
 
@@ -385,6 +397,7 @@ def main() -> None:
                 Step9Args,
                 Step10Args,
                 Step11Args,
+                Step12Args,
             ),
         ):
             _, run = _DATA_DIR_ONLY_STEPS[type(args.command)]

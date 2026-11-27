@@ -1,7 +1,8 @@
-"""The "Satellite Events" page: every OBC reboot, EPS reboot, and uplinked-
-commands event detected from beacon counters, newest first -- see
-`satellite_events` for the data layer and
-`step_4_detect_satellite_events.pipeline` for the detection logic itself.
+"""The "Satellite Events" page: every TX outage (step 12), then every OBC
+reboot, EPS reboot, and uplinked-commands event detected from beacon
+counters (step 4), newest first -- see `satellite_events` for the data layer
+and `step_4_detect_satellite_events.pipeline`/
+`step_12_detect_tx_outages.pipeline` for the detection logic itself.
 """
 
 # pyright: standard
@@ -27,6 +28,7 @@ from .layout import page_shell
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from datetime import datetime
 
 EVENT_TYPES = tuple(spec.event_type for spec in EVENT_SPECS)
 
@@ -125,6 +127,87 @@ def _events_table(events: pl.DataFrame) -> None:
         ui.label(f"{events.height:,} event(s).").classes("text-caption text-grey mt-2")
 
 
+def _fmt_time(value: datetime | None) -> str:
+    return "" if value is None else f"{value:%Y-%m-%d %H:%M:%S}"
+
+
+def _tx_outages_table(outages: pl.DataFrame) -> None:
+    with ui.card().classes("w-full"):
+        ui.label("TX Outages").classes("text-lg font-bold")
+        ui.label(
+            "Times the satellite seems to have stopped transmitting: 3h+ "
+            "without a good packet, while 2+ stations that usually hear it "
+            'listened and heard nothing. "Chance" is how likely those '
+            "misses would be if it was transmitting (assuming independent "
+            "misses, so treat it as a rough guide)."
+        ).classes("text-caption text-grey")
+
+        if outages.is_empty():
+            ui.label("No TX outages detected (or step_12 hasn't run yet).").classes(
+                "text-caption text-grey mt-2"
+            )
+            return
+
+        columns = [
+            {"name": "status", "label": "Status", "field": "status"},
+            {
+                "name": "last_good",
+                "label": "Last Good Packet (UTC)",
+                "field": "last_good",
+            },
+            {
+                "name": "last_uncorrectable",
+                "label": "Last Uncorrectable Packet (UTC)",
+                "field": "last_uncorrectable",
+            },
+            {
+                "name": "first_good_after",
+                "label": "First Good Packet After (UTC)",
+                "field": "first_good_after",
+            },
+            {"name": "duration", "label": "Duration", "field": "duration"},
+            {"name": "missed", "label": "Missed Passes", "field": "missed"},
+            {"name": "chance", "label": "Chance", "field": "chance"},
+            {"name": "stations", "label": "Stations That Missed", "field": "stations"},
+        ]
+        rows = [
+            {
+                "status": "Ongoing" if r["is_ongoing"] else "Recovered",
+                "last_good": _fmt_time(r["last_good_packet_at"]),
+                "last_uncorrectable": _fmt_time(r["last_uncorrectable_packet_at"]),
+                "first_good_after": _fmt_time(r["first_good_packet_after_at"]),
+                "duration": (
+                    f"{age_str(r['last_good_packet_at'])} so far"
+                    if r["is_ongoing"]
+                    else duration_str(r["gap_duration_ms"] / 1000)
+                ),
+                "missed": (
+                    f"{r['missed_observation_count']} "
+                    f"({r['missed_station_count']} stations)"
+                ),
+                "chance": f"{r['probability_by_chance']:.1e}",
+                "stations": ", ".join(r["missed_stations"]),
+            }
+            for r in outages.to_dicts()
+        ]
+        table = ui.table(columns=columns, rows=rows, row_key="last_good").classes(
+            "w-full"
+        )
+        table.add_slot(
+            "body-cell-status",
+            r"""
+                <q-td :props="props">
+                    <q-badge :color="props.value === 'Ongoing' ? 'negative' : 'grey'">
+                        {{ props.value }}
+                    </q-badge>
+                </q-td>
+            """,
+        )
+        ui.label(f"{outages.height:,} outage(s).").classes(
+            "text-caption text-grey mt-2"
+        )
+
+
 def _event_type_filter(
     selected_types: dict[str, bool], *, on_change: Callable[[], object]
 ) -> None:
@@ -149,6 +232,10 @@ def build_satellite_events_page(data_dir: Path) -> None:
     }
 
     @ui.refreshable
+    def tx_outages() -> None:
+        _tx_outages_table(satellite_events.load_tx_outages(data_dir))
+
+    @ui.refreshable
     def content() -> None:
         events = satellite_events.load_events(data_dir)
         enabled = [et for et, checked in selected_types.items() if checked]
@@ -159,6 +246,11 @@ def build_satellite_events_page(data_dir: Path) -> None:
     with page_shell():
         with ui.row().classes("w-full items-center justify-between"):
             ui.label("Satellite Events").classes("text-2xl font-bold")
-            ui.button("Refresh", icon="refresh", on_click=content.refresh)
+            ui.button(
+                "Refresh",
+                icon="refresh",
+                on_click=lambda: (tx_outages.refresh(), content.refresh()),
+            )
+        tx_outages()
         _event_type_filter(selected_types, on_change=content.refresh)
         content()
