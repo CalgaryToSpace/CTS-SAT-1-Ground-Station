@@ -39,92 +39,83 @@ DEFAULT_ENABLED_EVENT_TYPES = frozenset(EVENT_TYPES) - {"Uplinked Commands"}
 
 
 def _events_table(events: pl.DataFrame) -> None:
-    with ui.card().classes("w-full"):
-        ui.label("Satellite Events").classes("text-lg font-bold")
+    if events.is_empty():
         ui.label(
-            "Every OBC reboot, EPS reboot, and uplinked-commands event, "
-            "detected as the first beacon where the applicable onboard "
-            "counter drops. The event itself is estimated to have "
-            'happened "Event to Beacon ΔT" before that beacon.'
-        ).classes("text-caption text-grey")
+            "No events detected yet -- run the pipeline (step_1..step_4) first."
+        ).classes("text-caption text-grey mt-2")
+        return
 
-        if events.is_empty():
-            ui.label(
-                "No events detected yet -- run the pipeline (step_1..step_4) first."
-            ).classes("text-caption text-grey mt-2")
-            return
-
-        columns = [
-            {"name": "event_type", "label": "Event Type", "field": "event_type"},
-            {
-                "name": "detected_at",
-                "label": "Detected At (UTC)",
-                "field": "detected_at",
-            },
-            {
-                "name": "estimated_event_at",
-                "label": "Estimated Event At (UTC)",
-                "field": "estimated_event_at",
-            },
-            {
-                "name": "time_since_event_estimated",
-                "label": "Time Since Event (Estimated)",
-                "field": "time_since_event_estimated",
-            },
-            {
-                "name": "event_to_beacon_dt",
-                "label": "Event to Beacon ΔT",
-                "field": "event_to_beacon_dt",
-            },
-            {
-                "name": "obc_reboot_reason",
-                "label": "OBC Reboot Reason",
-                "field": "obc_reboot_reason",
-            },
-            {
-                "name": "eps_reboot_reason",
-                "label": "EPS Reboot Reason",
-                "field": "eps_reboot_reason",
-            },
-            {
-                "name": "detecting_packet_type",
-                "label": "Detecting Packet",
-                "field": "detecting_packet_type",
-            },
-        ]
-        rows = [
-            {
-                "event_type": r["event_type"],
-                "detected_at": f"{r['detected_at']:%Y-%m-%d %H:%M:%S}",
-                "estimated_event_at": f"{r['estimated_event_at']:%Y-%m-%d %H:%M:%S}",
-                "time_since_event_estimated": age_str(r["estimated_event_at"]),
-                "event_to_beacon_dt": duration_str(
-                    r["time_since_event_when_detected_ms"] / 1000
-                ),
-                "obc_reboot_reason": r["obc_reboot_reason"] or "",
-                "eps_reboot_reason": r["eps_reboot_reason"] or "",
-                "detecting_packet_type": r["detecting_packet_type"],
-            }
-            for r in events.to_dicts()
-        ]
-        table = ui.table(columns=columns, rows=rows, row_key="detected_at").classes(
-            "w-full"
-        )
-        table.add_slot(
-            "body-cell-event_type",
-            r"""
-                <q-td :props="props">
-                    <q-badge :color="{
-                        'OBC Reboot': 'negative',
-                        'EPS Reboot': 'warning',
-                        'Uplinked Commands': 'positive',
-                    }[props.value] || 'grey'">
-                        {{ props.value }}
-                    </q-badge>
-                </q-td>
-            """,
-        )
-        ui.label(f"{events.height:,} event(s).").classes("text-caption text-grey mt-2")
+    columns = [
+        {"name": "event_type", "label": "Event Type", "field": "event_type"},
+        {
+            "name": "detected_at",
+            "label": "Detected At (UTC)",
+            "field": "detected_at",
+        },
+        {
+            "name": "estimated_event_at",
+            "label": "Estimated Event At (UTC)",
+            "field": "estimated_event_at",
+        },
+        {
+            "name": "time_since_event_estimated",
+            "label": "Time Since Event (Estimated)",
+            "field": "time_since_event_estimated",
+        },
+        {
+            "name": "event_to_beacon_dt",
+            "label": "Event to Beacon ΔT",
+            "field": "event_to_beacon_dt",
+        },
+        {
+            "name": "obc_reboot_reason",
+            "label": "OBC Reboot Reason",
+            "field": "obc_reboot_reason",
+        },
+        {
+            "name": "eps_reboot_reason",
+            "label": "EPS Reboot Reason",
+            "field": "eps_reboot_reason",
+        },
+        {
+            "name": "detecting_packet_type",
+            "label": "Detecting Packet",
+            "field": "detecting_packet_type",
+        },
+    ]
+    rows = [
+        {
+            "event_type": r["event_type"],
+            "detected_at": f"{r['detected_at']:%Y-%m-%d %H:%M:%S}",
+            "estimated_event_at": f"{r['estimated_event_at']:%Y-%m-%d %H:%M:%S}",
+            "time_since_event_estimated": age_str(r["estimated_event_at"]),
+            "event_to_beacon_dt": duration_str(
+                r["time_since_event_when_detected_ms"] / 1000
+            ),
+            "obc_reboot_reason": r["obc_reboot_reason"] or "",
+            "eps_reboot_reason": r["eps_reboot_reason"] or "",
+            "detecting_packet_type": r["detecting_packet_type"],
+        }
+        for r in events.to_dicts()
+    ]
+    table = ui.table(columns=columns, rows=rows, row_key="detected_at").classes(
+        "w-full"
+    )
+    table.add_slot(
+        "body-cell-event_type",
+        r"""
+            <q-td :props="props">
+                <q-badge :color="{
+                    'OBC Reboot': 'negative',
+                    'EPS Reboot': 'warning',
+                    'Uplinked Commands': 'positive',
+                }[props.value] || 'grey'">
+                    {{ props.value }}
+                </q-badge>
+            </q-td>
+        """,
+    )
+    ui.label(f"{events.height:,} event(s).").classes("text-caption text-grey mt-2")
 
 
 def _fmt_time(value: datetime | None) -> str:
@@ -137,9 +128,8 @@ def _tx_outages_table(outages: pl.DataFrame) -> None:
         ui.label(
             "Times the satellite seems to have stopped transmitting: 3h+ "
             "without a good packet, while 2+ stations that usually hear it "
-            'listened and heard nothing. "Chance" is how likely those '
-            "misses would be if it was transmitting (assuming independent "
-            "misses, so treat it as a rough guide)."
+            "listened and heard nothing. Chance is the probability that the "
+            "detection is a mistake."
         ).classes("text-caption text-grey")
 
         if outages.is_empty():
@@ -168,7 +158,13 @@ def _tx_outages_table(outages: pl.DataFrame) -> None:
             {"name": "duration", "label": "Duration", "field": "duration"},
             {"name": "missed", "label": "Missed Passes", "field": "missed"},
             {"name": "chance", "label": "Chance", "field": "chance"},
-            {"name": "stations", "label": "Stations That Missed", "field": "stations"},
+            {
+                "name": "stations",
+                "label": "Stations That Missed",
+                "field": "stations",
+                "align": "left",
+                "style": "min-width: 12rem; max-width: 18rem; white-space: normal",
+            },
         ]
         rows = [
             {
@@ -211,18 +207,17 @@ def _tx_outages_table(outages: pl.DataFrame) -> None:
 def _event_type_filter(
     selected_types: dict[str, bool], *, on_change: Callable[[], object]
 ) -> None:
-    with ui.card().classes("w-full"):
-        ui.label("Event type").classes("text-lg font-bold")
-        with ui.row().classes("gap-4 flex-wrap mt-2"):
-            for event_type in EVENT_TYPES:
-                ui.checkbox(
-                    event_type,
-                    value=selected_types[event_type],
-                    on_change=lambda e, et=event_type: (
-                        selected_types.__setitem__(et, bool(e.value)),
-                        on_change(),
-                    ),
-                )
+    with ui.row().classes("gap-4 flex-wrap items-center mt-2"):
+        ui.label("Event type:").classes("text-sm font-medium")
+        for event_type in EVENT_TYPES:
+            ui.checkbox(
+                event_type,
+                value=selected_types[event_type],
+                on_change=lambda e, et=event_type: (
+                    selected_types.__setitem__(et, bool(e.value)),
+                    on_change(),
+                ),
+            )
 
 
 def build_satellite_events_page(data_dir: Path) -> None:
@@ -251,6 +246,14 @@ def build_satellite_events_page(data_dir: Path) -> None:
                 icon="refresh",
                 on_click=lambda: (tx_outages.refresh(), content.refresh()),
             )
+        with ui.card().classes("w-full"):
+            ui.label("Satellite Events").classes("text-lg font-bold")
+            ui.label(
+                "Every OBC reboot, EPS reboot, and uplinked-commands event, "
+                "detected as the first beacon where the applicable onboard "
+                "counter drops. The event itself is estimated to have "
+                'happened "Event to Beacon ΔT" before that beacon.'
+            ).classes("text-caption text-grey")
+            _event_type_filter(selected_types, on_change=content.refresh)
+            content()
         tx_outages()
-        _event_type_filter(selected_types, on_change=content.refresh)
-        content()
